@@ -6,19 +6,32 @@ namespace pe {
 
 const char* blendModeName(BlendMode mode) noexcept {
     switch (mode) {
-        case BlendMode::Normal:     return "Normal";
-        case BlendMode::Multiply:   return "Multiply";
-        case BlendMode::Screen:     return "Screen";
-        case BlendMode::Overlay:    return "Overlay";
-        case BlendMode::Darken:     return "Darken";
-        case BlendMode::Lighten:    return "Lighten";
-        case BlendMode::ColorDodge: return "Color Dodge";
-        case BlendMode::ColorBurn:  return "Color Burn";
-        case BlendMode::HardLight:  return "Hard Light";
-        case BlendMode::SoftLight:  return "Soft Light";
-        case BlendMode::Difference: return "Difference";
-        case BlendMode::Exclusion:  return "Exclusion";
-        case BlendMode::Count:      return "?";
+        case BlendMode::Normal:
+            return "Normal";
+        case BlendMode::Multiply:
+            return "Multiply";
+        case BlendMode::Screen:
+            return "Screen";
+        case BlendMode::Overlay:
+            return "Overlay";
+        case BlendMode::Darken:
+            return "Darken";
+        case BlendMode::Lighten:
+            return "Lighten";
+        case BlendMode::ColorDodge:
+            return "Color Dodge";
+        case BlendMode::ColorBurn:
+            return "Color Burn";
+        case BlendMode::HardLight:
+            return "Hard Light";
+        case BlendMode::SoftLight:
+            return "Soft Light";
+        case BlendMode::Difference:
+            return "Difference";
+        case BlendMode::Exclusion:
+            return "Exclusion";
+        case BlendMode::Count:
+            return "?";
     }
     return "?";
 }
@@ -30,12 +43,11 @@ float softLight(float b, float s) noexcept {
     if (s <= 0.5f) {
         return b - (1.0f - 2.0f * s) * b * (1.0f - b);
     }
-    const float d = (b <= 0.25f) ? ((16.0f * b - 12.0f) * b + 4.0f) * b
-                                 : std::sqrt(b);
+    const float d = (b <= 0.25f) ? ((16.0f * b - 12.0f) * b + 4.0f) * b : std::sqrt(b);
     return b + (2.0f * s - 1.0f) * (d - b);
 }
 
-} // namespace
+}  // namespace
 
 float blendChannel(BlendMode mode, float b, float s) noexcept {
     switch (mode) {
@@ -47,8 +59,7 @@ float blendChannel(BlendMode mode, float b, float s) noexcept {
             return b + s - b * s;
         case BlendMode::Overlay:
             // Overlay(b,s) == HardLight(s,b)
-            return (b <= 0.5f) ? (2.0f * b * s)
-                               : (1.0f - 2.0f * (1.0f - b) * (1.0f - s));
+            return (b <= 0.5f) ? (2.0f * b * s) : (1.0f - 2.0f * (1.0f - b) * (1.0f - s));
         case BlendMode::Darken:
             return b < s ? b : s;
         case BlendMode::Lighten:
@@ -62,8 +73,7 @@ float blendChannel(BlendMode mode, float b, float s) noexcept {
             if (s <= 0.0f) return 0.0f;
             return 1.0f - clamp01((1.0f - b) / s);
         case BlendMode::HardLight:
-            return (s <= 0.5f) ? (2.0f * b * s)
-                               : (1.0f - 2.0f * (1.0f - b) * (1.0f - s));
+            return (s <= 0.5f) ? (2.0f * b * s) : (1.0f - 2.0f * (1.0f - b) * (1.0f - s));
         case BlendMode::SoftLight:
             return softLight(b, s);
         case BlendMode::Difference:
@@ -76,8 +86,7 @@ float blendChannel(BlendMode mode, float b, float s) noexcept {
     return s;
 }
 
-Rgbaf compositeOver(BlendMode mode, Rgbaf backdrop, Rgbaf source,
-                    float opacity) noexcept {
+Rgbaf compositeOver(BlendMode mode, Rgbaf backdrop, Rgbaf source, float opacity) noexcept {
     // Apply layer opacity to the source alpha.
     const float sa = clamp01(source.a) * clamp01(opacity);
     const float ba = clamp01(backdrop.a);
@@ -112,4 +121,4 @@ Rgbaf compositeOver(BlendMode mode, Rgbaf backdrop, Rgbaf source,
     return out;
 }
 
-} // namespace pe
+}  // namespace pe

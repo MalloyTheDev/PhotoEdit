@@ -44,4 +44,4 @@ enum class BlendMode : uint8_t {
 [[nodiscard]] Rgbaf compositeOver(BlendMode mode, Rgbaf backdrop, Rgbaf source,
                                   float opacity) noexcept;
 
-} // namespace pe
+}  // namespace pe

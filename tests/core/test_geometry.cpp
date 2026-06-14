@@ -9,9 +9,9 @@ PE_TEST(rect_empty_and_contains) {
 
     Rect r{10, 20, 30, 40};
     PE_CHECK(!r.isEmpty());
-    PE_CHECK(r.contains(Point{10, 20}));     // top-left inclusive
-    PE_CHECK(r.contains(Point{39, 59}));     // bottom-right inclusive edge
-    PE_CHECK(!r.contains(Point{40, 60}));    // right/bottom exclusive
+    PE_CHECK(r.contains(Point{10, 20}));   // top-left inclusive
+    PE_CHECK(r.contains(Point{39, 59}));   // bottom-right inclusive edge
+    PE_CHECK(!r.contains(Point{40, 60}));  // right/bottom exclusive
     PE_CHECK_EQ(r.right(), 40);
     PE_CHECK_EQ(r.bottom(), 60);
 }

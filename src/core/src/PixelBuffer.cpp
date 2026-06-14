@@ -6,8 +6,7 @@ namespace pe {
 
 PixelBuffer::PixelBuffer(int width, int height, Rgba8 fill)
     : width_(width < 0 ? 0 : width), height_(height < 0 ? 0 : height) {
-    const std::size_t count =
-        static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
+    const std::size_t count = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
     pixels_.assign(count, fill);
 }
 
@@ -27,4 +26,4 @@ void PixelBuffer::fill(Rgba8 c) noexcept {
     for (auto& p : pixels_) p = c;
 }
 
-} // namespace pe
+}  // namespace pe

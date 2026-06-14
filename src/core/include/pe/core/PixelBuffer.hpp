@@ -38,4 +38,4 @@ private:
     std::vector<Rgba8> pixels_;
 };
 
-} // namespace pe
+}  // namespace pe

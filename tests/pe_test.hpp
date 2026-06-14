@@ -46,8 +46,8 @@ inline int runAll() {
             ++failedCases;
         }
     }
-    std::printf("\n%zu case(s), %d failed, %d check failure(s)\n",
-                registry().size(), failedCases, currentFailures());
+    std::printf("\n%zu case(s), %d failed, %d check failure(s)\n", registry().size(), failedCases,
+                currentFailures());
     return failedCases == 0 ? 0 : 1;
 }
 
@@ -55,38 +55,35 @@ inline bool nearly(float a, float b, float eps = 1e-4f) {
     return std::fabs(a - b) <= eps;
 }
 
-} // namespace pe_test
+}  // namespace pe_test
 
-#define PE_TEST(name)                                                        \
-    static void name();                                                      \
-    static ::pe_test::Registrar pe_reg_##name(#name, name);                  \
+#define PE_TEST(name)                                       \
+    static void name();                                     \
+    static ::pe_test::Registrar pe_reg_##name(#name, name); \
     static void name()
 
 // Variadic so that brace-init expressions containing commas
 // (e.g. PE_CHECK(Rect{0,0,-1,5}.isEmpty())) pass through as a single condition.
-#define PE_CHECK(...)                                                        \
-    do {                                                                     \
-        if (!(__VA_ARGS__)) {                                                \
-            ++::pe_test::currentFailures();                                  \
-            std::printf("    CHECK failed: %s  (%s:%d)\n", #__VA_ARGS__,     \
-                        __FILE__, __LINE__);                                 \
-        }                                                                    \
+#define PE_CHECK(...)                                                                         \
+    do {                                                                                      \
+        if (!(__VA_ARGS__)) {                                                                 \
+            ++::pe_test::currentFailures();                                                   \
+            std::printf("    CHECK failed: %s  (%s:%d)\n", #__VA_ARGS__, __FILE__, __LINE__); \
+        }                                                                                     \
     } while (0)
 
-#define PE_CHECK_EQ(a, b)                                                    \
-    do {                                                                     \
-        if (!((a) == (b))) {                                                 \
-            ++::pe_test::currentFailures();                                  \
-            std::printf("    CHECK_EQ failed: %s == %s  (%s:%d)\n", #a, #b,  \
-                        __FILE__, __LINE__);                                 \
-        }                                                                    \
+#define PE_CHECK_EQ(a, b)                                                                        \
+    do {                                                                                         \
+        if (!((a) == (b))) {                                                                     \
+            ++::pe_test::currentFailures();                                                      \
+            std::printf("    CHECK_EQ failed: %s == %s  (%s:%d)\n", #a, #b, __FILE__, __LINE__); \
+        }                                                                                        \
     } while (0)
 
-#define PE_CHECK_NEAR(a, b)                                                  \
-    do {                                                                     \
-        if (!::pe_test::nearly((a), (b))) {                                  \
-            ++::pe_test::currentFailures();                                  \
-            std::printf("    CHECK_NEAR failed: %s ~= %s  (%s:%d)\n", #a,    \
-                        #b, __FILE__, __LINE__);                             \
-        }                                                                    \
+#define PE_CHECK_NEAR(a, b)                                                                        \
+    do {                                                                                           \
+        if (!::pe_test::nearly((a), (b))) {                                                        \
+            ++::pe_test::currentFailures();                                                        \
+            std::printf("    CHECK_NEAR failed: %s ~= %s  (%s:%d)\n", #a, #b, __FILE__, __LINE__); \
+        }                                                                                          \
     } while (0)

@@ -24,7 +24,7 @@ PE_TEST(pixelbuffer_out_of_bounds_is_safe) {
     // Reads outside bounds return a transparent pixel; writes are ignored.
     PE_CHECK_EQ(buf.at(-1, 0), (Rgba8{}));
     PE_CHECK_EQ(buf.at(5, 5), (Rgba8{}));
-    buf.set(99, 99, Rgba8{255, 0, 0, 255}); // must not crash
+    buf.set(99, 99, Rgba8{255, 0, 0, 255});  // must not crash
     PE_CHECK_EQ(buf.at(0, 0), (Rgba8{}));
 }
 
