@@ -300,3 +300,45 @@ PE_TEST(adjustment_threshold_binarizes) {
     PE_CHECK_NEAR(light.g, 1.0f);
     PE_CHECK_NEAR(light.b, 1.0f);
 }
+
+PE_TEST(adjustment_selective_color_absolute_reds) {
+    // Absolute mode, add cyan ink to the Reds range: a pure-red pixel gains cyan
+    // (its red channel drops). nc = c0(0) + chroma(1)*0.5 = 0.5 -> r = 0.5.
+    SelectiveColor sc;
+    sc.setRelative(false);
+    sc.setRange(SelectiveColor::Reds, 0.5f, 0.0f, 0.0f, 0.0f);
+    Rgbaf out = applyOne(sc, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f});
+    PE_CHECK_NEAR(out.r, 0.5f);
+    PE_CHECK_NEAR(out.g, 0.0f);
+    PE_CHECK_NEAR(out.b, 0.0f);
+}
+
+PE_TEST(adjustment_selective_color_neutral_black_darkens) {
+    // Absolute mode, add black to the Neutrals range: a mid-gray darkens by kf.
+    // neutralW=1 at L=0.5, dK=0.5 -> kf=0.5 -> 0.5*0.5 = 0.25.
+    SelectiveColor sc;
+    sc.setRelative(false);
+    sc.setRange(SelectiveColor::Neutrals, 0.0f, 0.0f, 0.0f, 0.5f);
+    Rgbaf out = applyOne(sc, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});
+    PE_CHECK_NEAR(out.r, 0.25f);
+    PE_CHECK_NEAR(out.g, 0.25f);
+    PE_CHECK_NEAR(out.b, 0.25f);
+}
+
+PE_TEST(adjustment_selective_color_identity_is_noop) {
+    // All-zero ranges leave any pixel untouched.
+    SelectiveColor sc;
+    Rgbaf out = applyOne(sc, Rgbaf{0.8f, 0.2f, 0.1f, 1.0f});
+    PE_CHECK_NEAR(out.r, 0.8f);
+    PE_CHECK_NEAR(out.g, 0.2f);
+    PE_CHECK_NEAR(out.b, 0.1f);
+}
+
+PE_TEST(adjustment_selective_color_relative_no_ink_no_change) {
+    // Relative mode scales by ink present: pure red has zero cyan ink, so a cyan
+    // delta on Reds does nothing (matches Photoshop's Relative behavior).
+    SelectiveColor sc;  // relative by default
+    sc.setRange(SelectiveColor::Reds, 1.0f, 0.0f, 0.0f, 0.0f);
+    Rgbaf out = applyOne(sc, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f});
+    PE_CHECK_NEAR(out.r, 1.0f);
+}

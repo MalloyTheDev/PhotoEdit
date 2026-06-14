@@ -341,4 +341,59 @@ void Threshold::apply(std::span<Rgbaf> tile) const {
     }
 }
 
+void SelectiveColor::apply(std::span<Rgbaf> tile) const {
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        const float mx = std::max(p.r, std::max(p.g, p.b));
+        const float mn = std::min(p.r, std::min(p.g, p.b));
+        const float chroma = mx - mn;
+        const float L = (mx + mn) * 0.5f;
+        // Current ink amounts (CMY) and the black ink (min CMY) for relative scaling.
+        const float c0 = 1.0f - p.r, m0 = 1.0f - p.g, y0 = 1.0f - p.b;
+        const float k0 = std::min(c0, std::min(m0, y0));
+
+        float dC = 0.0f, dM = 0.0f, dY = 0.0f, dK = 0.0f;
+        const auto add = [&](const Cmyk& rg, float w) {
+            if (w <= 0.0f) return;
+            // Relative scales each delta by the ink already present; Absolute is flat.
+            const float fc = relative_ ? c0 : 1.0f;
+            const float fm = relative_ ? m0 : 1.0f;
+            const float fy = relative_ ? y0 : 1.0f;
+            const float fk = relative_ ? k0 : 1.0f;
+            dC += w * rg.c * fc;
+            dM += w * rg.m * fm;
+            dY += w * rg.y * fy;
+            dK += w * rg.k * fk;
+        };
+
+        // Six chromatic ranges: two adjacent hue sectors, weighted by chroma so a
+        // neutral pixel has no chromatic membership. Sector index maps directly to
+        // the Range enum (Reds..Magentas at hues 0,60,...,300).
+        if (chroma > 1e-6f) {
+            const Hsl c = rgbToHsl(p.r, p.g, p.b);
+            const float seg = wrapHue(c.h) / 60.0f;  // [0,6)
+            const int i0 = static_cast<int>(seg) % 6;
+            const int i1 = (i0 + 1) % 6;
+            const float t = seg - std::floor(seg);
+            add(ranges_[static_cast<std::size_t>(i0)], chroma * (1.0f - t));
+            add(ranges_[static_cast<std::size_t>(i1)], chroma * t);
+        }
+        // Three achromatic ranges: partitioned by lightness band (as in Color Balance).
+        const float blackW = clamp01(1.0f - L * 2.0f);
+        const float whiteW = clamp01((L - 0.5f) * 2.0f);
+        const float neutralW = clamp01(1.0f - blackW - whiteW);
+        add(ranges_[Whites], whiteW);
+        add(ranges_[Neutrals], neutralW);
+        add(ranges_[Blacks], blackW);
+
+        const float nc = clamp01(c0 + dC);
+        const float nm = clamp01(m0 + dM);
+        const float ny = clamp01(y0 + dY);
+        const float kf = 1.0f - dK;  // dK>0 darkens, dK<0 lightens; final clamp on write
+        p.r = clamp01((1.0f - nc) * kf);
+        p.g = clamp01((1.0f - nm) * kf);
+        p.b = clamp01((1.0f - ny) * kf);
+    }
+}
+
 }  // namespace pe
