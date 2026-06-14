@@ -26,9 +26,9 @@ std::unique_ptr<Document> Document::createBlank(Size canvasSize, ColorMode mode,
     // private ctor -> wrap in unique_ptr (can't use make_unique with a private ctor).
     std::unique_ptr<Document> doc(new Document(canvasSize, mode, depth, ppi));
 
-    // Seed one transparent base layer; no tiles are allocated until something is
-    // painted, so even a huge canvas costs nothing here.
-    auto base = std::make_unique<PixelLayer>("Layer 1");
+    // Seed one transparent base layer at the document's bit depth; no tiles are
+    // allocated until something is painted, so even a huge canvas costs nothing.
+    auto base = std::make_unique<PixelLayer>("Layer 1", depth);
     const LayerId baseId = base->id();
     doc->root_.addChild(std::move(base));
     doc->activeLayer_ = baseId;
