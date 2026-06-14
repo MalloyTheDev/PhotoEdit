@@ -8,7 +8,6 @@
 add_library(pe_core
     src/BlendMode.cpp
     src/PixelBuffer.cpp
-    src/TileStore.cpp
     src/Layer.cpp
     src/PixelLayer.cpp
     src/SolidColorLayer.cpp
