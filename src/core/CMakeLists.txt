@@ -17,6 +17,8 @@ add_library(pe_core
     src/Document.cpp
     src/History.cpp
     src/Commands.cpp
+    src/ViewTransform.cpp
+    src/CanvasRenderer.cpp
 )
 
 add_library(PhotoEdit::Core ALIAS pe_core)
