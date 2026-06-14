@@ -217,3 +217,53 @@ PE_TEST(composite_zero_opacity_contributes_nothing) {
     PixelBuffer img = compositeToImage(stack, kCanvas);
     PE_CHECK(near8(img.at(0, 0), kRed));
 }
+
+PE_TEST(composite_float_matches_8bit_after_quantize) {
+    // The float output, quantized to 8-bit, must equal the 8-bit output exactly:
+    // both run the identical tile logic; only the final write differs.
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed));
+    auto top = solid(kBlue);
+    top->setOpacity(0.5f);
+    stack.push_back(std::move(top));
+
+    PixelBuffer i8 = compositeToImage(stack, kCanvas);
+    PixelBufferF iF = compositeToImageF(stack, kCanvas);
+    PE_CHECK_EQ(iF.width(), kW);
+    PE_CHECK_EQ(iF.height(), kH);
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            PE_CHECK(near8(toRgba8(iF.at(x, y)), i8.at(x, y)));
+        }
+    }
+}
+
+PE_TEST(composite_float_preserves_sub_8bit_precision) {
+    // 50% blue over red composites to linear 0.5 in float — exactly 0.5, not the
+    // 8-bit-quantized 128/255 (~0.50196). This is the banding-defense the float
+    // path exists for.
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed));
+    auto top = solid(kBlue);
+    top->setOpacity(0.5f);
+    stack.push_back(std::move(top));
+    PixelBufferF iF = compositeToImageF(stack, kCanvas);
+    const Rgbaf c = iF.at(0, 0);
+    PE_CHECK_NEAR(c.r, 0.5f);  // exact float midpoint, no 8-bit rounding
+    PE_CHECK_NEAR(c.b, 0.5f);
+    PE_CHECK_NEAR(c.a, 1.0f);
+}
+
+PE_TEST(composite_float_empty_stack_transparent) {
+    std::vector<std::unique_ptr<Layer>> stack;
+    PixelBufferF iF = compositeToImageF(stack, kCanvas);
+    PE_CHECK_NEAR(iF.at(0, 0).a, 0.0f);
+    PE_CHECK_NEAR(iF.at(7, 7).r, 0.0f);
+}
+
+PE_TEST(composite_float_oversized_returns_empty) {
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed, Rect{0, 0, 100000, 100000}));
+    PixelBufferF iF = compositeToImageF(stack, Rect{0, 0, 100000, 100000});
+    PE_CHECK(iF.isEmpty());
+}

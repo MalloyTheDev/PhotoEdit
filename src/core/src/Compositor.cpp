@@ -139,15 +139,22 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
     }
 }
 
-PixelBuffer compositeToImage(std::span<const std::unique_ptr<Layer>> stack, Rect canvas) {
-    if (canvas.isEmpty()) return PixelBuffer{};
+namespace {
+// Shared whole-image flatten used by both the 8-bit and float entry points: walk
+// the canvas tile-by-tile, composite each in float, and write each visible pixel
+// through `convert` into a buffer of matching depth. Both depths therefore run the
+// exact same tile logic and cannot drift. `Pixel{}` is the buffer's clear value.
+template <class Buffer, class Pixel, class Convert>
+Buffer compositeToBuffer(std::span<const std::unique_ptr<Layer>> stack, Rect canvas,
+                         Convert convert) {
+    if (canvas.isEmpty()) return Buffer{};
 
     // Cap the eager allocation. Larger documents are rendered tile-by-tile via the
     // viewport (M2), not flattened whole. Area is computed in int64 (no overflow).
     const int64_t area = static_cast<int64_t>(canvas.width) * static_cast<int64_t>(canvas.height);
-    if (area > kMaxCompositeImagePixels) return PixelBuffer{};
+    if (area > kMaxCompositeImagePixels) return Buffer{};
 
-    PixelBuffer out(canvas.width, canvas.height, Rgba8{});
+    Buffer out(canvas.width, canvas.height, Pixel{});
     const TileSpan span = tilesForRect(canvas);
 
     std::vector<Rgbaf> acc(static_cast<std::size_t>(kTilePixels));
@@ -167,12 +174,23 @@ PixelBuffer compositeToImage(std::span<const std::unique_ptr<Layer>> stack, Rect
                     const int lx = x - tile.left();
                     const Rgbaf c = acc[static_cast<std::size_t>(ly) * kTileSize +
                                         static_cast<std::size_t>(lx)];
-                    out.set(x - canvas.left(), y - canvas.top(), toRgba8(c));
+                    out.set(x - canvas.left(), y - canvas.top(), convert(c));
                 }
             }
         }
     }
     return out;
+}
+}  // namespace
+
+PixelBuffer compositeToImage(std::span<const std::unique_ptr<Layer>> stack, Rect canvas) {
+    return compositeToBuffer<PixelBuffer, Rgba8>(stack, canvas,
+                                                 [](const Rgbaf& c) { return toRgba8(c); });
+}
+
+PixelBufferF compositeToImageF(std::span<const std::unique_ptr<Layer>> stack, Rect canvas) {
+    // No quantization: the float composite is preserved at full precision.
+    return compositeToBuffer<PixelBufferF, Rgbaf>(stack, canvas, [](const Rgbaf& c) { return c; });
 }
 
 }  // namespace pe
