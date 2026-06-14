@@ -38,4 +38,34 @@ private:
     std::vector<Rgba8> pixels_;
 };
 
+// A contiguous 32-bit-float RGBA raster — the high-precision sibling of
+// PixelBuffer. Used for the float compositor output and the 16/32-bit pixel path
+// (docs/systems/15-color-management.md): compositing already happens in float, so
+// this preserves the full result instead of quantizing to 8-bit. Straight (non-
+// premultiplied) alpha, row-major. Same interface shape as PixelBuffer.
+class PixelBufferF {
+public:
+    PixelBufferF() = default;
+    PixelBufferF(int width, int height, Rgbaf fill = Rgbaf{});
+
+    [[nodiscard]] int width() const noexcept { return width_; }
+    [[nodiscard]] int height() const noexcept { return height_; }
+    [[nodiscard]] Size size() const noexcept { return Size{width_, height_}; }
+    [[nodiscard]] Rect bounds() const noexcept { return Rect{0, 0, width_, height_}; }
+    [[nodiscard]] bool isEmpty() const noexcept { return pixels_.empty(); }
+
+    [[nodiscard]] Rgbaf at(int x, int y) const noexcept;
+    void set(int x, int y, Rgbaf c) noexcept;
+
+    void fill(Rgbaf c) noexcept;
+
+    [[nodiscard]] const Rgbaf* data() const noexcept { return pixels_.data(); }
+    [[nodiscard]] Rgbaf* data() noexcept { return pixels_.data(); }
+
+private:
+    int width_ = 0;
+    int height_ = 0;
+    std::vector<Rgbaf> pixels_;
+};
+
 }  // namespace pe

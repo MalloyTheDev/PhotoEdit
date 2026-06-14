@@ -38,4 +38,10 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
 [[nodiscard]] PixelBuffer compositeToImage(std::span<const std::unique_ptr<Layer>> stack,
                                            Rect canvas);
 
+// Like compositeToImage, but preserves the full 32-bit-float composite (no 8-bit
+// quantization) — the high-bit-depth flatten/export path (docs/systems/15). The
+// same megapixel budget applies; returns an empty buffer if the canvas exceeds it.
+[[nodiscard]] PixelBufferF compositeToImageF(std::span<const std::unique_ptr<Layer>> stack,
+                                             Rect canvas);
+
 }  // namespace pe
