@@ -38,3 +38,37 @@ target_compile_features(pe_core PUBLIC cxx_std_20)
 
 set_target_properties(pe_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
+
+# ---------------------------------------------------------------------------
+# Optional color management (lcms2). Detected gracefully: when Little-CMS 2 is
+# available the ICC color module is compiled and PHOTOEDIT_HAVE_LCMS2 is defined;
+# otherwise the engine builds without it (callers guard usage with the macro). This
+# keeps the dependency-free CI lanes green until lcms2 is provisioned on each.
+# See ADR-0004 and docs/systems/15-color-management.md.
+# ---------------------------------------------------------------------------
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(LCMS2 IMPORTED_TARGET lcms2)
+endif()
+if(NOT LCMS2_FOUND)
+    # Fallback for toolchains without pkg-config (e.g. vcpkg): plain find_*.
+    find_path(LCMS2_INCLUDE_DIR NAMES lcms2.h)
+    find_library(LCMS2_LIBRARY NAMES lcms2 liblcms2)
+    if(LCMS2_INCLUDE_DIR AND LCMS2_LIBRARY)
+        set(LCMS2_FOUND TRUE)
+    endif()
+endif()
+
+if(LCMS2_FOUND)
+    target_sources(pe_core PRIVATE src/ColorProfile.cpp)
+    target_compile_definitions(pe_core PUBLIC PHOTOEDIT_HAVE_LCMS2=1)
+    if(TARGET PkgConfig::LCMS2)
+        target_link_libraries(pe_core PUBLIC PkgConfig::LCMS2)
+    else()
+        target_include_directories(pe_core PUBLIC ${LCMS2_INCLUDE_DIR})
+        target_link_libraries(pe_core PUBLIC ${LCMS2_LIBRARY})
+    endif()
+    message(STATUS "  Color mgmt:  lcms2 ${LCMS2_VERSION}")
+else()
+    message(STATUS "  Color mgmt:  DISABLED (lcms2 not found)")
+endif()
