@@ -60,7 +60,7 @@ if(NOT LCMS2_FOUND)
 endif()
 
 if(LCMS2_FOUND)
-    target_sources(pe_core PRIVATE src/ColorProfile.cpp src/ColorTransform.cpp)
+    target_sources(pe_core PRIVATE src/ColorProfile.cpp src/ColorTransform.cpp src/ColorEngine.cpp)
     target_compile_definitions(pe_core PUBLIC PHOTOEDIT_HAVE_LCMS2=1)
     if(TARGET PkgConfig::LCMS2)
         target_link_libraries(pe_core PUBLIC PkgConfig::LCMS2)
