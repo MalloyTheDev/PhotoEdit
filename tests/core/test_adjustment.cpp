@@ -342,3 +342,24 @@ PE_TEST(adjustment_selective_color_relative_no_ink_no_change) {
     Rgbaf out = applyOne(sc, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f});
     PE_CHECK_NEAR(out.r, 1.0f);
 }
+
+PE_TEST(destructive_adjustment_on_16bit_layer) {
+    // Apply Invert destructively to a 16-bit layer: the edit lands in the 16-bit
+    // store at full precision, the 8-bit store is untouched, and undo is exact.
+    auto doc = Document::createBlank(Size{16, 16}, ColorMode::RGB, BitDepth::U16);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles16().fillRect(Rect{0, 0, 16, 16}, Rgba16{40000, 0, 0, 65535});  // off the 8-bit grid
+
+    auto cmd = applyAdjustment(*doc, base, Invert{});
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    Rgba16 px = pl->tiles16().pixel(8, 8);
+    PE_CHECK_EQ(px.r, static_cast<uint16_t>(65535 - 40000));  // 1 - 40000/65535, exact
+    PE_CHECK_EQ(px.g, static_cast<uint16_t>(65535));          // 0 -> inverted to full
+    PE_CHECK(pl->tiles().empty());                            // 8-bit store never touched
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles16().pixel(8, 8).r, static_cast<uint16_t>(40000));  // exact restore
+}

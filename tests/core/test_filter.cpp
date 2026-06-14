@@ -229,3 +229,30 @@ PE_TEST(filter_add_noise_preserves_mean) {
     const double mean = sum / 2500.0;
     PE_CHECK(mean > 0.48 && mean < 0.52);
 }
+
+PE_TEST(filter_on_16bit_layer_edits_native_store) {
+    auto doc = Document::createBlank(Size{32, 32}, ColorMode::RGB, BitDepth::U16);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles16().fillRect(Rect{0, 0, 16, 32}, Rgba16{65535, 65535, 65535, 65535});  // white left
+    pl->tiles16().fillRect(Rect{16, 0, 16, 32}, Rgba16{0, 0, 0, 65535});             // black right
+
+    auto cmd = applyFilter(*doc, base, GaussianBlurFilter(2.0f));
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    PE_CHECK(pl->tiles16().pixel(15, 16).r < 65535);  // edge blurred in the 16-bit store
+    PE_CHECK(pl->tiles16().pixel(16, 16).r > 0);
+    PE_CHECK(pl->tiles().empty());  // 8-bit store untouched
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles16().pixel(15, 16).r, static_cast<uint16_t>(65535));  // restored white
+}
+
+PE_TEST(brush_refuses_high_depth_layer_for_now) {
+    auto doc = Document::createBlank(Size{16, 16}, ColorMode::RGB, BitDepth::U16);
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts{StrokePoint{Vec2{8.0f, 8.0f}, 1.0f}};
+    // Brushing a 16-bit layer is unsupported for now and safely no-ops (nullptr).
+    PE_CHECK(paintStroke(*doc, base, BrushSettings{}, Rgbaf{1, 0, 0, 1}, pts) == nullptr);
+}
