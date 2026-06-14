@@ -23,7 +23,11 @@ enum class AdjustmentKind : uint8_t {
     GradientMap,
     Vibrance,
     ColorBalance,
-    // BlackAndWhite, SelectiveColor, ColorLookup ... later.
+    BlackAndWhite,
+    PhotoFilter,
+    Posterize,
+    Threshold,
+    // SelectiveColor, ColorLookup ... later.
 };
 
 // A baked 256-entry 1D lookup table over the [0,1] domain (exact for 8-bit input),
@@ -317,6 +321,116 @@ public:
 private:
     Rgbaf color0_, color1_;
     bool reverse_ = false;
+};
+
+// Black & White: convert to grayscale with six per-hue band multipliers (reds,
+// yellows, greens, cyans, blues, magentas) applied to each pixel's chroma. The
+// achromatic part passes through; the chromatic part is weighted by the band for
+// the pixel's hue. Bands in [-2,3] (-200%..+300%, as in Photoshop). Cross-channel.
+class BlackAndWhite final : public Adjustment {
+public:
+    enum Band { Reds = 0, Yellows, Greens, Cyans, Blues, Magentas, kBandCount };
+
+    BlackAndWhite() = default;
+
+    // Set one band's chroma multiplier; clamped to the Photoshop range [-2,3].
+    void setBand(int band, float weight) noexcept {
+        if (band < 0 || band >= kBandCount) return;
+        bands_[static_cast<std::size_t>(band)] = std::clamp(weight, -2.0f, 3.0f);
+    }
+    [[nodiscard]] float band(int b) const noexcept {
+        return (b < 0 || b >= kBandCount) ? 0.0f : bands_[static_cast<std::size_t>(b)];
+    }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override {
+        return AdjustmentKind::BlackAndWhite;
+    }
+    [[nodiscard]] std::string name() const override { return "Black & White"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<BlackAndWhite>(*this);
+    }
+
+private:
+    // Photoshop's default mix (reds .40, yellows .60, greens .40, cyans .60,
+    // blues .20, magentas .80) — the chroma multiplier per hue band.
+    std::array<float, kBandCount> bands_{0.40f, 0.60f, 0.40f, 0.60f, 0.20f, 0.80f};
+};
+
+// Photo Filter: tint the image toward a filter color (multiply blend) by a density
+// in [0,1], optionally preserving the original luminosity. Models warming/cooling
+// and custom-color filters. Cross-channel when preserving luminosity.
+class PhotoFilter final : public Adjustment {
+public:
+    // Default is the "Warming Filter (85)" color at 25% density, matching Photoshop.
+    explicit PhotoFilter(Rgbaf color = Rgbaf{236.0f / 255.0f, 138.0f / 255.0f, 0.0f, 1.0f},
+                         float density = 0.25f)
+        : color_(color), density_(clamp01(density)) {}
+    void setColor(Rgbaf c) noexcept { color_ = c; }
+    void setDensity(float d) noexcept { density_ = clamp01(d); }
+    void setPreserveLuminosity(bool on) noexcept { preserveLum_ = on; }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override {
+        return AdjustmentKind::PhotoFilter;
+    }
+    [[nodiscard]] std::string name() const override { return "Photo Filter"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<PhotoFilter>(*this);
+    }
+
+private:
+    Rgbaf color_;
+    float density_;
+    bool preserveLum_ = true;
+};
+
+// Posterize: quantize each channel to N evenly spaced levels in [2,255]. Baked to a
+// 1D LUT, so apply() is a single read-only table fetch (thread-safe). Per-channel.
+class Posterize final : public Adjustment {
+public:
+    explicit Posterize(int levels = 4) { setLevels(levels); }
+    void setLevels(int levels) {
+        levels_ = std::clamp(levels, 2, 255);
+        rebuild();
+    }
+    [[nodiscard]] int levels() const noexcept { return levels_; }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override {
+        return AdjustmentKind::Posterize;
+    }
+    [[nodiscard]] std::string name() const override { return "Posterize"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<Posterize>(*this);
+    }
+
+private:
+    void rebuild();
+
+    int levels_ = 4;
+    Lut1D lut_;
+};
+
+// Threshold: collapse each pixel to pure black or white by comparing its luminance
+// against a level in [0,1] (default 0.5). Cross-channel; produces a 1-bit look.
+class Threshold final : public Adjustment {
+public:
+    explicit Threshold(float level = 0.5f) : level_(clamp01(level)) {}
+    void setLevel(float v) noexcept { level_ = clamp01(v); }
+    [[nodiscard]] float level() const noexcept { return level_; }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override {
+        return AdjustmentKind::Threshold;
+    }
+    [[nodiscard]] std::string name() const override { return "Threshold"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<Threshold>(*this);
+    }
+
+private:
+    float level_;
 };
 
 }  // namespace pe
