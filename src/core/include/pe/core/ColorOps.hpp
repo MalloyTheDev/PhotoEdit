@@ -1,7 +1,9 @@
 #pragma once
 
+#include "pe/core/ColorEngine.hpp"
 #include "pe/core/ColorProfile.hpp"  // ColorProfileRef, RenderingIntent
 #include "pe/core/Command.hpp"
+#include "pe/core/PixelBuffer.hpp"
 
 #include <memory>
 
@@ -21,6 +23,17 @@ class Document;
 // lcms2 (PHOTOEDIT_HAVE_LCMS2). See docs/systems/15-color-management.md.
 [[nodiscard]] std::unique_ptr<Command> convertToProfile(
     Document& doc, ColorProfileRef target,
+    RenderingIntent intent = RenderingIntent::RelativeColorimetric,
+    bool blackPointCompensation = true);
+
+// The working->display leg: convert a composited working-space float image into the
+// monitor's display profile, returning an 8-bit display-ready raster. The cached
+// working->display transform comes from `engine`. If either profile is null or the
+// transform can't be built, falls back to a direct 8-bit quantization (no color
+// conversion) — so an uncolor-managed document still displays. Only built with lcms2.
+[[nodiscard]] PixelBuffer convertForDisplay(
+    const PixelBufferF& working, const ColorProfileRef& workingProfile,
+    const ColorProfileRef& displayProfile, ColorEngine& engine,
     RenderingIntent intent = RenderingIntent::RelativeColorimetric,
     bool blackPointCompensation = true);
 

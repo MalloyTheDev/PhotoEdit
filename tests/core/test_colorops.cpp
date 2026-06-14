@@ -6,11 +6,21 @@
 
 #ifdef PHOTOEDIT_HAVE_LCMS2
 
+#include <cstdlib>
 #include <memory>
 
 #include "pe/core/PixelLayer.hpp"
 
 using namespace pe;
+
+namespace {
+bool near8(Rgba8 a, Rgba8 b, int tol = 1) {
+    auto d = [](uint8_t x, uint8_t y) {
+        return std::abs(static_cast<int>(x) - static_cast<int>(y));
+    };
+    return d(a.r, b.r) <= tol && d(a.g, b.g) <= tol && d(a.b, b.b) <= tol && d(a.a, b.a) <= tol;
+}
+}  // namespace
 
 PE_TEST(assign_profile_tags_and_undoes) {
     auto doc = Document::createBlank(Size{8, 8});
@@ -72,6 +82,41 @@ PE_TEST(convert_profile_requires_source_and_target) {
     doc->history().push(
         std::make_unique<AssignProfileCommand>(ColorProfile::builtin(BuiltinSpace::sRGB)));
     PE_CHECK(convertToProfile(*doc, nullptr) == nullptr);  // no destination -> null
+}
+
+PE_TEST(display_convert_identity_when_profiles_match) {
+    ColorEngine engine;
+    auto srgb = ColorProfile::builtin(BuiltinSpace::sRGB);
+    PixelBufferF working(2, 1);
+    working.set(0, 0, Rgbaf{0.8f, 0.2f, 0.2f, 1.0f});
+    working.set(1, 0, Rgbaf{0.1f, 0.5f, 0.9f, 1.0f});
+
+    // working sRGB -> display sRGB is ~identity: equals a direct quantization.
+    PixelBuffer disp = convertForDisplay(working, srgb, srgb, engine);
+    PE_CHECK_EQ(disp.width(), 2);
+    PE_CHECK(near8(disp.at(0, 0), toRgba8(working.at(0, 0))));
+    PE_CHECK(near8(disp.at(1, 0), toRgba8(working.at(1, 0))));
+}
+
+PE_TEST(display_convert_changes_under_different_display_profile) {
+    ColorEngine engine;
+    auto srgb = ColorProfile::builtin(BuiltinSpace::sRGB);
+    auto adobe = ColorProfile::builtin(BuiltinSpace::AdobeRGB1998);
+    PixelBufferF working(1, 1);
+    working.set(0, 0, Rgbaf{0.9f, 0.1f, 0.1f, 1.0f});  // saturated red
+
+    PixelBuffer cm = convertForDisplay(working, srgb, adobe, engine);  // working->Adobe display
+    PixelBuffer direct =
+        convertForDisplay(working, nullptr, adobe, engine);  // no source -> fallback
+    PE_CHECK(!near8(cm.at(0, 0), direct.at(0, 0)));          // CM result differs from raw quantize
+    PE_CHECK(near8(direct.at(0, 0), toRgba8(working.at(0, 0))));  // fallback == direct quantize
+}
+
+PE_TEST(display_convert_empty_is_empty) {
+    ColorEngine engine;
+    auto srgb = ColorProfile::builtin(BuiltinSpace::sRGB);
+    PixelBuffer disp = convertForDisplay(PixelBufferF{}, srgb, srgb, engine);
+    PE_CHECK(disp.isEmpty());
 }
 
 #endif  // PHOTOEDIT_HAVE_LCMS2
