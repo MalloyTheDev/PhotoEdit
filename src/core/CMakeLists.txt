@@ -26,6 +26,7 @@ add_library(pe_core
     src/AdjustmentLayer.cpp
     src/Filter.cpp
     src/Histogram.cpp
+    src/AutoTone.cpp
 )
 
 add_library(PhotoEdit::Core ALIAS pe_core)
