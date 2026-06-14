@@ -168,6 +168,46 @@ PE_TEST(composite_oversized_canvas_returns_empty) {
     PE_CHECK(img.isEmpty());
 }
 
+PE_TEST(composite_clipping_confines_to_base) {
+    // A clipped red layer (full canvas) over a white base that covers only the
+    // left half shows only where the base has coverage.
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kWhite, Rect{0, 0, 4, kH}));  // base: left half
+    auto clip = solid(kRed);                            // full canvas, clipped
+    clip->setClipped(true);
+    stack.push_back(std::move(clip));
+    PixelBuffer img = compositeToImage(stack, kCanvas);
+    PE_CHECK(near8(img.at(0, 0), kRed));  // left: clipped onto base
+    PE_CHECK_EQ(img.at(6, 0).a, 0);       // right: no base coverage -> clipped out
+}
+
+PE_TEST(composite_clipping_hidden_base_hides_run) {
+    // [blue base, white base (hidden), red clipped]. The red clips to the white
+    // base; because white is hidden, the red run is hidden too (not re-clipped to
+    // blue). Result = blue.
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kBlue));
+    auto base = solid(kWhite);
+    base->setVisible(false);
+    stack.push_back(std::move(base));
+    auto clip = solid(kRed);
+    clip->setClipped(true);
+    stack.push_back(std::move(clip));
+    PixelBuffer img = compositeToImage(stack, kCanvas);
+    PE_CHECK(near8(img.at(0, 0), kBlue));  // red hidden with its base -> blue shows
+}
+
+PE_TEST(composite_clipping_without_base_is_normal) {
+    // A clipped layer with nothing below it behaves like a normal layer.
+    std::vector<std::unique_ptr<Layer>> stack;
+    auto clip = solid(kRed);
+    clip->setClipped(true);
+    stack.push_back(std::move(clip));
+    PixelBuffer img = compositeToImage(stack, kCanvas);
+    PE_CHECK(near8(img.at(0, 0), kRed));
+    PE_CHECK(near8(img.at(7, 7), kRed));
+}
+
 PE_TEST(composite_zero_opacity_contributes_nothing) {
     std::vector<std::unique_ptr<Layer>> stack;
     stack.push_back(solid(kRed));

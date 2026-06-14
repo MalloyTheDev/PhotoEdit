@@ -22,15 +22,21 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
     const std::span<Rgbaf> srcSpan(src);
     std::vector<Rgbaf> adjusted;  // lazily sized when an adjustment layer is hit
 
+    // Coverage of the most recent non-clipped (base) layer, so clipped layers above
+    // can be confined to it. baseValid is false until a base layer is seen.
+    std::vector<float> baseClipAlpha(static_cast<std::size_t>(kTilePixels), 0.0f);
+    bool baseValid = false;
+
     for (const auto& layerPtr : stack) {
         const Layer* layer = layerPtr.get();
         if (layer == nullptr) continue;
-        if (!layer->visible() || layer->opacity() <= 0.0f) continue;
+        const bool hidden = !layer->visible() || layer->opacity() <= 0.0f;
 
         // Adjustment layers transform the accumulated backdrop instead of
         // contributing pixels (the "twist" in the compositor loop). They cover the
         // whole backdrop, so they are never culled; the mask scopes where they apply.
         if (layer->isAdjustment()) {
+            if (hidden) continue;
             if (adjusted.size() < static_cast<std::size_t>(kTilePixels)) {
                 adjusted.assign(static_cast<std::size_t>(kTilePixels), Rgbaf{});
             }
@@ -66,47 +72,70 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
             continue;
         }
 
-        // Cull: a layer with no content, or content that cannot touch this tile,
-        // contributes nothing.
-        const Rect cb = layer->contentBounds();
-        if (cb.isEmpty() || !cb.intersects(tile)) continue;
+        // --- non-adjustment layers (pixel/fill/group), with clipping support ---
 
-        if (layer->kind() == LayerKind::Group) {
-            const auto* group = static_cast<const GroupLayer*>(layer);
-            std::fill(src.begin(), src.end(), Rgbaf{});
-            compositeStack(group->children(), coord, srcSpan, depth + 1);
-        } else {
-            layer->renderInto(coord, srcSpan);
-        }
-
-        // Layer mask: multiply the layer's coverage (alpha) by the mask before
-        // blending, so a gray mask makes the layer partly transparent (color
-        // unchanged), orthogonal to blend mode and opacity. Skipped entirely when
-        // there is no enabled mask or the mask is a trivial no-op.
-        const Mask* mask = layer->mask();
-        if (mask != nullptr && mask->enabled()) {
-            const bool trivial =
-                !mask->inverted() && mask->density() >= 1.0f && mask->buffer().empty();
-            if (!trivial) {
-                const int baseX = coord.col * kTileSize;
-                const int baseY = coord.row * kTileSize;
-                std::size_t i = 0;
-                for (int ly = 0; ly < kTileSize; ++ly) {
-                    for (int lx = 0; lx < kTileSize; ++lx, ++i) {
-                        src[i].a *= mask->evaluate(baseX + lx, baseY + ly);
+        // Render this layer's straight-alpha contribution into `src`, then apply its
+        // own mask. Used by both base and clipped layers.
+        const auto renderSrc = [&](const Layer* l) {
+            if (l->kind() == LayerKind::Group) {
+                const auto* group = static_cast<const GroupLayer*>(l);
+                std::fill(src.begin(), src.end(), Rgbaf{});
+                compositeStack(group->children(), coord, srcSpan, depth + 1);
+            } else {
+                l->renderInto(coord, srcSpan);
+            }
+            const Mask* mask = l->mask();
+            if (mask != nullptr && mask->enabled()) {
+                const bool trivial =
+                    !mask->inverted() && mask->density() >= 1.0f && mask->buffer().empty();
+                if (!trivial) {
+                    const int bx = coord.col * kTileSize;
+                    const int by = coord.row * kTileSize;
+                    std::size_t i = 0;
+                    for (int ly = 0; ly < kTileSize; ++ly) {
+                        for (int lx = 0; lx < kTileSize; ++lx, ++i) {
+                            src[i].a *= mask->evaluate(bx + lx, by + ly);
+                        }
                     }
                 }
             }
+        };
+
+        const auto blendSrcInto = [&](const Layer* l) {
+            const BlendMode mode = l->blendMode();
+            const float op = l->opacity() * l->fillOpacity();
+            for (std::size_t i = 0; i < src.size(); ++i)
+                acc[i] = compositeOver(mode, acc[i], src[i], op);
+        };
+
+        const Rect cb = layer->contentBounds();
+        const bool touches = !cb.isEmpty() && cb.intersects(tile);
+
+        if (layer->clipped()) {
+            // Confine a clipped layer to the base layer's coverage. A hidden or
+            // off-tile clipped layer contributes nothing (and does not affect the
+            // base for other clipped layers).
+            if (hidden || !touches) continue;
+            renderSrc(layer);
+            if (baseValid) {
+                for (std::size_t i = 0; i < src.size(); ++i) src[i].a *= baseClipAlpha[i];
+            }
+            blendSrcInto(layer);
+            continue;  // clipped layers do not become a base
         }
 
-        const BlendMode mode = layer->blendMode();
-        // With no layer effects (M1), fill opacity scales content the same way
-        // opacity does, so the effective coverage is their product. When effects
-        // arrive they will scale by opacity only; fill opacity stays content-only.
-        const float op = layer->opacity() * layer->fillOpacity();
-        for (std::size_t i = 0; i < src.size(); ++i) {
-            acc[i] = compositeOver(mode, acc[i], src[i], op);
+        // A non-clipped layer is the base for any clipped layers above it. A base
+        // that is HIDDEN or has no content on this tile records ZERO coverage, so a
+        // clipped run above it is hidden here (per the layer-system spec).
+        if (hidden || !touches) {
+            std::fill(baseClipAlpha.begin(), baseClipAlpha.end(), 0.0f);
+            baseValid = true;
+            continue;
         }
+        renderSrc(layer);
+        for (std::size_t i = 0; i < src.size(); ++i) baseClipAlpha[i] = src[i].a;
+        baseValid = true;
+        blendSrcInto(layer);
     }
 }
 
