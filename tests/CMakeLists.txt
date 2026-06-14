@@ -21,12 +21,14 @@ add_executable(pe_core_tests
     core/test_adjustment.cpp
     core/test_filter.cpp
     core/test_histogram.cpp
+    core/test_channels.cpp
     core/test_autotone.cpp
     core/test_colorspace.cpp
     core/test_colorprofile.cpp
     core/test_colortransform.cpp
     core/test_colorengine.cpp
     core/test_colorops.cpp
+    core/test_channels.cpp
 )
 
 target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)
