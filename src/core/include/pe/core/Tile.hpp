@@ -16,6 +16,9 @@ namespace pe {
 // cheap.
 inline constexpr int kTileSize = 256;
 
+// Number of pixels in one tile (kTileSize * kTileSize).
+inline constexpr int kTilePixels = kTileSize * kTileSize;
+
 // Address of a tile within a layer's tile grid (not pixel coordinates).
 struct TileCoord {
     int col = 0;

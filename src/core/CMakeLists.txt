@@ -8,6 +8,15 @@
 add_library(pe_core
     src/BlendMode.cpp
     src/PixelBuffer.cpp
+    src/TileStore.cpp
+    src/Layer.cpp
+    src/PixelLayer.cpp
+    src/SolidColorLayer.cpp
+    src/GroupLayer.cpp
+    src/Compositor.cpp
+    src/Document.cpp
+    src/History.cpp
+    src/Commands.cpp
 )
 
 add_library(PhotoEdit::Core ALIAS pe_core)
