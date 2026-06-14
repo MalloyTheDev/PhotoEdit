@@ -17,12 +17,13 @@ namespace pe {
 // overflow the stack (security hardening). 64 is far beyond any real document.
 inline constexpr int kMaxCompositeDepth = 64;
 
-// Upper bound on the pixel count compositeToImage will rasterize in one call
-// (~64 MP). The whole-image path eagerly allocates width*height*4 bytes, so this
-// caps memory and guards against overflow/DoS on very large canvases. Documents
-// larger than this must be displayed via the tile-based viewport (M2), which
-// composites only the visible/dirty tiles. compositeToImage returns an empty
-// buffer if the canvas exceeds this budget.
+// Upper bound on the pixel count the whole-image flatten will rasterize in one
+// call (~64 MP), shared by compositeToImage and compositeToImageF. The path eagerly
+// allocates the full buffer — width*height*4 bytes at 8-bit, *16 bytes for the
+// float path — so this caps memory and guards against overflow/DoS on very large
+// canvases. Documents larger than this must be displayed via the tile-based
+// viewport (M2), which composites only visible/dirty tiles. Both entry points
+// return an empty buffer if the canvas exceeds this budget.
 inline constexpr int64_t kMaxCompositeImagePixels = 64'000'000;
 
 // Composite a layer stack (bottom-to-top) for a single tile, blending each
@@ -41,6 +42,10 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
 // Like compositeToImage, but preserves the full 32-bit-float composite (no 8-bit
 // quantization) — the high-bit-depth flatten/export path (docs/systems/15). The
 // same megapixel budget applies; returns an empty buffer if the canvas exceeds it.
+// Unlike the 8-bit path (which clamps and sinks NaN via toRgba8), the float output
+// is passed through verbatim: it intentionally retains out-of-range/HDR values
+// (> 1.0) and would surface any NaN from a degenerate source, so a downstream
+// float consumer (16/32-bit export) owns any sanitization it needs.
 [[nodiscard]] PixelBufferF compositeToImageF(std::span<const std::unique_ptr<Layer>> stack,
                                              Rect canvas);
 
