@@ -160,3 +160,72 @@ PE_TEST(filter_find_edges_marks_boundary) {
     PE_CHECK(dst[2].r < 0.5f);      // last white pixel sits on the edge -> dark
     PE_CHECK_NEAR(dst[0].r, 1.0f);  // flat interior stays white
 }
+
+PE_TEST(filter_add_noise_amount_zero_is_identity) {
+    auto src = grayRow({0.2f, 0.5f, 0.8f, 0.3f});
+    std::vector<Rgbaf> dst(src.size());
+    addNoise(src, dst, 4, 1, 0.0f, false, true, 1u);
+    for (std::size_t i = 0; i < src.size(); ++i) PE_CHECK_NEAR(dst[i].r, src[i].r);
+}
+
+PE_TEST(filter_add_noise_is_deterministic) {
+    std::vector<Rgbaf> src(64, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});  // 8x8 gray
+    std::vector<Rgbaf> a(64), b(64);
+    addNoise(src, a, 8, 8, 0.3f, false, true, 42u);
+    addNoise(src, b, 8, 8, 0.3f, false, true, 42u);
+    for (std::size_t i = 0; i < 64; ++i) {
+        PE_CHECK_NEAR(a[i].r, b[i].r);
+        PE_CHECK_NEAR(a[i].g, b[i].g);
+    }
+    // A different seed gives a different field.
+    std::vector<Rgbaf> c(64);
+    addNoise(src, c, 8, 8, 0.3f, false, true, 7u);
+    bool anyDiff = false;
+    for (std::size_t i = 0; i < 64; ++i)
+        if (std::fabs(a[i].r - c[i].r) > 1e-4f) anyDiff = true;
+    PE_CHECK(anyDiff);
+}
+
+PE_TEST(filter_add_noise_stays_in_range_and_keeps_alpha) {
+    std::vector<Rgbaf> src(64, Rgbaf{0.5f, 0.5f, 0.5f, 0.7f});
+    std::vector<Rgbaf> dst(64);
+    addNoise(src, dst, 8, 8, 1.0f, false, true, 3u);  // strong noise
+    for (const Rgbaf& p : dst) {
+        PE_CHECK(p.r >= 0.0f && p.r <= 1.0f);
+        PE_CHECK(p.g >= 0.0f && p.g <= 1.0f);
+        PE_CHECK(p.b >= 0.0f && p.b <= 1.0f);
+        PE_CHECK_NEAR(p.a, 0.7f);  // alpha preserved
+    }
+}
+
+PE_TEST(filter_add_noise_monochromatic_keeps_gray) {
+    std::vector<Rgbaf> src(16, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});  // 4x4 gray
+    std::vector<Rgbaf> dst(16);
+    addNoise(src, dst, 4, 4, 0.2f, true, true, 5u);  // monochromatic
+    for (const Rgbaf& p : dst) {
+        PE_CHECK_NEAR(p.r, p.g);  // same noise added to each channel -> stays neutral
+        PE_CHECK_NEAR(p.g, p.b);
+    }
+}
+
+PE_TEST(filter_add_noise_color_channels_differ) {
+    std::vector<Rgbaf> src(16, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});
+    std::vector<Rgbaf> dst(16);
+    addNoise(src, dst, 4, 4, 0.3f, false, true, 9u);  // independent per channel
+    bool anyChannelDiff = false;
+    for (const Rgbaf& p : dst)
+        if (std::fabs(p.r - p.g) > 1e-4f) anyChannelDiff = true;
+    PE_CHECK(anyChannelDiff);
+}
+
+PE_TEST(filter_add_noise_preserves_mean) {
+    // Zero-mean Gaussian noise with light amount (little clamping) leaves the
+    // average near the original gray level.
+    std::vector<Rgbaf> src(2500, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});  // 50x50
+    std::vector<Rgbaf> dst(2500);
+    addNoise(src, dst, 50, 50, 0.1f, false, true, 123u);
+    double sum = 0.0;
+    for (const Rgbaf& p : dst) sum += p.r;
+    const double mean = sum / 2500.0;
+    PE_CHECK(mean > 0.48 && mean < 0.52);
+}
