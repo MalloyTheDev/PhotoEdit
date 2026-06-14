@@ -66,7 +66,9 @@ public:
     [[nodiscard]] float evaluate(int x, int y) const noexcept {
         float m = static_cast<float>(buffer_.value(x, y)) / 255.0f;
         if (inverted_) m = 1.0f - m;
-        return m * density_;
+        // clamp01 keeps the result valid even if density_ were ever set out of
+        // range by a future path (e.g. deserialization) that bypasses setDensity.
+        return clamp01(m * density_);
     }
 
 private:

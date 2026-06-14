@@ -50,10 +50,11 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
             if (!trivial) {
                 const int baseX = coord.col * kTileSize;
                 const int baseY = coord.row * kTileSize;
-                for (std::size_t i = 0; i < src.size(); ++i) {
-                    const int lx = static_cast<int>(i % static_cast<std::size_t>(kTileSize));
-                    const int ly = static_cast<int>(i / static_cast<std::size_t>(kTileSize));
-                    src[i].a *= mask->evaluate(baseX + lx, baseY + ly);
+                std::size_t i = 0;
+                for (int ly = 0; ly < kTileSize; ++ly) {
+                    for (int lx = 0; lx < kTileSize; ++lx, ++i) {
+                        src[i].a *= mask->evaluate(baseX + lx, baseY + ly);
+                    }
                 }
             }
         }

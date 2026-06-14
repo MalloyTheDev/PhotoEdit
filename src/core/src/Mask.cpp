@@ -8,7 +8,9 @@ namespace pe {
 
 namespace {
 // Bound per-fill iteration AND tile allocation (mirrors Selection's defenses).
+// kMaxMaskTiles is the load-bearing bound; the pixel cap is defense-in-depth.
 constexpr int64_t kMaxMaskTiles = 4096;
+constexpr int64_t kMaxMaskPixels = 64'000'000;
 constexpr int kCoordBound = 1 << 26;  // ~67M; keeps right()/bottom() in int
 
 int localIndex(int coord) noexcept {
@@ -27,7 +29,8 @@ bool rejectFill(Rect r) noexcept {
     const int64_t cols = static_cast<int64_t>(span.colEnd) - span.colBegin;
     const int64_t rows = static_cast<int64_t>(span.rowEnd) - span.rowBegin;
     if (cols <= 0 || rows <= 0) return true;
-    return cols * rows > kMaxMaskTiles;
+    if (cols * rows > kMaxMaskTiles) return true;
+    return static_cast<int64_t>(r.width) * r.height > kMaxMaskPixels;
 }
 }  // namespace
 
