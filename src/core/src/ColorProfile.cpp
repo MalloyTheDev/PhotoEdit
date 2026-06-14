@@ -15,7 +15,9 @@ std::shared_ptr<ColorProfile> ColorProfile::sRGB() {
 }
 
 std::shared_ptr<ColorProfile> ColorProfile::fromIccData(std::span<const std::byte> icc) {
-    if (icc.empty()) return nullptr;
+    // ICC bytes are untrusted (embedded in opened files); reject empty input and any
+    // size that would not fit lcms2's 32-bit length (truncation would mis-parse).
+    if (icc.empty() || icc.size() > 0xFFFFFFFFull) return nullptr;
     cmsHPROFILE p = cmsOpenProfileFromMem(icc.data(), static_cast<cmsUInt32Number>(icc.size()));
     if (p == nullptr) return nullptr;
     return std::shared_ptr<ColorProfile>(new ColorProfile(p));
