@@ -1,6 +1,6 @@
 # 05 — Adjustment Layers
 
-> Milestone: M5 · Status: Spec
+> Milestone: M5 · Status: Implemented (engine core) — see [STATUS](../STATUS.md)
 
 ## Purpose
 

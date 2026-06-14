@@ -1,6 +1,6 @@
 # 12 — Filter Engine & Smart Filters
 
-> Milestone: M5 (destructive filters + engine) · M8 (smart filters) · Status: Spec
+> Milestone: M5 (destructive filters + engine) · M8 (smart filters) · Status: Implemented (M5 engine) — see [STATUS](../STATUS.md)
 
 ## Purpose
 
