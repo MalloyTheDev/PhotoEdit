@@ -27,7 +27,8 @@ enum class AdjustmentKind : uint8_t {
     PhotoFilter,
     Posterize,
     Threshold,
-    // SelectiveColor, ColorLookup ... later.
+    SelectiveColor,
+    // ColorLookup (1D/3D LUT) ... later.
 };
 
 // A baked 256-entry 1D lookup table over the [0,1] domain (exact for 8-bit input),
@@ -437,6 +438,57 @@ public:
 
 private:
     float level_;
+};
+
+// Selective Color: per-range CMYK deltas across nine color/neutral ranges (reds,
+// yellows, greens, cyans, blues, magentas, whites, neutrals, blacks). The six
+// chromatic ranges are selected by hue (weighted by chroma); the three achromatic
+// ranges by lightness band. In Relative mode a delta scales by the ink already
+// present; in Absolute mode it is a flat shift. Each delta is in [-1,1]. The K
+// (black) delta darkens (or, when negative, lightens) the result. Cross-channel.
+class SelectiveColor final : public Adjustment {
+public:
+    enum Range {
+        Reds = 0,
+        Yellows,
+        Greens,
+        Cyans,
+        Blues,
+        Magentas,
+        Whites,
+        Neutrals,
+        Blacks,
+        kRangeCount
+    };
+    struct Cmyk {
+        float c = 0.0f, m = 0.0f, y = 0.0f, k = 0.0f;
+    };
+
+    SelectiveColor() = default;
+
+    void setRange(int range, float c, float m, float y, float k) noexcept {
+        if (range < 0 || range >= kRangeCount) return;
+        ranges_[static_cast<std::size_t>(range)] = {cl(c), cl(m), cl(y), cl(k)};
+    }
+    [[nodiscard]] Cmyk range(int r) const noexcept {
+        return (r < 0 || r >= kRangeCount) ? Cmyk{} : ranges_[static_cast<std::size_t>(r)];
+    }
+    void setRelative(bool on) noexcept { relative_ = on; }
+    [[nodiscard]] bool relative() const noexcept { return relative_; }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override {
+        return AdjustmentKind::SelectiveColor;
+    }
+    [[nodiscard]] std::string name() const override { return "Selective Color"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<SelectiveColor>(*this);
+    }
+
+private:
+    static float cl(float v) noexcept { return std::clamp(v, -1.0f, 1.0f); }
+    std::array<Cmyk, kRangeCount> ranges_{};
+    bool relative_ = true;
 };
 
 }  // namespace pe
