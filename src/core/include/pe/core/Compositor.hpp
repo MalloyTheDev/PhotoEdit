@@ -49,4 +49,11 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
 [[nodiscard]] PixelBufferF compositeToImageF(std::span<const std::unique_ptr<Layer>> stack,
                                              Rect canvas);
 
+// Like compositeToImage, but quantizes the float composite to 16-bit (round, clamp,
+// and NaN-sink via toRgba16) — the 16-bit flatten/export path (docs/systems/15).
+// The same megapixel budget applies; returns an empty buffer if the canvas exceeds
+// it. Unlike the float path, this clamps to [0,1] and is NaN-safe.
+[[nodiscard]] PixelBuffer16 compositeToImage16(std::span<const std::unique_ptr<Layer>> stack,
+                                               Rect canvas);
+
 }  // namespace pe
