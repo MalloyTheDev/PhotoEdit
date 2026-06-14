@@ -92,6 +92,11 @@ void Document::setActiveLayer(LayerId id) {
     notify(DocumentChange{DocumentChange::Kind::ActiveLayer, Rect{}, id});
 }
 
+void Document::cmdSetColorProfile(ColorProfileRef profile) {
+    profile_ = std::move(profile);
+    notify(DocumentChange{DocumentChange::Kind::Profile, Rect{}, kNoLayer});
+}
+
 void Document::notify(const DocumentChange& change) {
     // Iterate a snapshot so an observer may add/remove observers during dispatch.
     const std::vector<DocumentObserver*> snapshot = observers_;

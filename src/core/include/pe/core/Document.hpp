@@ -1,5 +1,6 @@
 #pragma once
 
+#include "pe/core/ColorProfile.hpp"
 #include "pe/core/DocumentChange.hpp"
 #include "pe/core/GroupLayer.hpp"
 #include "pe/core/History.hpp"
@@ -51,6 +52,9 @@ public:
     [[nodiscard]] int resolutionPpi() const noexcept { return resolutionPpi_; }
     [[nodiscard]] ColorMode colorMode() const noexcept { return colorMode_; }
     [[nodiscard]] BitDepth bitDepth() const noexcept { return bitDepth_; }
+    // The document's color profile (the meaning of its numbers). Null until one is
+    // assigned (untagged); set via assign/convert commands. See systems/15.
+    [[nodiscard]] const ColorProfileRef& colorProfile() const noexcept { return profile_; }
 
     // --- model (read-only; mutate via commands) ---
     [[nodiscard]] std::span<const std::unique_ptr<Layer>> topLevelLayers() const noexcept {
@@ -89,6 +93,9 @@ public:
     [[nodiscard]] std::size_t topLevelIndexOf(LayerId id) const noexcept;
     // Active layer is session state: emits a change but is not undoable.
     void setActiveLayer(LayerId id);
+    // Replace the document's color profile (assign reinterprets; convert pairs this
+    // with a pixel transform). Emits a Profile change; the command pairs forward/inverse.
+    void cmdSetColorProfile(ColorProfileRef profile);
 
 private:
     friend class History;  // History calls notify()/setDirty() after a command.
@@ -101,6 +108,7 @@ private:
     int resolutionPpi_ = 72;
     ColorMode colorMode_ = ColorMode::RGB;
     BitDepth bitDepth_ = BitDepth::U8;
+    ColorProfileRef profile_;  // null == untagged
     GroupLayer root_{"<root>"};
     LayerId activeLayer_ = kNoLayer;
     bool dirty_ = false;

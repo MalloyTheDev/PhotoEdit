@@ -133,6 +133,7 @@ void CanvasRenderer::onDocumentChanged(const Document&, const DocumentChange& ch
         case DocumentChange::Kind::Pixels:
         case DocumentChange::Kind::LayerProps:
         case DocumentChange::Kind::LayerStructure:
+        case DocumentChange::Kind::Profile:  // appearance changes -> recomposite all
             if (change.dirtyRegion.isEmpty()) {
                 invalidateAll();  // unknown extent: be safe
             } else {
