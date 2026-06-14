@@ -9,6 +9,15 @@
 
 namespace pe {
 
+// The four ICC rendering intents. Values match lcms2's INTENT_* so the wrapper can
+// pass them straight through. See docs/systems/15-color-management.md.
+enum class RenderingIntent : uint8_t {
+    Perceptual = 0,            // compress whole gamut pleasingly; photos
+    RelativeColorimetric = 1,  // map in-gamut exactly, clip out-of-gamut; default
+    Saturation = 2,            // maximise saturation; charts/graphics
+    AbsoluteColorimetric = 3,  // exact incl. white point; proofing paper white
+};
+
 // Wraps a loaded ICC profile (an lcms2 `cmsHPROFILE` under the hood). Immutable;
 // shared by ref-counted handle so many transforms/documents reuse one profile.
 // See docs/systems/15-color-management.md and ADR-0004.
