@@ -1,8 +1,12 @@
 #include "pe/core/Layer.hpp"
 
+#include "pe/core/Mask.hpp"
+
 #include <atomic>
 
 namespace pe {
+
+Layer::~Layer() = default;
 
 LayerId nextLayerId() noexcept {
     static std::atomic<LayerId> counter{1};
@@ -48,6 +52,7 @@ void Layer::copyPropsTo(Layer& dst) const {
     dst.fillOpacity_ = fillOpacity_;
     dst.blendMode_ = blendMode_;
     dst.clipped_ = clipped_;
+    dst.mask_ = mask_ ? std::make_unique<Mask>(*mask_) : nullptr;  // deep-copy the mask
     // id_ is intentionally NOT copied: a clone gets a fresh identity.
 }
 
