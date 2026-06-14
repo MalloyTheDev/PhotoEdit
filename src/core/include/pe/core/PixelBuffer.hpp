@@ -68,4 +68,34 @@ private:
     std::vector<Rgbaf> pixels_;
 };
 
+// A contiguous 16-bit RGBA raster — the high-bit-depth storage sibling of
+// PixelBuffer for 16-bit documents and 16-bit import/export (PNG48, TIFF16). The
+// compositor produces it by quantizing the float composite to 16-bit (round +
+// clamp + NaN-sink, via toRgba16), keeping ~257x the levels of the 8-bit path so
+// gradients don't band. Straight alpha, row-major. Same interface shape.
+class PixelBuffer16 {
+public:
+    PixelBuffer16() = default;
+    PixelBuffer16(int width, int height, Rgba16 fill = Rgba16{});
+
+    [[nodiscard]] int width() const noexcept { return width_; }
+    [[nodiscard]] int height() const noexcept { return height_; }
+    [[nodiscard]] Size size() const noexcept { return Size{width_, height_}; }
+    [[nodiscard]] Rect bounds() const noexcept { return Rect{0, 0, width_, height_}; }
+    [[nodiscard]] bool isEmpty() const noexcept { return pixels_.empty(); }
+
+    [[nodiscard]] Rgba16 at(int x, int y) const noexcept;
+    void set(int x, int y, Rgba16 c) noexcept;
+
+    void fill(Rgba16 c) noexcept;
+
+    [[nodiscard]] const Rgba16* data() const noexcept { return pixels_.data(); }
+    [[nodiscard]] Rgba16* data() noexcept { return pixels_.data(); }
+
+private:
+    int width_ = 0;
+    int height_ = 0;
+    std::vector<Rgba16> pixels_;
+};
+
 }  // namespace pe

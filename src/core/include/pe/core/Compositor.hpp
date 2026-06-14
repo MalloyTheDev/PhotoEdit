@@ -18,12 +18,13 @@ namespace pe {
 inline constexpr int kMaxCompositeDepth = 64;
 
 // Upper bound on the pixel count the whole-image flatten will rasterize in one
-// call (~64 MP), shared by compositeToImage and compositeToImageF. The path eagerly
-// allocates the full buffer — width*height*4 bytes at 8-bit, *16 bytes for the
-// float path — so this caps memory and guards against overflow/DoS on very large
-// canvases. Documents larger than this must be displayed via the tile-based
-// viewport (M2), which composites only visible/dirty tiles. Both entry points
-// return an empty buffer if the canvas exceeds this budget.
+// call (~64 MP), shared by compositeToImage, compositeToImage16, and
+// compositeToImageF. The path eagerly allocates the full buffer — width*height
+// times 4 bytes at 8-bit, 8 bytes at 16-bit, 16 bytes for the float path — so this
+// caps memory and guards against overflow/DoS on very large canvases. Documents
+// larger than this must be displayed via the tile-based viewport (M2), which
+// composites only visible/dirty tiles. All three entry points return an empty
+// buffer if the canvas exceeds this budget.
 inline constexpr int64_t kMaxCompositeImagePixels = 64'000'000;
 
 // Composite a layer stack (bottom-to-top) for a single tile, blending each
@@ -48,5 +49,12 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
 // float consumer (16/32-bit export) owns any sanitization it needs.
 [[nodiscard]] PixelBufferF compositeToImageF(std::span<const std::unique_ptr<Layer>> stack,
                                              Rect canvas);
+
+// Like compositeToImage, but quantizes the float composite to 16-bit (round, clamp,
+// and NaN-sink via toRgba16) — the 16-bit flatten/export path (docs/systems/15).
+// The same megapixel budget applies; returns an empty buffer if the canvas exceeds
+// it. Unlike the float path, this clamps to [0,1] and is NaN-safe.
+[[nodiscard]] PixelBuffer16 compositeToImage16(std::span<const std::unique_ptr<Layer>> stack,
+                                               Rect canvas);
 
 }  // namespace pe
