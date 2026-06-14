@@ -9,9 +9,10 @@ describe the **intended** design; this file records the **current** reality.
 > shell. The engine is built bottom-up first, so engine pieces land ahead of their
 > UI.
 
-Last updated against `main` after the M5 engine completion and the start of M6.
-Test suite: **188 headless cases, 0 failed**, built `-Werror`, run under
-ASan/UBSan, clang-format clean, on every merge (Linux core + Windows MSVC/Qt6 CI).
+Last updated against `main` after the M5 engine completion and the M6 high-bit-
+depth (8/16/32-float) pixel pipeline. Test suite: **208 headless cases, 0 failed**,
+built `-Werror`, run under ASan/UBSan, clang-format clean, on every merge (Linux
+core + Windows MSVC/Qt6 CI).
 
 ## Milestones
 
@@ -23,7 +24,7 @@ ASan/UBSan, clang-format clean, on every merge (Linux core + Windows MSVC/Qt6 CI
 | **M3** Painting & history | 🟡 | ⬜ | Brush engine (tile-delta paint commands) and the history/undo stack are implemented and tested; the full tool framework and remaining tools (eraser, bucket, gradient, …) are pending. |
 | **M4** Selections & masks | ✅ | 🟡 | Selection (marquee/coverage, boolean ops, feather) and masks (layer/clipping, density, invert) implemented and honored by the compositor; selection-tool UI and marching-ants overlay pending. |
 | **M5** Adjustments & filters | ✅ | ⬜ | **Complete in the engine** — see below. Adjustment-layer dialogs / filter-gallery UI pending. |
-| **M6** Color management | 🟡 | ⬜ | Foundation only: sRGB⇄linear transfer functions and the `Rgba16` high-bit-depth pixel type with exact conversions. lcms2/ICC and the 16/32-bit storage pipeline are next. |
+| **M6** Color management | 🟡 | ⬜ | **High-bit-depth pixel pipeline complete end-to-end** (see below): 8/16/32-float storage, rendering, flatten, and destructive editing with exact undo. sRGB⇄linear transfer functions in place. **lcms2/ICC** transforms, soft-proofing, channels, and depth-aware **brush dabs** are the remaining pieces. |
 | **M7**–**M10** | ⬜ | ⬜ | Not started (file formats, type/vector/smart objects, retouching/AI, automation/print/plugins). |
 
 ## M5 detail — adjustments, filters, analysis (engine complete)
@@ -49,6 +50,28 @@ subclasses, runnable as reversible, selection-gated commands):
   (mean, stddev, median, min/max, mode) and percentile queries.
 - `AutoTone` — Auto Contrast (luma-based) and Auto Levels (per-channel), with
   clip-fraction outlier trimming.
+
+## M6 detail — high-bit-depth pixel pipeline (complete end-to-end)
+
+8-bit, 16-bit, and 32-bit-float documents are carried at native precision through
+every engine stage; the proven 8-bit path is byte-for-byte unchanged (each step
+was audited for zero regression):
+
+- **Pixel types & conversions** — `Rgba16` with exact `8↔16↔float` conversions
+  (lossless 8→16→8); sRGB⇄linear transfer functions (`ColorSpace`).
+- **Storage** — `TileData`/`TileStore` templatized on pixel type
+  (`TileStoreT<Pixel>`), aliased so all callers are unchanged; `TileStore16`,
+  `TileStoreF`.
+- **Layers** — `PixelLayer` carries a `BitDepth` and the matching sparse store;
+  `renderInto`/`clone`/`contentBounds` dispatch on depth.
+- **Documents** — `createBlank` seeds the base layer at the chosen depth;
+  `compositeImage` / `compositeImage16` / `compositeImageF` flatten at 8/16/32f.
+- **Editing** — filters and adjustment-bakes edit at native depth with exact undo
+  (`bakePixelEdit` + a depth-generic `PixelLayer`). Brush dabs are 8-bit for now
+  and fail safe on high-depth layers (depth-aware brushing is pending).
+
+What's **not** done in M6: lcms2/ICC profiles & transforms, display conversion,
+soft-proofing, gamut warning, the channels system, and CMYK/Lab/Gray modes.
 
 ## Cross-cutting engineering invariants
 
