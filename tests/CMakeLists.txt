@@ -16,6 +16,7 @@ add_executable(pe_core_tests
     core/test_viewtransform.cpp
     core/test_canvasrenderer.cpp
     core/test_brush.cpp
+    core/test_selection.cpp
 )
 
 target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)

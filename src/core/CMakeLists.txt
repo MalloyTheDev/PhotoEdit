@@ -20,6 +20,7 @@ add_library(pe_core
     src/ViewTransform.cpp
     src/CanvasRenderer.cpp
     src/Brush.cpp
+    src/Selection.cpp
 )
 
 add_library(PhotoEdit::Core ALIAS pe_core)
