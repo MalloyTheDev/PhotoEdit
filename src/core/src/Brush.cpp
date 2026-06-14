@@ -3,6 +3,7 @@
 #include "pe/core/BlendMode.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/Selection.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -84,7 +85,8 @@ void stampDab(CoverageMap& cov, Vec2 center, float radius, float hardness, float
 
 std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const BrushSettings& in,
                                           Rgbaf color, std::span<const StrokePoint> points,
-                                          PaintOp op, std::string name) {
+                                          PaintOp op, std::string name,
+                                          const Selection* selection) {
     Layer* layer = doc.findLayer(layerId);
     if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
     if (points.empty()) return nullptr;
@@ -135,16 +137,26 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
     std::vector<PaintCommand::Delta> deltas;
     Rect dirty{};
     const float colorA = clamp01(color.a);
+    const bool gate = selection != nullptr && selection->active();
     for (const auto& [key, buf] : cov) {
         const TileCoord coord{key.first, key.second};
+        const int baseX = coord.col * kTileSize;
+        const int baseY = coord.row * kTileSize;
         std::shared_ptr<TileData> before = pl->tiles().sharedTile(coord);
         auto after = std::make_shared<TileData>();
         if (before) *after = *before;  // start from prior pixels (else transparent)
 
         bool changed = false;
         for (std::size_t idx = 0; idx < static_cast<std::size_t>(kTilePixels); ++idx) {
-            const float a = std::min(buf[idx], opacity);
+            float a = std::min(buf[idx], opacity);
             if (a <= 0.0f) continue;
+            if (gate) {
+                // Confine the stroke to the active selection (soft edges for free).
+                const int lx = static_cast<int>(idx % static_cast<std::size_t>(kTileSize));
+                const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
+                a *= selection->coverage(baseX + lx, baseY + ly);
+                if (a <= 0.0f) continue;
+            }
             const Rgbaf dst = toFloat(after->px[idx]);
             Rgbaf out;
             if (op == PaintOp::Paint) {
@@ -195,14 +207,17 @@ DocumentChange PaintCommand::undo(Document& doc) {
 
 std::unique_ptr<PaintCommand> paintStroke(Document& doc, LayerId layerId,
                                           const BrushSettings& settings, Rgbaf color,
-                                          std::span<const StrokePoint> points) {
-    return buildStroke(doc, layerId, settings, color, points, PaintOp::Paint, "Brush");
+                                          std::span<const StrokePoint> points,
+                                          const Selection* selection) {
+    return buildStroke(doc, layerId, settings, color, points, PaintOp::Paint, "Brush", selection);
 }
 
 std::unique_ptr<PaintCommand> eraseStroke(Document& doc, LayerId layerId,
                                           const BrushSettings& settings,
-                                          std::span<const StrokePoint> points) {
-    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Erase, "Eraser");
+                                          std::span<const StrokePoint> points,
+                                          const Selection* selection) {
+    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Erase, "Eraser",
+                       selection);
 }
 
 }  // namespace pe

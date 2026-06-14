@@ -17,6 +17,7 @@
 namespace pe {
 
 class Document;
+class Selection;
 
 // A sub-pixel position (brush sampling lives between pixel centers).
 struct Vec2 {
@@ -77,16 +78,20 @@ private:
 };
 
 // Build a PaintCommand depositing `points` with `settings` and `color` into the
-// pixel layer `layerId`. Returns nullptr if the layer is not a pixel layer or the
+// pixel layer `layerId`. If `selection` is non-null and active, painting is gated
+// (coverage multiplied) by it, so a brush is confined to the selected region with
+// soft edges for free. Returns nullptr if the layer is not a pixel layer or the
 // stroke deposits nothing. The command is NOT applied yet — push it to history.
 [[nodiscard]] std::unique_ptr<PaintCommand> paintStroke(Document& doc, LayerId layerId,
                                                         const BrushSettings& settings, Rgbaf color,
-                                                        std::span<const StrokePoint> points);
+                                                        std::span<const StrokePoint> points,
+                                                        const Selection* selection = nullptr);
 
 // Eraser: the same pipeline, but it reduces alpha (paints transparency) instead
 // of depositing color.
 [[nodiscard]] std::unique_ptr<PaintCommand> eraseStroke(Document& doc, LayerId layerId,
                                                         const BrushSettings& settings,
-                                                        std::span<const StrokePoint> points);
+                                                        std::span<const StrokePoint> points,
+                                                        const Selection* selection = nullptr);
 
 }  // namespace pe
