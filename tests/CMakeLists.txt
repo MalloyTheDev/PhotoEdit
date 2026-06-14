@@ -8,6 +8,11 @@ add_executable(pe_core_tests
     core/test_tile.cpp
     core/test_blend.cpp
     core/test_pixelbuffer.cpp
+    core/test_tilestore.cpp
+    core/test_layer.cpp
+    core/test_compositor.cpp
+    core/test_document.cpp
+    core/test_history.cpp
 )
 
 target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)
