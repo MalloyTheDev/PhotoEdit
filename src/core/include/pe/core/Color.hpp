@@ -24,6 +24,18 @@ struct Rgba8 {
     constexpr bool operator==(const Rgba8&) const = default;
 };
 
+// 16-bit straight (non-premultiplied) RGBA. The high-bit-depth storage format
+// (docs/15-color-management.md): defends against banding and enables HDR. Shares
+// the Rgba8/Rgbaf interface shape; conversions below are exact where possible.
+struct Rgba16 {
+    uint16_t r = 0;
+    uint16_t g = 0;
+    uint16_t b = 0;
+    uint16_t a = 0;
+
+    constexpr bool operator==(const Rgba16&) const = default;
+};
+
 // Normalized floating-point RGBA, the working format for all blending and
 // filtering math. Compositing happens in float to avoid banding/rounding.
 struct Rgbaf {
@@ -50,6 +62,40 @@ struct Rgbaf {
 
 [[nodiscard]] constexpr Rgba8 toRgba8(Rgbaf c) noexcept {
     return Rgba8{fromUnit(c.r), fromUnit(c.g), fromUnit(c.b), fromUnit(c.a)};
+}
+
+[[nodiscard]] constexpr float toUnit16(uint16_t v) noexcept {
+    return static_cast<float>(v) / 65535.0f;
+}
+
+[[nodiscard]] constexpr uint16_t fromUnit16(float v) noexcept {
+    if (v != v) return 0;  // NaN guard: static_cast<uint16_t>(NaN) is UB
+    const float s = clamp01(v) * 65535.0f + 0.5f;
+    return static_cast<uint16_t>(s);
+}
+
+[[nodiscard]] constexpr Rgbaf toFloat(Rgba16 c) noexcept {
+    return Rgbaf{toUnit16(c.r), toUnit16(c.g), toUnit16(c.b), toUnit16(c.a)};
+}
+
+[[nodiscard]] constexpr Rgba16 toRgba16(Rgbaf c) noexcept {
+    return Rgba16{fromUnit16(c.r), fromUnit16(c.g), fromUnit16(c.b), fromUnit16(c.a)};
+}
+
+// 8-bit -> 16-bit is exact bit-replication (v * 257 maps 0->0 and 255->65535 with
+// no gaps), so widening then narrowing round-trips losslessly.
+[[nodiscard]] constexpr Rgba16 to16(Rgba8 c) noexcept {
+    constexpr auto w = [](uint8_t v) { return static_cast<uint16_t>(v * 257); };
+    return Rgba16{w(c.r), w(c.g), w(c.b), w(c.a)};
+}
+
+// 16-bit -> 8-bit is rounding division by 257 (the inverse of the bit-replication
+// widening). Computed in uint32 so the +128 bias cannot overflow near full scale.
+[[nodiscard]] constexpr Rgba8 to8(Rgba16 c) noexcept {
+    constexpr auto n = [](uint16_t v) {
+        return static_cast<uint8_t>((static_cast<uint32_t>(v) + 128u) / 257u);
+    };
+    return Rgba8{n(c.r), n(c.g), n(c.b), n(c.a)};
 }
 
 // Premultiply colour by its own alpha. Premultiplied alpha is the correct space
