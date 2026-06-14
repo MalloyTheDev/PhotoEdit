@@ -20,11 +20,51 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
     // One reusable scratch buffer for this stack level; refilled per layer.
     std::vector<Rgbaf> src(static_cast<std::size_t>(kTilePixels));
     const std::span<Rgbaf> srcSpan(src);
+    std::vector<Rgbaf> adjusted;  // lazily sized when an adjustment layer is hit
 
     for (const auto& layerPtr : stack) {
         const Layer* layer = layerPtr.get();
         if (layer == nullptr) continue;
         if (!layer->visible() || layer->opacity() <= 0.0f) continue;
+
+        // Adjustment layers transform the accumulated backdrop instead of
+        // contributing pixels (the "twist" in the compositor loop). They cover the
+        // whole backdrop, so they are never culled; the mask scopes where they apply.
+        if (layer->isAdjustment()) {
+            if (adjusted.size() < static_cast<std::size_t>(kTilePixels)) {
+                adjusted.assign(static_cast<std::size_t>(kTilePixels), Rgbaf{});
+            }
+            std::copy(acc.begin(), acc.begin() + kTilePixels, adjusted.begin());
+            layer->applyTo(std::span<Rgbaf>(adjusted.data(), kTilePixels), coord);
+
+            const Mask* mask = layer->mask();
+            const bool hasMask = mask != nullptr && mask->enabled();
+            const BlendMode mode = layer->blendMode();
+            const float op = layer->opacity() * layer->fillOpacity();
+            const int baseX = coord.col * kTileSize;
+            const int baseY = coord.row * kTileSize;
+            for (std::size_t i = 0; i < static_cast<std::size_t>(kTilePixels); ++i) {
+                float t = op;
+                if (hasMask) {
+                    const int lx = static_cast<int>(i % static_cast<std::size_t>(kTileSize));
+                    const int ly = static_cast<int>(i / static_cast<std::size_t>(kTileSize));
+                    t *= mask->evaluate(baseX + lx, baseY + ly);
+                }
+                if (t <= 0.0f) continue;
+                Rgbaf& a = acc[i];
+                const Rgbaf& d = adjusted[i];
+                // Blend the adjusted color back over the backdrop via the layer's
+                // blend mode, mixed in by t (opacity x mask). This is intentionally
+                // an ALPHA-PRESERVING color lerp (not compositeOver): an adjustment
+                // modifies existing pixels' color, it never adds coverage. Exact for
+                // Normal and any opaque backdrop; per-mode parity on partially
+                // transparent backdrops is a later refinement.
+                a.r += t * (blendChannel(mode, a.r, d.r) - a.r);
+                a.g += t * (blendChannel(mode, a.g, d.g) - a.g);
+                a.b += t * (blendChannel(mode, a.b, d.b) - a.b);
+            }
+            continue;
+        }
 
         // Cull: a layer with no content, or content that cannot touch this tile,
         // contributes nothing.
