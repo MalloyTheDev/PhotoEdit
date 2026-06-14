@@ -365,8 +365,8 @@ public:
     // Default is the "Warming Filter (85)" color at 25% density, matching Photoshop.
     explicit PhotoFilter(Rgbaf color = Rgbaf{236.0f / 255.0f, 138.0f / 255.0f, 0.0f, 1.0f},
                          float density = 0.25f)
-        : color_(color), density_(clamp01(density)) {}
-    void setColor(Rgbaf c) noexcept { color_ = c; }
+        : color_(sanitizeColor(color)), density_(clamp01(density)) {}
+    void setColor(Rgbaf c) noexcept { color_ = sanitizeColor(c); }
     void setDensity(float d) noexcept { density_ = clamp01(d); }
     void setPreserveLuminosity(bool on) noexcept { preserveLum_ = on; }
 
@@ -380,6 +380,12 @@ public:
     }
 
 private:
+    // A multiply-blend filter color outside [0,1] is meaningless and a NaN channel
+    // would silently poison the tint (sunk to black on write); clamp it on the way in,
+    // matching the discipline density_ already follows.
+    static Rgbaf sanitizeColor(Rgbaf c) noexcept {
+        return Rgbaf{clamp01(c.r), clamp01(c.g), clamp01(c.b), clamp01(c.a)};
+    }
     Rgbaf color_;
     float density_;
     bool preserveLum_ = true;
