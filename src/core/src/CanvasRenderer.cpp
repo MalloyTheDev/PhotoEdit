@@ -4,11 +4,17 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <vector>
 
 namespace pe {
 
-CanvasRenderer::CanvasRenderer(Document& doc) : doc_(doc) {
+namespace {
+// A single invalidate() spanning more tiles than this drops the whole cache
+// instead of iterating (bounds invalidate cost on document-wide changes).
+constexpr int64_t kMaxInvalidateTiles = 16384;
+}  // namespace
+
+CanvasRenderer::CanvasRenderer(Document& doc)
+    : doc_(doc), scratch_(static_cast<std::size_t>(kTilePixels), Rgbaf{}) {
     doc_.addObserver(this);
 }
 
@@ -16,44 +22,86 @@ CanvasRenderer::~CanvasRenderer() {
     doc_.removeObserver(this);
 }
 
+void CanvasRenderer::setCacheBudgetTiles(std::size_t n) noexcept {
+    budgetTiles_ = n;
+    evictToBudget();
+}
+
 void CanvasRenderer::invalidate(Rect docRect) {
     if (docRect.isEmpty()) return;
     const TileSpan span = tilesForRect(docRect);
+    const int64_t cols = static_cast<int64_t>(span.colEnd) - span.colBegin;
+    const int64_t rows = static_cast<int64_t>(span.rowEnd) - span.rowBegin;
+    if (cols <= 0 || rows <= 0) return;
+    if (cols * rows > kMaxInvalidateTiles) {
+        invalidateAll();
+        return;
+    }
     for (int row = span.rowBegin; row < span.rowEnd; ++row) {
         for (int col = span.colBegin; col < span.colEnd; ++col) {
-            dirty_.insert(keyOf(TileCoord{col, row}));
+            const Key key = keyOf(TileCoord{col, row});
+            // Only track cached tiles; an absent tile recomposites on miss anyway.
+            if (index_.find(key) != index_.end()) dirty_.insert(key);
         }
     }
 }
 
 void CanvasRenderer::invalidateAll() noexcept {
-    cache_.clear();
+    lru_.clear();
+    index_.clear();
     dirty_.clear();
+}
+
+void CanvasRenderer::evictToBudget() noexcept {
+    if (budgetTiles_ == 0) return;  // unbounded
+    while (lru_.size() > budgetTiles_) {
+        const Key key = lru_.back().first;
+        index_.erase(key);
+        dirty_.erase(key);
+        lru_.pop_back();
+    }
 }
 
 const CanvasRenderer::CachedTile& CanvasRenderer::ensureTile(TileCoord c) {
     const Key key = keyOf(c);
-    auto it = cache_.find(key);
-    const bool needComposite = (it == cache_.end()) || (dirty_.find(key) != dirty_.end());
-    if (!needComposite) return it->second;
+    auto idxIt = index_.find(key);
+    const bool cached = idxIt != index_.end();
+    const bool needComposite = !cached || (dirty_.find(key) != dirty_.end());
 
-    std::vector<Rgbaf> acc(static_cast<std::size_t>(kTilePixels), Rgbaf{});
-    compositeStack(doc_.topLevelLayers(), c, acc, 0);
+    if (cached && !needComposite) {
+        lru_.splice(lru_.begin(), lru_, idxIt->second);  // touch (MRU)
+        return idxIt->second->second;
+    }
+
+    std::fill(scratch_.begin(), scratch_.end(), Rgbaf{});
+    compositeStack(doc_.topLevelLayers(), c, scratch_, 0);
 
     CachedTile tile;
     for (std::size_t i = 0; i < static_cast<std::size_t>(kTilePixels); ++i) {
-        // Display conversion is identity until color management (M6); for now the
-        // working space is sRGB/8-bit, so float -> Rgba8 is the display value.
-        tile.px[i] = toRgba8(acc[i]);
+        // Display conversion is identity until color management (M6).
+        tile.px[i] = toRgba8(scratch_[i]);
     }
     dirty_.erase(key);
     ++recompositeCount_;
-    it = cache_.insert_or_assign(key, std::move(tile)).first;
-    return it->second;
+
+    if (cached) {
+        idxIt->second->second = std::move(tile);
+        lru_.splice(lru_.begin(), lru_, idxIt->second);
+        return idxIt->second->second;
+    }
+    lru_.emplace_front(key, std::move(tile));
+    index_[key] = lru_.begin();
+    evictToBudget();  // never evicts the just-added front tile (budget >= 1)
+    return lru_.front().second;
 }
 
 PixelBuffer CanvasRenderer::renderRegion(Rect docRect) {
     if (docRect.isEmpty()) return PixelBuffer{};
+    // Bound both total pixels and per-dimension extent (a thin, enormous rect
+    // would pass an area cap yet iterate a huge tile column).
+    if (docRect.width > kMaxCanvasDimension || docRect.height > kMaxCanvasDimension) {
+        return PixelBuffer{};
+    }
     const int64_t area = static_cast<int64_t>(docRect.width) * static_cast<int64_t>(docRect.height);
     if (area > kMaxCompositeImagePixels) return PixelBuffer{};
 
@@ -62,9 +110,10 @@ PixelBuffer CanvasRenderer::renderRegion(Rect docRect) {
     for (int row = span.rowBegin; row < span.rowEnd; ++row) {
         for (int col = span.colBegin; col < span.colEnd; ++col) {
             const TileCoord coord{col, row};
-            const CachedTile& tile = ensureTile(coord);
+            const CachedTile& tile = ensureTile(coord);  // ref valid until next call
             const Rect tb = tileBounds(coord);
             const Rect vis = tb.intersected(docRect);
+            if (vis.isEmpty()) continue;
             for (int y = vis.top(); y < vis.bottom(); ++y) {
                 const int ly = y - tb.top();
                 for (int x = vis.left(); x < vis.right(); ++x) {
@@ -85,8 +134,7 @@ void CanvasRenderer::onDocumentChanged(const Document&, const DocumentChange& ch
         case DocumentChange::Kind::LayerProps:
         case DocumentChange::Kind::LayerStructure:
             if (change.dirtyRegion.isEmpty()) {
-                // Unknown extent (e.g. an empty layer added/removed): be safe.
-                invalidateAll();
+                invalidateAll();  // unknown extent: be safe
             } else {
                 invalidate(change.dirtyRegion);
             }

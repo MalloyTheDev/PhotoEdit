@@ -93,6 +93,26 @@ PE_TEST(view_visible_doc_rect) {
     PE_CHECK_EQ(v.visibleDocRect(Size{800, 600}), (Rect{0, 0, 400, 300}));
 }
 
+PE_TEST(view_setters_reject_nonfinite) {
+    ViewTransform v;
+    v.setZoom(2.0);
+    v.setZoom(std::nan(""));  // ignored
+    PE_CHECK(nd(v.zoom(), 2.0));
+    v.setRotation(0.5);
+    v.setRotation(INFINITY);  // ignored
+    PE_CHECK(nd(v.rotation(), 0.5));
+}
+
+PE_TEST(view_visible_rect_extreme_no_overflow) {
+    // Extreme zoom-out + far pan must not overflow the int casts (UBSan guards
+    // the actual UB; here we just assert a valid, non-degenerate rect comes back).
+    ViewTransform v;
+    v.setZoom(kMinZoom);
+    v.setFocus(PointD{250000, 250000}, PointD{0, 0});
+    Rect r = v.visibleDocRect(Size{8000, 8000});
+    PE_CHECK(!r.isEmpty());
+}
+
 PE_TEST(view_pan) {
     ViewTransform v;
     v.panByView(100, 0);  // move pinned doc-origin 100px right on screen

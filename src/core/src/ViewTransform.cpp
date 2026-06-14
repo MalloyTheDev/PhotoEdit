@@ -25,7 +25,10 @@ Affine2 Affine2::operator*(const Affine2& o) const noexcept {
 
 Affine2 Affine2::inverse() const noexcept {
     const double det = a * d - c * b;
-    if (det == 0.0) return Affine2::identity();  // degenerate; caller shouldn't hit this
+    // Use an epsilon, not == 0: a near-singular matrix would otherwise yield
+    // huge/Inf entries that become UB when cast to int downstream. Reusable type,
+    // so guard defensively even though the view transform is never singular.
+    if (std::abs(det) < 1e-12) return Affine2::identity();
     const double inv = 1.0 / det;
     const double ia = d * inv;
     const double ib = -b * inv;
@@ -35,7 +38,22 @@ Affine2 Affine2::inverse() const noexcept {
 }
 
 void ViewTransform::setZoom(double z) noexcept {
+    if (!std::isfinite(z)) return;
     zoom_ = std::clamp(z, kMinZoom, kMaxZoom);
+}
+
+void ViewTransform::setRotation(double rad) noexcept {
+    if (!std::isfinite(rad)) return;
+    rotation_ = rad;
+}
+
+void ViewTransform::setFocus(PointD docPx, PointD viewPx) noexcept {
+    if (!std::isfinite(docPx.x) || !std::isfinite(docPx.y) || !std::isfinite(viewPx.x) ||
+        !std::isfinite(viewPx.y)) {
+        return;
+    }
+    focusDoc_ = docPx;
+    focusView_ = viewPx;
 }
 
 Affine2 ViewTransform::docToView() const noexcept {
@@ -61,10 +79,19 @@ Rect ViewTransform::visibleDocRect(Size vp) const noexcept {
         minY = std::min(minY, p.y);
         maxY = std::max(maxY, p.y);
     }
-    const int x0 = static_cast<int>(std::floor(minX));
-    const int y0 = static_cast<int>(std::floor(minY));
-    const int x1 = static_cast<int>(std::ceil(maxX));
-    const int y1 = static_cast<int>(std::ceil(maxY));
+    // Clamp before the int cast: extreme zoom-out + far pan can push corners far
+    // beyond INT range, where static_cast<int> is UB. A generous finite bound
+    // keeps the result a valid Rect (its width = x1-x0 stays within int).
+    const auto toInt = [](double v) -> int {
+        constexpr double lo = -(1 << 29);  // ~ -5.4e8, well inside int
+        constexpr double hi = (1 << 29);
+        if (std::isnan(v)) return 0;
+        return static_cast<int>(std::clamp(v, lo, hi));
+    };
+    const int x0 = toInt(std::floor(minX));
+    const int y0 = toInt(std::floor(minY));
+    const int x1 = toInt(std::ceil(maxX));
+    const int y1 = toInt(std::ceil(maxY));
     return Rect{x0, y0, x1 - x0, y1 - y0};
 }
 

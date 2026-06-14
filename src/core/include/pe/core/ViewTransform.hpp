@@ -48,12 +48,12 @@ public:
     [[nodiscard]] PointD focusDoc() const noexcept { return focusDoc_; }
     [[nodiscard]] PointD focusView() const noexcept { return focusView_; }
 
+    // All setters reject non-finite (NaN/Inf) input and leave the field unchanged,
+    // since these are reachable from UI/tablet input and would otherwise poison the
+    // transform and the int casts in visibleDocRect.
     void setZoom(double z) noexcept;
-    void setRotation(double rad) noexcept { rotation_ = rad; }
-    void setFocus(PointD docPx, PointD viewPx) noexcept {
-        focusDoc_ = docPx;
-        focusView_ = viewPx;
-    }
+    void setRotation(double rad) noexcept;
+    void setFocus(PointD docPx, PointD viewPx) noexcept;
 
     [[nodiscard]] Affine2 docToView() const noexcept;
     [[nodiscard]] Affine2 viewToDoc() const noexcept { return docToView().inverse(); }

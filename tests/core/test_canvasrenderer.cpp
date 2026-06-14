@@ -74,6 +74,28 @@ PE_TEST(renderer_partial_invalidate_recomposites_one_tile) {
     PE_CHECK_EQ(r.recompositeCount() - before, static_cast<uint64_t>(1));
 }
 
+PE_TEST(renderer_lru_eviction_bounds_cache) {
+    // 1024x1024 == a 4x4 (16) tile grid; with a 4-tile budget the cache stays
+    // bounded even though all 16 are composited.
+    auto doc = Document::createBlank(Size{1024, 1024});
+    CanvasRenderer r(*doc);
+    r.setCacheBudgetTiles(4);
+    (void)r.renderRegion(doc->canvasBounds());
+    PE_CHECK_EQ(r.recompositeCount(), static_cast<uint64_t>(16));
+    PE_CHECK(r.cachedTileCount() <= static_cast<std::size_t>(4));
+}
+
+PE_TEST(renderer_huge_invalidate_drops_cache) {
+    auto doc = Document::createBlank(Size{512, 512});
+    CanvasRenderer r(*doc);
+    (void)r.renderRegion(doc->canvasBounds());
+    PE_CHECK(r.cachedTileCount() > static_cast<std::size_t>(0));
+    // A document-spanning invalidate exceeds the per-call tile threshold and
+    // drops the whole cache rather than growing the dirty set unbounded.
+    r.invalidate(Rect{0, 0, 300000, 300000});
+    PE_CHECK_EQ(r.cachedTileCount(), static_cast<std::size_t>(0));
+}
+
 PE_TEST(renderer_undo_restores_pixels) {
     auto doc = Document::createBlank(Size{256, 256});  // single tile
     CanvasRenderer r(*doc);
