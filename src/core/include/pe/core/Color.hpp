@@ -98,6 +98,42 @@ struct Rgbaf {
     return Rgba8{n(c.r), n(c.g), n(c.b), n(c.a)};
 }
 
+// Identity overload completing the toFloat family: the float store IS the working
+// format, so reading it needs no conversion (preserves out-of-range/HDR values).
+[[nodiscard]] constexpr Rgbaf toFloat(Rgbaf c) noexcept {
+    return c;
+}
+
+// Convert a working-float pixel to a storage pixel type. Integer targets round,
+// clamp to [0,1], and sink NaN; the float target is the identity (keeps HDR /
+// out-of-range values). The inverse direction is the toFloat overloads above.
+template <class Pixel>
+[[nodiscard]] Pixel fromFloat(Rgbaf c) noexcept;
+template <>
+[[nodiscard]] constexpr Rgba8 fromFloat<Rgba8>(Rgbaf c) noexcept {
+    return toRgba8(c);
+}
+template <>
+[[nodiscard]] constexpr Rgba16 fromFloat<Rgba16>(Rgbaf c) noexcept {
+    return toRgba16(c);
+}
+template <>
+[[nodiscard]] constexpr Rgbaf fromFloat<Rgbaf>(Rgbaf c) noexcept {
+    return c;
+}
+
+// Bit-exact pixel equality for "did this pixel change" delta detection. Rgba8 and
+// Rgba16 use their defaulted ==; Rgbaf is compared componentwise (it has no ==).
+[[nodiscard]] constexpr bool pixelEqual(Rgba8 a, Rgba8 b) noexcept {
+    return a == b;
+}
+[[nodiscard]] constexpr bool pixelEqual(Rgba16 a, Rgba16 b) noexcept {
+    return a == b;
+}
+[[nodiscard]] constexpr bool pixelEqual(const Rgbaf& a, const Rgbaf& b) noexcept {
+    return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+}
+
 // Premultiply colour by its own alpha. Premultiplied alpha is the correct space
 // for compositing many layers; see docs/04-blend-modes via systems doc.
 [[nodiscard]] constexpr Rgbaf premultiply(Rgbaf c) noexcept {

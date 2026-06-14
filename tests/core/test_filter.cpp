@@ -249,10 +249,26 @@ PE_TEST(filter_on_16bit_layer_edits_native_store) {
     PE_CHECK_EQ(pl->tiles16().pixel(15, 16).r, static_cast<uint16_t>(65535));  // restored white
 }
 
-PE_TEST(brush_refuses_high_depth_layer_for_now) {
+PE_TEST(brush_paints_16bit_layer_native_with_undo) {
+    // A brush stroke on a 16-bit layer deposits into the 16-bit store at full
+    // precision, leaves the 8-bit store untouched, and undoes exactly.
     auto doc = Document::createBlank(Size{16, 16}, ColorMode::RGB, BitDepth::U16);
     const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
     std::vector<StrokePoint> pts{StrokePoint{Vec2{8.0f, 8.0f}, 1.0f}};
-    // Brushing a 16-bit layer is unsupported for now and safely no-ops (nullptr).
-    PE_CHECK(paintStroke(*doc, base, BrushSettings{}, Rgbaf{1, 0, 0, 1}, pts) == nullptr);
+    BrushSettings s;
+    s.diameter = 6.0f;
+    s.hardness = 1.0f;
+
+    auto cmd = paintStroke(*doc, base, s, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f}, pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    const Rgba16 center = pl->tiles16().pixel(8, 8);
+    PE_CHECK_EQ(center.r, static_cast<uint16_t>(65535));  // opaque red at full 16-bit
+    PE_CHECK_EQ(center.a, static_cast<uint16_t>(65535));
+    PE_CHECK(pl->tiles().empty());  // 8-bit store never touched
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles16().pixel(8, 8), (Rgba16{0, 0, 0, 0}));  // back to transparent
 }
