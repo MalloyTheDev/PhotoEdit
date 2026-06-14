@@ -5,6 +5,7 @@
 #include "pe/core/History.hpp"
 #include "pe/core/Layer.hpp"
 #include "pe/core/PixelBuffer.hpp"
+#include "pe/core/PixelFormat.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -14,8 +15,7 @@
 
 namespace pe {
 
-enum class ColorMode : uint8_t { RGB = 0, CMYK, Gray, Lab, Indexed, Bitmap };
-enum class BitDepth : uint8_t { U8 = 8, U16 = 16, F32 = 32 };
+// ColorMode and BitDepth now live in PixelFormat.hpp (shared with layers).
 
 // Largest canvas dimension we accept (matches common pro tooling). Guards against
 // overflow and absurd allocations; pixels are never allocated eagerly regardless.
