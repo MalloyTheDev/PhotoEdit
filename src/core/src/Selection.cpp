@@ -94,6 +94,11 @@ void Selection::selectNone() noexcept {
 
 PixelBuffer Selection::toMask(Rect bounds) const {
     if (bounds.isEmpty()) return PixelBuffer{};
+    // Cap the eager allocation (same budget as the fill paths) so an oversized
+    // bounds can't exhaust memory; the caller normally passes the canvas/doc rect.
+    if (static_cast<int64_t>(bounds.width) * bounds.height > kMaxSelectionPixels) {
+        return PixelBuffer{};
+    }
     PixelBuffer out(bounds.width, bounds.height);
     for (int y = 0; y < bounds.height; ++y) {
         for (int x = 0; x < bounds.width; ++x) {
