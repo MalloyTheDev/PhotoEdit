@@ -66,6 +66,41 @@ PE_TEST(selection_invert) {
     PE_CHECK_NEAR(s.coverage(15, 15), 1.0f);  // was not -> now selected
 }
 
+PE_TEST(selection_thin_huge_rect_rejected) {
+    // A thin but enormous rect spans too many tiles; it must be rejected (no
+    // ~16 GB allocation), leaving the selection inactive (all editable).
+    Selection s;
+    s.selectRect(Rect{0, 0, 64'000'000, 1});
+    PE_CHECK(!s.active());
+    PE_CHECK_NEAR(s.coverage(5, 5), 1.0f);
+    PE_CHECK_EQ(s.tileCount(), static_cast<std::size_t>(0));
+}
+
+PE_TEST(selection_addrect_empty_does_not_lock) {
+    // addRect of an empty/invalid rect must not flip an inactive selection to
+    // "active but empty" (which would block all editing).
+    Selection s;
+    s.addRect(Rect{});  // empty
+    PE_CHECK(!s.active());
+    PE_CHECK_NEAR(s.coverage(5, 5), 1.0f);  // still fully editable
+
+    s.selectRect(Rect{0, 0, 10, 10});
+    s.addRect(Rect{});  // no-op on an active selection
+    PE_CHECK(s.active());
+    PE_CHECK_NEAR(s.coverage(5, 5), 1.0f);
+}
+
+PE_TEST(selection_intersect_drops_dead_tiles) {
+    // Intersecting non-overlapping regions yields an empty selection with no
+    // dead tiles, so selectedBounds() is tight/empty.
+    Selection s;
+    s.selectRect(Rect{0, 0, 10, 10});
+    s.intersectRect(Rect{1000, 1000, 10, 10});  // no overlap
+    PE_CHECK_NEAR(s.coverage(5, 5), 0.0f);
+    PE_CHECK_EQ(s.tileCount(), static_cast<std::size_t>(0));
+    PE_CHECK(s.selectedBounds().isEmpty());
+}
+
 PE_TEST(paint_is_gated_by_selection) {
     auto doc = Document::createBlank(Size{64, 64});
     const LayerId base = doc->activeLayer();

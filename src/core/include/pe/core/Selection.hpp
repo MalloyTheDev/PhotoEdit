@@ -49,6 +49,7 @@ private:
     [[nodiscard]] uint8_t stored(int x, int y) const noexcept;  // 0 if absent
     void setValue(int x, int y, uint8_t v);
     void fillRect(Rect r, uint8_t v);
+    void dropEmptyTiles();  // erase all-zero tiles (keeps selectedBounds tight)
 
     std::map<Key, GrayTile> tiles_;
     bool active_ = false;

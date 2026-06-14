@@ -6,9 +6,12 @@
 namespace pe {
 
 namespace {
-// Bound per-operation pixel iteration (a selection fill over an absurd rect must
-// not hang/OOM). Matches the whole-image composite budget in spirit.
+// Bound per-fill iteration AND tile allocation. The tile-count cap is the load-
+// bearing one: a thin, enormous rect (e.g. 64M x 1) passes any area cap yet spans
+// hundreds of thousands of tiles. Mirrors the brush's kMaxStrokeTiles defense.
 constexpr int64_t kMaxSelectionPixels = 64'000'000;
+constexpr int64_t kMaxSelectionTiles = 4096;  // ~256 MB worst case
+constexpr int kCoordBound = 1 << 26;          // ~67M; keeps right()/bottom() in int
 
 int localIndex(int coord) noexcept {
     int m = coord % kTileSize;
@@ -16,9 +19,21 @@ int localIndex(int coord) noexcept {
     return m;
 }
 
-bool tooLarge(Rect r) noexcept {
-    const int64_t area = static_cast<int64_t>(r.width) * static_cast<int64_t>(r.height);
-    return area > kMaxSelectionPixels;
+// Reject coordinates whose magnitude could overflow right()/bottom() or contains().
+bool coordsOutOfRange(Rect r) noexcept {
+    return r.x < -kCoordBound || r.x > kCoordBound || r.y < -kCoordBound || r.y > kCoordBound ||
+           r.width < 0 || r.width > 2 * kCoordBound || r.height < 0 || r.height > 2 * kCoordBound;
+}
+
+// Reject a rect that is empty, out of range, or would allocate too many tiles.
+bool rejectFill(Rect r) noexcept {
+    if (r.isEmpty() || coordsOutOfRange(r)) return true;
+    const TileSpan span = tilesForRect(r);
+    const int64_t cols = static_cast<int64_t>(span.colEnd) - span.colBegin;
+    const int64_t rows = static_cast<int64_t>(span.rowEnd) - span.rowBegin;
+    if (cols <= 0 || rows <= 0) return true;
+    if (cols * rows > kMaxSelectionTiles) return true;
+    return static_cast<int64_t>(r.width) * r.height > kMaxSelectionPixels;
 }
 }  // namespace
 
@@ -32,16 +47,32 @@ uint8_t Selection::stored(int x, int y) const noexcept {
 
 void Selection::setValue(int x, int y, uint8_t v) {
     const TileCoord c{floorDiv(x, kTileSize), floorDiv(y, kTileSize)};
-    GrayTile& tile = tiles_[keyOf(c)];  // creates a zeroed tile if absent
-    tile[static_cast<std::size_t>(localIndex(y)) * kTileSize +
-         static_cast<std::size_t>(localIndex(x))] = v;
+    auto it = tiles_.find(keyOf(c));
+    if (it == tiles_.end()) {
+        if (v == 0) return;  // don't allocate a tile just to write transparent
+        it = tiles_.emplace(keyOf(c), GrayTile{}).first;
+    }
+    it->second[static_cast<std::size_t>(localIndex(y)) * kTileSize +
+               static_cast<std::size_t>(localIndex(x))] = v;
 }
 
 void Selection::fillRect(Rect r, uint8_t v) {
-    if (r.isEmpty() || tooLarge(r)) return;
+    if (rejectFill(r)) return;
     for (int y = r.top(); y < r.bottom(); ++y) {
         for (int x = r.left(); x < r.right(); ++x) {
             setValue(x, y, v);
+        }
+    }
+}
+
+void Selection::dropEmptyTiles() {
+    for (auto it = tiles_.begin(); it != tiles_.end();) {
+        const GrayTile& t = it->second;
+        const bool allZero = std::all_of(t.begin(), t.end(), [](uint8_t v) { return v == 0; });
+        if (allZero) {
+            it = tiles_.erase(it);
+        } else {
+            ++it;
         }
     }
 }
@@ -63,60 +94,84 @@ void Selection::selectNone() noexcept {
 
 void Selection::selectAll(Rect canvas) {
     tiles_.clear();
+    if (rejectFill(canvas)) {
+        // Too large to materialize: leave inactive == fully editable (equivalent
+        // to "all selected" for gating).
+        active_ = false;
+        return;
+    }
     active_ = true;
     fillRect(canvas, 255);
 }
 
 void Selection::selectRect(Rect r) {
     tiles_.clear();
+    if (rejectFill(r)) {
+        active_ = false;
+        return;
+    }
     active_ = true;
     fillRect(r, 255);
 }
 
 void Selection::addRect(Rect r) {
+    if (rejectFill(r)) return;  // validate BEFORE touching active_ (no empty-lockout)
     active_ = true;
     fillRect(r, 255);
 }
 
 void Selection::subtractRect(Rect r) {
-    if (!active_) return;  // nothing selected to subtract from
-    fillRect(r, 0);
+    if (!active_ || coordsOutOfRange(r) || r.isEmpty()) return;
+    // Operate per stored tile so cost is bounded by the selection, not by r.
+    for (auto& [key, tile] : tiles_) {
+        const Rect tb = tileBounds(TileCoord{key.first, key.second});
+        const Rect hit = tb.intersected(r);
+        if (hit.isEmpty()) continue;
+        for (int y = hit.top(); y < hit.bottom(); ++y) {
+            for (int x = hit.left(); x < hit.right(); ++x) {
+                tile[static_cast<std::size_t>(localIndex(y)) * kTileSize +
+                     static_cast<std::size_t>(localIndex(x))] = 0;
+            }
+        }
+    }
+    dropEmptyTiles();
 }
 
 void Selection::intersectRect(Rect r) {
     if (!active_) {
-        // Intersecting an "all" selection with a rect == selecting that rect.
-        selectRect(r);
+        // Intersecting an "all" selection with a rect selects that rect.
+        if (!rejectFill(r)) selectRect(r);
         return;
     }
-    // Zero every stored pixel outside r (bounded by the stored tiles).
+    if (coordsOutOfRange(r)) return;  // huge r: intersect keeps the current selection
     for (auto& [key, tile] : tiles_) {
-        const TileCoord coord{key.first, key.second};
-        const Rect tb = tileBounds(coord);
+        const Rect tb = tileBounds(TileCoord{key.first, key.second});
         for (int ly = 0; ly < kTileSize; ++ly) {
             for (int lx = 0; lx < kTileSize; ++lx) {
-                const int dx = tb.left() + lx;
-                const int dy = tb.top() + ly;
-                if (!r.contains(Point{dx, dy})) {
+                if (!r.contains(Point{tb.left() + lx, tb.top() + ly})) {
                     tile[static_cast<std::size_t>(ly) * kTileSize + static_cast<std::size_t>(lx)] =
                         0;
                 }
             }
         }
     }
+    dropEmptyTiles();
 }
 
 void Selection::invert(Rect canvas) {
-    if (canvas.isEmpty() || tooLarge(canvas)) return;
+    if (rejectFill(canvas)) return;  // bounds the canvas iteration/allocation
     active_ = true;
     for (int y = canvas.top(); y < canvas.bottom(); ++y) {
         for (int x = canvas.left(); x < canvas.right(); ++x) {
             setValue(x, y, static_cast<uint8_t>(255 - stored(x, y)));
         }
     }
+    dropEmptyTiles();
 }
 
 Rect Selection::selectedBounds() const noexcept {
+    // tiles_ holds only non-all-zero tiles (dropEmptyTiles keeps it tight), so the
+    // union of their bounds is a correct tile-granular selected bounds.
     Rect bounds{};
     for (const auto& [key, tile] : tiles_) {
         (void)tile;
