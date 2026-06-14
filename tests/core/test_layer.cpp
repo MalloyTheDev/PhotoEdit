@@ -4,6 +4,7 @@
 #include "pe_test.hpp"
 
 #include <string>
+#include <vector>
 
 using namespace pe;
 
@@ -79,4 +80,57 @@ PE_TEST(group_clone_is_deep_with_fresh_ids) {
     PE_CHECK_EQ(gc->childCount(), static_cast<std::size_t>(1));
     // The cloned child has a fresh id (deep copy, not a shared pointer).
     PE_CHECK(gc->findDescendant(childId) == nullptr);
+}
+
+PE_TEST(pixellayer_16bit_storage_renders_full_precision) {
+    // A 16-bit layer carries values with no 8-bit equivalent end-to-end: stored in
+    // tiles16(), renderInto converts them to float losslessly (no 8-bit round-trip).
+    PixelLayer layer("Deep", BitDepth::U16);
+    PE_CHECK(layer.depth() == BitDepth::U16);
+
+    const Rgba16 deep{40000, 257, 65535, 65535};  // 40000 is not on the 8-bit grid
+    layer.tiles16().setPixel(3, 4, deep);
+    PE_CHECK(layer.hasTileAt(TileCoord{0, 0}));
+    PE_CHECK_EQ(layer.contentBounds(), tileBounds(TileCoord{0, 0}));
+
+    std::vector<Rgbaf> tile(static_cast<std::size_t>(kTilePixels));
+    layer.renderInto(TileCoord{0, 0}, tile);
+    const std::size_t idx = static_cast<std::size_t>(4) * kTileSize + 3;
+    PE_CHECK_NEAR(tile[idx].r, 40000.0f / 65535.0f);
+    PE_CHECK_NEAR(tile[idx].g, 257.0f / 65535.0f);
+    PE_CHECK_NEAR(tile[idx].a, 1.0f);
+    PE_CHECK_NEAR(tile[0].a, 0.0f);  // untouched pixel transparent
+}
+
+PE_TEST(pixellayer_float_storage_preserves_hdr) {
+    PixelLayer layer("HDR", BitDepth::F32);
+    PE_CHECK(layer.depth() == BitDepth::F32);
+    layer.tilesF().setPixel(1, 1, Rgbaf{2.5f, 0.25f, -0.1f, 1.0f});  // out-of-range
+    std::vector<Rgbaf> tile(static_cast<std::size_t>(kTilePixels));
+    layer.renderInto(TileCoord{0, 0}, tile);
+    const std::size_t idx = static_cast<std::size_t>(1) * kTileSize + 1;
+    PE_CHECK_NEAR(tile[idx].r, 2.5f);   // HDR value passes through
+    PE_CHECK_NEAR(tile[idx].b, -0.1f);  // negative preserved
+}
+
+PE_TEST(pixellayer_clone_preserves_depth_and_content) {
+    PixelLayer layer("Deep", BitDepth::U16);
+    const Rgba16 deep{12345, 0, 0, 65535};
+    layer.tiles16().setPixel(2, 2, deep);
+    auto copy = layer.clone();
+    auto* pc = static_cast<PixelLayer*>(copy.get());
+    PE_CHECK(pc->depth() == BitDepth::U16);
+    PE_CHECK_EQ(pc->tiles16().pixel(2, 2), deep);
+    // Shared copy-on-write: editing the clone does not touch the original.
+    pc->tiles16().setPixel(2, 2, Rgba16{1, 1, 1, 1});
+    PE_CHECK_EQ(layer.tiles16().pixel(2, 2), deep);
+}
+
+PE_TEST(pixellayer_default_is_8bit_unchanged) {
+    PixelLayer layer("Plain");
+    PE_CHECK(layer.depth() == BitDepth::U8);
+    layer.tiles().setPixel(0, 0, Rgba8{10, 20, 30, 255});
+    std::vector<Rgbaf> tile(static_cast<std::size_t>(kTilePixels));
+    layer.renderInto(TileCoord{0, 0}, tile);
+    PE_CHECK_NEAR(tile[0].r, 10.0f / 255.0f);
 }
