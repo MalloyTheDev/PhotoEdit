@@ -37,4 +37,17 @@ class Document;
     RenderingIntent intent = RenderingIntent::RelativeColorimetric,
     bool blackPointCompensation = true);
 
+// Soft-proof: convert a composited working-space float image to the display while
+// simulating the `proofProfile` output device, returning an 8-bit display raster.
+// With gamutCheck, pixels outside the proof gamut are painted `gamutAlarm`. Falls
+// back to a direct quantization if any profile is null or the transform can't build.
+// Only built with lcms2.
+[[nodiscard]] PixelBuffer convertForProof(
+    const PixelBufferF& working, const ColorProfileRef& workingProfile,
+    const ColorProfileRef& displayProfile, const ColorProfileRef& proofProfile,
+    RenderingIntent intent = RenderingIntent::RelativeColorimetric,
+    RenderingIntent proofIntent = RenderingIntent::RelativeColorimetric,
+    bool blackPointCompensation = true, bool gamutCheck = false,
+    Rgbaf gamutAlarm = Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});
+
 }  // namespace pe
