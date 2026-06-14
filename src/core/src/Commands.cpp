@@ -48,7 +48,10 @@ RemoveLayerCommand::RemoveLayerCommand(LayerId id) : layerId_(id) {}
 
 DocumentChange RemoveLayerCommand::execute(Document& doc) {
     index_ = doc.topLevelIndexOf(layerId_);
+    prevActive_ = doc.activeLayer();
     owned_ = doc.cmdRemoveTopLevel(layerId_);
+    // If we just removed the active layer, clear the selection (and notify).
+    if (prevActive_ == layerId_) doc.setActiveLayer(kNoLayer);
     Rect region;
     if (owned_) region = owned_->contentBounds();
     return structureChange(region, layerId_);
@@ -58,6 +61,8 @@ DocumentChange RemoveLayerCommand::undo(Document& doc) {
     Rect region;
     if (owned_) region = owned_->contentBounds();
     doc.cmdInsertTopLevel(index_, std::move(owned_));
+    // Restore the active layer if this command had cleared it.
+    if (prevActive_ == layerId_) doc.setActiveLayer(layerId_);
     return structureChange(region, layerId_);
 }
 

@@ -147,6 +147,27 @@ PE_TEST(composite_partial_bounds_fill) {
     PE_CHECK(near8(img.at(5, 0), kRed));   // outside it -> red shows
 }
 
+PE_TEST(composite_fill_opacity_applies) {
+    // Fill opacity scales content (no effects in M1), like opacity: 50% blue
+    // over red => purple, same as the opacity case.
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed));
+    auto top = solid(kBlue);
+    top->setFillOpacity(0.5f);
+    stack.push_back(std::move(top));
+    PixelBuffer img = compositeToImage(stack, kCanvas);
+    PE_CHECK(near8(img.at(0, 0), Rgba8{128, 0, 128, 255}));
+}
+
+PE_TEST(composite_oversized_canvas_returns_empty) {
+    // The whole-image path refuses canvases above the megapixel budget rather
+    // than eagerly allocating gigabytes (tile viewport handles large docs).
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed, Rect{0, 0, 100000, 100000}));
+    PixelBuffer img = compositeToImage(stack, Rect{0, 0, 100000, 100000});
+    PE_CHECK(img.isEmpty());
+}
+
 PE_TEST(composite_zero_opacity_contributes_nothing) {
     std::vector<std::unique_ptr<Layer>> stack;
     stack.push_back(solid(kRed));

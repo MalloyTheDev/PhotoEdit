@@ -37,7 +37,10 @@ public:
     [[nodiscard]] std::string topUndoName() const;
     [[nodiscard]] std::string topRedoName() const;
 
-    // Bound the number of retained undo steps (memory). Default 100.
+    // Bound the number of retained undo steps (memory). Default 100. A limit of
+    // 0 means UNLIMITED (no trimming) — be deliberate, as unbounded history also
+    // retains each command's payload (e.g. removed layers) and can grow without
+    // bound; never drive this from untrusted input.
     void setLimit(std::size_t n) noexcept { limit_ = n; }
     [[nodiscard]] std::size_t limit() const noexcept { return limit_; }
 

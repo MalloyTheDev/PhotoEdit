@@ -39,7 +39,10 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
         }
 
         const BlendMode mode = layer->blendMode();
-        const float op = layer->opacity();
+        // With no layer effects (M1), fill opacity scales content the same way
+        // opacity does, so the effective coverage is their product. When effects
+        // arrive they will scale by opacity only; fill opacity stays content-only.
+        const float op = layer->opacity() * layer->fillOpacity();
         for (std::size_t i = 0; i < src.size(); ++i) {
             acc[i] = compositeOver(mode, acc[i], src[i], op);
         }
@@ -48,6 +51,11 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
 
 PixelBuffer compositeToImage(std::span<const std::unique_ptr<Layer>> stack, Rect canvas) {
     if (canvas.isEmpty()) return PixelBuffer{};
+
+    // Cap the eager allocation. Larger documents are rendered tile-by-tile via the
+    // viewport (M2), not flattened whole. Area is computed in int64 (no overflow).
+    const int64_t area = static_cast<int64_t>(canvas.width) * static_cast<int64_t>(canvas.height);
+    if (area > kMaxCompositeImagePixels) return PixelBuffer{};
 
     PixelBuffer out(canvas.width, canvas.height, Rgba8{});
     const TileSpan span = tilesForRect(canvas);

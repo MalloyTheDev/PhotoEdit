@@ -125,7 +125,33 @@ PE_TEST(history_property_commands_roundtrip) {
     doc->history().push(std::make_unique<RenameLayerCommand>(base, "Renamed"));
     PE_CHECK_EQ(layer->name(), std::string("Renamed"));
     doc->history().undo();
-    PE_CHECK_EQ(layer->name(), std::string("Background"));
+    PE_CHECK_EQ(layer->name(), std::string("Layer 1"));
+}
+
+PE_TEST(history_remove_restores_active_layer) {
+    // Removing the active layer clears it; undo restores both the layer and the
+    // active selection (round-trip of session state).
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    PE_CHECK(base != kNoLayer);
+
+    doc->history().push(std::make_unique<RemoveLayerCommand>(base));
+    PE_CHECK_EQ(doc->activeLayer(), kNoLayer);  // cleared on remove
+
+    doc->history().undo();
+    PE_CHECK_EQ(doc->activeLayer(), base);  // restored on undo
+}
+
+PE_TEST(history_reorder_preserves_active_layer) {
+    // Reordering the active layer must NOT deselect it.
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    doc->history().push(std::make_unique<AddLayerCommand>(redFill(), doc->topLevelCount()));
+    doc->setActiveLayer(base);
+    PE_CHECK_EQ(doc->activeLayer(), base);
+
+    doc->history().push(std::make_unique<ReorderLayerCommand>(base, 1));
+    PE_CHECK_EQ(doc->activeLayer(), base);  // still active after reorder
 }
 
 PE_TEST(history_observer_contract) {

@@ -28,7 +28,7 @@ std::unique_ptr<Document> Document::createBlank(Size canvasSize, ColorMode mode,
 
     // Seed one transparent base layer; no tiles are allocated until something is
     // painted, so even a huge canvas costs nothing here.
-    auto base = std::make_unique<PixelLayer>("Background");
+    auto base = std::make_unique<PixelLayer>("Layer 1");
     const LayerId baseId = base->id();
     doc->root_.addChild(std::move(base));
     doc->activeLayer_ = baseId;
@@ -66,10 +66,10 @@ void Document::cmdInsertTopLevel(std::size_t index, std::unique_ptr<Layer> layer
 }
 
 std::unique_ptr<Layer> Document::cmdRemoveTopLevel(LayerId id) {
-    auto removed = root_.removeChild(id);
-    // If the active layer was removed, clear it (a command may reassign).
-    if (removed && activeLayer_ == id) activeLayer_ = kNoLayer;
-    return removed;
+    // Intentionally does NOT touch activeLayer_: reorder (remove+reinsert) must
+    // preserve the active layer, and RemoveLayerCommand manages/restores active
+    // state explicitly so it round-trips through undo. See docs/systems/01.
+    return root_.removeChild(id);
 }
 
 std::size_t Document::topLevelIndexOf(LayerId id) const noexcept {

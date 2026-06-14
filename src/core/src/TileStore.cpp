@@ -55,6 +55,14 @@ TileData& TileStore::editable(TileCoord c) {
     }
     // Copy-on-write: if any other owner (an undo snapshot or a duplicated layer)
     // shares this tile, fork a private copy before mutating.
+    //
+    // SOUNDNESS NOTE (single-threaded today): this use_count() check is a safe
+    // fork trigger only because mutation and all readers run on one thread. When
+    // multithreaded compositing lands (docs/systems/22-performance.md), workers
+    // must be handed shared_ptr<const TileData> snapshots and a concurrent
+    // composite pass must force-fork on write (use_count() is racy: a worker can
+    // drop its reference between the check and the mutation). Do NOT rely on this
+    // check for thread safety without that change.
     if (it->second.use_count() > 1) {
         it->second = std::make_shared<TileData>(*it->second);
     }

@@ -36,6 +36,7 @@ struct Rgbaf {
 }
 
 [[nodiscard]] constexpr uint8_t fromUnit(float v) noexcept {
+    if (v != v) return 0;  // NaN guard: static_cast<uint8_t>(NaN) is UB
     // Round-to-nearest, then clamp.
     const float s = clamp01(v) * 255.0f + 0.5f;
     return static_cast<uint8_t>(s);

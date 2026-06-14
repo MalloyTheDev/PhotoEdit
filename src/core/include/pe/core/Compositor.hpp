@@ -6,6 +6,7 @@
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/Tile.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <span>
 
@@ -15,6 +16,14 @@ namespace pe {
 // groups as transparent. Bounds recursion so a pathologically nested tree cannot
 // overflow the stack (security hardening). 64 is far beyond any real document.
 inline constexpr int kMaxCompositeDepth = 64;
+
+// Upper bound on the pixel count compositeToImage will rasterize in one call
+// (~64 MP). The whole-image path eagerly allocates width*height*4 bytes, so this
+// caps memory and guards against overflow/DoS on very large canvases. Documents
+// larger than this must be displayed via the tile-based viewport (M2), which
+// composites only the visible/dirty tiles. compositeToImage returns an empty
+// buffer if the canvas exceeds this budget.
+inline constexpr int64_t kMaxCompositeImagePixels = 64'000'000;
 
 // Composite a layer stack (bottom-to-top) for a single tile, blending each
 // visible layer's straight-alpha contribution onto `acc` (size == kTilePixels,
