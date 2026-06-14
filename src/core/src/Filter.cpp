@@ -141,8 +141,9 @@ void unsharpMask(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h,
     }
 }
 
-std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const Filter& filter,
-                                          const Selection* selection) {
+std::unique_ptr<PaintCommand> bakePixelEdit(
+    Document& doc, LayerId layerId, std::string name,
+    const std::function<void(std::span<Rgbaf>, int, int)>& transform, const Selection* selection) {
     Layer* layer = doc.findLayer(layerId);
     if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
     auto* pl = static_cast<PixelLayer*>(layer);
@@ -155,14 +156,14 @@ std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const 
 
     const int w = bb.width;
     const int h = bb.height;
-    std::vector<Rgbaf> src(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
-    std::vector<Rgbaf> dst(src.size());
+    std::vector<Rgbaf> orig(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            src[idx(x, y, w)] = toFloat(pl->tiles().pixel(bb.left() + x, bb.top() + y));
+            orig[idx(x, y, w)] = toFloat(pl->tiles().pixel(bb.left() + x, bb.top() + y));
         }
     }
-    filter.apply(src, dst, w, h);
+    std::vector<Rgbaf> work = orig;  // the transform mutates this in place
+    transform(std::span<Rgbaf>(work), w, h);
 
     const bool gate = selection != nullptr && selection->active();
     std::vector<PaintCommand::Delta> deltas;
@@ -182,14 +183,14 @@ std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const 
             for (int y = vis.top(); y < vis.bottom(); ++y) {
                 for (int x = vis.left(); x < vis.right(); ++x) {
                     const std::size_t si = idx(x - bb.left(), y - bb.top(), w);
-                    Rgbaf out = dst[si];
+                    Rgbaf out = work[si];
                     if (gate) {
                         const float cov = selection->coverage(x, y);
-                        const Rgbaf& orig = src[si];
-                        out.r = orig.r + (out.r - orig.r) * cov;
-                        out.g = orig.g + (out.g - orig.g) * cov;
-                        out.b = orig.b + (out.b - orig.b) * cov;
-                        out.a = orig.a + (out.a - orig.a) * cov;
+                        const Rgbaf& o = orig[si];
+                        out.r = o.r + (out.r - o.r) * cov;
+                        out.g = o.g + (out.g - o.g) * cov;
+                        out.b = o.b + (out.b - o.b) * cov;
+                        out.a = o.a + (out.a - o.a) * cov;
                     }
                     const Rgba8 np = toRgba8(out);
                     const std::size_t li = static_cast<std::size_t>(y - tb.top()) * kTileSize +
@@ -207,7 +208,18 @@ std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const 
         }
     }
     if (deltas.empty()) return nullptr;
-    return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), filter.displayName());
+    return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), std::move(name));
+}
+
+std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const Filter& filter,
+                                          const Selection* selection) {
+    return bakePixelEdit(
+        doc, layerId, filter.displayName(),
+        [&](std::span<Rgbaf> img, int w, int h) {
+            std::vector<Rgbaf> in(img.begin(), img.end());  // filters are out-of-place
+            filter.apply(in, img, w, h);
+        },
+        selection);
 }
 
 }  // namespace pe

@@ -9,6 +9,16 @@
 namespace pe {
 
 class Document;
+class PaintCommand;
+class Selection;
+
+// Apply an adjustment destructively to a pixel layer's pixels (bake it in), as a
+// reversible tile-delta command — the destructive counterpart to a (live)
+// AdjustmentLayer. Optional selection gating. Returns nullptr if not a pixel layer
+// / no content / over budget. See docs/systems/05-adjustment-layers.md.
+[[nodiscard]] std::unique_ptr<PaintCommand> applyAdjustment(Document& doc, LayerId layerId,
+                                                            const Adjustment& adjustment,
+                                                            const Selection* selection = nullptr);
 
 // A Layer that owns an Adjustment (its parameters) and transforms the accumulated
 // composite beneath it at render time — non-destructive color/tonal editing. It

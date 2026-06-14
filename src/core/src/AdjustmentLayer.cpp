@@ -1,8 +1,17 @@
 #include "pe/core/AdjustmentLayer.hpp"
 
 #include "pe/core/Document.hpp"
+#include "pe/core/Filter.hpp"  // bakePixelEdit
 
 namespace pe {
+
+std::unique_ptr<PaintCommand> applyAdjustment(Document& doc, LayerId layerId,
+                                              const Adjustment& adjustment,
+                                              const Selection* selection) {
+    return bakePixelEdit(
+        doc, layerId, adjustment.name(),
+        [&](std::span<Rgbaf> img, int, int) { adjustment.apply(img); }, selection);
+}
 
 namespace {
 // An adjustment layer affects "everything beneath it"; report a large bounds so it

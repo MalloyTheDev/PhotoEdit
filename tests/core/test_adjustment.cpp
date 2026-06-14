@@ -1,9 +1,11 @@
 #include "pe/core/Adjustment.hpp"
 #include "pe/core/AdjustmentLayer.hpp"
+#include "pe/core/Brush.hpp"  // PaintCommand (returned by applyAdjustment)
 #include "pe/core/Commands.hpp"
 #include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/Mask.hpp"
+#include "pe/core/PixelLayer.hpp"
 #include "pe/core/SolidColorLayer.hpp"
 #include "pe_test.hpp"
 
@@ -200,4 +202,27 @@ PE_TEST(edit_adjustment_command_roundtrip) {
 
     doc->history().undo();  // back to the identity Brightness/Contrast
     PE_CHECK(near8(doc->compositeImage().at(0, 0), kRed));
+}
+
+PE_TEST(destructive_adjustment_bakes_and_undoes) {
+    // Bake an Invert into a red pixel layer's pixels (destructive), then undo.
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 16, 16}, Rgba8{255, 0, 0, 255});  // red
+
+    auto cmd = applyAdjustment(*doc, base, Invert{});
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    Rgba8 px = pl->tiles().pixel(8, 8);
+    PE_CHECK(px.r == 0 && px.g == 255 && px.b == 255);  // inverted -> cyan
+
+    doc->history().undo();
+    px = pl->tiles().pixel(8, 8);
+    PE_CHECK(px.r == 255 && px.g == 0 && px.b == 0);  // restored red (non-destructive undo)
+}
+
+PE_TEST(destructive_adjustment_on_empty_is_null) {
+    auto doc = Document::createBlank(Size{16, 16});
+    PE_CHECK(applyAdjustment(*doc, doc->activeLayer(), Invert{}) == nullptr);
 }

@@ -5,6 +5,7 @@
 #include "pe/core/Geometry.hpp"
 #include "pe/core/Layer.hpp"
 
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -13,6 +14,16 @@ namespace pe {
 
 class Document;
 class Selection;
+
+// Run an in-place per-pixel transform over a pixel layer's content as a reversible
+// tile-delta command (the shared machinery behind destructive filters and
+// adjustments). `transform(img, w, h)` mutates the extracted content image in
+// place. Optional selection gating (result lerped toward original by 1-coverage).
+// Returns nullptr if not a pixel layer, no content, or content over budget.
+[[nodiscard]] std::unique_ptr<PaintCommand> bakePixelEdit(
+    Document& doc, LayerId layerId, std::string name,
+    const std::function<void(std::span<Rgbaf>, int, int)>& transform,
+    const Selection* selection = nullptr);
 
 // ---- Reference filter kernels ----
 // Operate on a contiguous w*h straight-alpha Rgbaf image (row-major). Edges clamp
