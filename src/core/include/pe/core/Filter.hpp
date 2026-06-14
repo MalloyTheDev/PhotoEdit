@@ -41,6 +41,20 @@ void gaussianBlur(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h
 void unsharpMask(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, float radius,
                  float amount, float threshold);
 
+// Mosaic (pixelate): partition into cell x cell blocks and fill each block with its
+// average color (averaged in premultiplied alpha so transparent pixels don't bleed).
+// cell <= 1 copies src to dst. Edge blocks are clamped to the image bounds.
+void mosaic(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int cell);
+
+// Median (noise reduction / despeckle): replace each pixel with the per-channel median
+// of its (2r+1)x(2r+1) clamped neighborhood. radius <= 0 copies src to dst. Removes
+// salt-and-pepper speckle while preserving edges better than a blur.
+void medianFilter(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int radius);
+
+// Find Edges (stylize): per-channel Sobel gradient magnitude, inverted so flat areas
+// are white and edges are dark (as in Photoshop). Alpha is preserved. Edges clamp.
+void findEdges(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h);
+
 // ---- Polymorphic filter ----
 
 class Filter {
@@ -102,6 +116,51 @@ public:
 
 private:
     float radius_, amount_, threshold_;
+};
+
+class MosaicFilter final : public Filter {
+public:
+    explicit MosaicFilter(int cell = 8) : cell_(cell < 1 ? 1 : cell) {}
+    [[nodiscard]] std::string id() const override { return "pixelate.mosaic"; }
+    [[nodiscard]] std::string displayName() const override { return "Mosaic"; }
+    void apply(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h) const override {
+        mosaic(src, dst, w, h, cell_);
+    }
+    [[nodiscard]] std::unique_ptr<Filter> clone() const override {
+        return std::make_unique<MosaicFilter>(*this);
+    }
+
+private:
+    int cell_;
+};
+
+class MedianFilter final : public Filter {
+public:
+    // Radius is capped (the neighborhood cost grows as r^2); 15 is a generous bound.
+    explicit MedianFilter(int radius = 1) : radius_(radius < 0 ? 0 : (radius > 15 ? 15 : radius)) {}
+    [[nodiscard]] std::string id() const override { return "noise.median"; }
+    [[nodiscard]] std::string displayName() const override { return "Median"; }
+    void apply(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h) const override {
+        medianFilter(src, dst, w, h, radius_);
+    }
+    [[nodiscard]] std::unique_ptr<Filter> clone() const override {
+        return std::make_unique<MedianFilter>(*this);
+    }
+
+private:
+    int radius_;
+};
+
+class FindEdgesFilter final : public Filter {
+public:
+    [[nodiscard]] std::string id() const override { return "stylize.findedges"; }
+    [[nodiscard]] std::string displayName() const override { return "Find Edges"; }
+    void apply(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h) const override {
+        findEdges(src, dst, w, h);
+    }
+    [[nodiscard]] std::unique_ptr<Filter> clone() const override {
+        return std::make_unique<FindEdgesFilter>(*this);
+    }
 };
 
 // Apply a filter destructively to a pixel layer's content, as a reversible
