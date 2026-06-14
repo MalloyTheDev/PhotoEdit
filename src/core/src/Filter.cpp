@@ -84,6 +84,43 @@ void copyImage(std::span<const Rgbaf> src, std::span<Rgbaf> dst) {
     std::copy(src.begin(), src.end(), dst.begin());
 }
 
+// Native-pixel <-> working-float conversions for the depth-generic bakePixelEdit.
+// Overloads pick the right direction by the store's pixel type.
+inline Rgbaf toWorking(Rgba8 c) noexcept {
+    return toFloat(c);
+}
+inline Rgbaf toWorking(Rgba16 c) noexcept {
+    return toFloat(c);
+}
+inline Rgbaf toWorking(Rgbaf c) noexcept {
+    return c;
+}
+template <class Pixel>
+[[nodiscard]] Pixel fromWorking(Rgbaf c) noexcept;
+template <>
+[[nodiscard]] inline Rgba8 fromWorking<Rgba8>(Rgbaf c) noexcept {
+    return toRgba8(c);
+}
+template <>
+[[nodiscard]] inline Rgba16 fromWorking<Rgba16>(Rgbaf c) noexcept {
+    return toRgba16(c);
+}
+template <>
+[[nodiscard]] inline Rgbaf fromWorking<Rgbaf>(Rgbaf c) noexcept {
+    return c;  // float store preserves out-of-range/HDR values
+}
+
+// Bit-exact "did the pixel change" test for delta detection (Rgbaf has no ==).
+inline bool pixelEqual(Rgba8 a, Rgba8 b) noexcept {
+    return a == b;
+}
+inline bool pixelEqual(Rgba16 a, Rgba16 b) noexcept {
+    return a == b;
+}
+inline bool pixelEqual(const Rgbaf& a, const Rgbaf& b) noexcept {
+    return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+}
+
 }  // namespace
 
 void boxBlur(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int radius) {
@@ -295,32 +332,28 @@ void addNoise(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, fl
     }
 }
 
-std::unique_ptr<PaintCommand> bakePixelEdit(
-    Document& doc, LayerId layerId, std::string name,
+namespace {
+// Depth-generic core of bakePixelEdit: read the content rect from `store` at its
+// native depth into a working-float image, run `transform`, then write the result
+// back as native-depth tile deltas (with optional selection gating). One template
+// per pixel type keeps the float math identical across depths.
+template <class Pixel>
+std::unique_ptr<PaintCommand> bakePixelEditImpl(
+    LayerId layerId, TileStoreT<Pixel>& store, Rect bb, std::string name,
     const std::function<void(std::span<Rgbaf>, int, int)>& transform, const Selection* selection) {
-    Layer* layer = doc.findLayer(layerId);
-    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
-    auto* pl = static_cast<PixelLayer*>(layer);
-
-    const Rect bb = pl->contentBounds();
-    if (bb.isEmpty()) return nullptr;
-    if (bb.width > kMaxCanvasDimension || bb.height > kMaxCanvasDimension) return nullptr;
-    const int64_t area = static_cast<int64_t>(bb.width) * static_cast<int64_t>(bb.height);
-    if (area > kMaxFilterPixels) return nullptr;
-
     const int w = bb.width;
     const int h = bb.height;
     std::vector<Rgbaf> orig(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            orig[idx(x, y, w)] = toFloat(pl->tiles().pixel(bb.left() + x, bb.top() + y));
+            orig[idx(x, y, w)] = toWorking(store.pixel(bb.left() + x, bb.top() + y));
         }
     }
     std::vector<Rgbaf> work = orig;  // the transform mutates this in place
     transform(std::span<Rgbaf>(work), w, h);
 
     const bool gate = selection != nullptr && selection->active();
-    std::vector<PaintCommand::Delta> deltas;
+    std::vector<PaintCommand::DeltaT<Pixel>> deltas;
     Rect dirty{};
     const TileSpan span = tilesForRect(bb);
     for (int row = span.rowBegin; row < span.rowEnd; ++row) {
@@ -329,8 +362,8 @@ std::unique_ptr<PaintCommand> bakePixelEdit(
             const Rect tb = tileBounds(coord);
             const Rect vis = tb.intersected(bb);
             if (vis.isEmpty()) continue;
-            std::shared_ptr<TileData> before = pl->tiles().sharedTile(coord);
-            auto after = std::make_shared<TileData>();
+            std::shared_ptr<TileDataT<Pixel>> before = store.sharedTile(coord);
+            auto after = std::make_shared<TileDataT<Pixel>>();
             if (before) *after = *before;
 
             bool changed = false;
@@ -346,23 +379,54 @@ std::unique_ptr<PaintCommand> bakePixelEdit(
                         out.b = o.b + (out.b - o.b) * cov;
                         out.a = o.a + (out.a - o.a) * cov;
                     }
-                    const Rgba8 np = toRgba8(out);
+                    const Pixel np = fromWorking<Pixel>(out);
                     const std::size_t li = static_cast<std::size_t>(y - tb.top()) * kTileSize +
                                            static_cast<std::size_t>(x - tb.left());
-                    if (!(np == after->px[li])) {
+                    if (!pixelEqual(np, after->px[li])) {
                         after->px[li] = np;
                         changed = true;
                     }
                 }
             }
             if (changed) {
-                deltas.push_back(PaintCommand::Delta{coord, std::move(before), std::move(after)});
+                deltas.push_back(
+                    PaintCommand::DeltaT<Pixel>{coord, std::move(before), std::move(after)});
                 dirty = dirty.united(vis);
             }
         }
     }
     if (deltas.empty()) return nullptr;
     return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), std::move(name));
+}
+}  // namespace
+
+std::unique_ptr<PaintCommand> bakePixelEdit(
+    Document& doc, LayerId layerId, std::string name,
+    const std::function<void(std::span<Rgbaf>, int, int)>& transform, const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    auto* pl = static_cast<PixelLayer*>(layer);
+
+    const Rect bb = pl->contentBounds();
+    if (bb.isEmpty()) return nullptr;
+    if (bb.width > kMaxCanvasDimension || bb.height > kMaxCanvasDimension) return nullptr;
+    const int64_t area = static_cast<int64_t>(bb.width) * static_cast<int64_t>(bb.height);
+    if (area > kMaxFilterPixels) return nullptr;
+
+    // Edit the layer's pixels at their native storage depth; the float transform is
+    // identical across depths (the high-depth stores avoid the 8-bit round-trip).
+    switch (pl->depth()) {
+        case BitDepth::U16:
+            return bakePixelEditImpl<Rgba16>(layerId, pl->tiles16(), bb, std::move(name), transform,
+                                             selection);
+        case BitDepth::F32:
+            return bakePixelEditImpl<Rgbaf>(layerId, pl->tilesF(), bb, std::move(name), transform,
+                                            selection);
+        case BitDepth::U8:
+        default:
+            return bakePixelEditImpl<Rgba8>(layerId, pl->tiles(), bb, std::move(name), transform,
+                                            selection);
+    }
 }
 
 std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const Filter& filter,

@@ -5,6 +5,7 @@
 #include "pe/core/Command.hpp"
 #include "pe/core/Geometry.hpp"
 #include "pe/core/Layer.hpp"
+#include "pe/core/PixelFormat.hpp"
 #include "pe/core/Tile.hpp"
 #include "pe/core/TileStore.hpp"
 
@@ -56,24 +57,41 @@ struct BrushSettings {
 // area (ADR-0005, ADR-0003).
 class PaintCommand final : public Command {
 public:
-    struct Delta {
+    // One tile's before/after snapshot at a given storage depth. before == null
+    // means the tile was absent (transparent). Tiles are shared copy-on-write.
+    template <class Pixel>
+    struct DeltaT {
         TileCoord coord;
-        std::shared_ptr<TileData> before;  // null == tile was absent (transparent)
-        std::shared_ptr<TileData> after;   // the painted tile
+        std::shared_ptr<TileDataT<Pixel>> before;
+        std::shared_ptr<TileDataT<Pixel>> after;
     };
+    using Delta = DeltaT<Rgba8>;     // 8-bit (the default storage depth)
+    using Delta16 = DeltaT<Rgba16>;  // 16-bit
+    using DeltaF = DeltaT<Rgbaf>;    // 32-bit float
 
+    // One constructor per depth; the command applies/reverts into the layer's store
+    // of the matching depth. The 8-bit overload is the original signature.
     PaintCommand(LayerId layer, Rect dirtyRect, std::vector<Delta> deltas, std::string name);
+    PaintCommand(LayerId layer, Rect dirtyRect, std::vector<Delta16> deltas, std::string name);
+    PaintCommand(LayerId layer, Rect dirtyRect, std::vector<DeltaF> deltas, std::string name);
 
     [[nodiscard]] std::string name() const override { return name_; }
     DocumentChange execute(Document&) override;
     DocumentChange undo(Document&) override;
 
-    [[nodiscard]] std::size_t touchedTileCount() const noexcept { return deltas_.size(); }
+    [[nodiscard]] std::size_t touchedTileCount() const noexcept;
 
 private:
+    // Shared execute/undo body: applies the active-depth deltas' `after` (forward)
+    // or `before` (reverse) snapshots into the layer's matching store.
+    DocumentChange apply(Document& doc, bool forward);
+
     LayerId layer_;
     Rect dirty_;
-    std::vector<Delta> deltas_;
+    BitDepth depth_ = BitDepth::U8;
+    std::vector<Delta> deltas8_;
+    std::vector<Delta16> deltas16_;
+    std::vector<DeltaF> deltasF_;
     std::string name_;
 };
 

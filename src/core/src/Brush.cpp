@@ -91,6 +91,9 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
     if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
     if (points.empty()) return nullptr;
     auto* pl = static_cast<PixelLayer*>(layer);
+    // The brush dab path is 8-bit only for now; refuse high-depth layers rather than
+    // silently painting the inactive 8-bit store (depth-aware brushing is a follow-up).
+    if (pl->depth() != BitDepth::U8) return nullptr;
 
     float diameter = std::isfinite(in.diameter) ? in.diameter : 20.0f;
     diameter = std::clamp(diameter, 0.1f, kMaxBrushDiameter);
@@ -185,24 +188,74 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
 
 PaintCommand::PaintCommand(LayerId layer, Rect dirtyRect, std::vector<Delta> deltas,
                            std::string name)
-    : layer_(layer), dirty_(dirtyRect), deltas_(std::move(deltas)), name_(std::move(name)) {}
+    : layer_(layer),
+      dirty_(dirtyRect),
+      depth_(BitDepth::U8),
+      deltas8_(std::move(deltas)),
+      name_(std::move(name)) {}
 
-DocumentChange PaintCommand::execute(Document& doc) {
+PaintCommand::PaintCommand(LayerId layer, Rect dirtyRect, std::vector<Delta16> deltas,
+                           std::string name)
+    : layer_(layer),
+      dirty_(dirtyRect),
+      depth_(BitDepth::U16),
+      deltas16_(std::move(deltas)),
+      name_(std::move(name)) {}
+
+PaintCommand::PaintCommand(LayerId layer, Rect dirtyRect, std::vector<DeltaF> deltas,
+                           std::string name)
+    : layer_(layer),
+      dirty_(dirtyRect),
+      depth_(BitDepth::F32),
+      deltasF_(std::move(deltas)),
+      name_(std::move(name)) {}
+
+namespace {
+// Swap each delta's snapshot into the store: `after` on execute, `before` on undo.
+template <class Store, class DeltaVec>
+void applyDeltas(Store& store, const DeltaVec& deltas, bool forward) {
+    for (const auto& d : deltas) store.setTile(d.coord, forward ? d.after : d.before);
+}
+}  // namespace
+
+DocumentChange PaintCommand::apply(Document& doc, bool forward) {
     Layer* layer = doc.findLayer(layer_);
     if (layer != nullptr && layer->kind() == LayerKind::Pixel) {
         auto* pl = static_cast<PixelLayer*>(layer);
-        for (const Delta& d : deltas_) pl->tiles().setTile(d.coord, d.after);
+        switch (depth_) {
+            case BitDepth::U16:
+                applyDeltas(pl->tiles16(), deltas16_, forward);
+                break;
+            case BitDepth::F32:
+                applyDeltas(pl->tilesF(), deltasF_, forward);
+                break;
+            case BitDepth::U8:
+            default:
+                applyDeltas(pl->tiles(), deltas8_, forward);
+                break;
+        }
     }
     return DocumentChange{DocumentChange::Kind::Pixels, dirty_, layer_};
 }
 
+DocumentChange PaintCommand::execute(Document& doc) {
+    return apply(doc, /*forward=*/true);
+}
+
 DocumentChange PaintCommand::undo(Document& doc) {
-    Layer* layer = doc.findLayer(layer_);
-    if (layer != nullptr && layer->kind() == LayerKind::Pixel) {
-        auto* pl = static_cast<PixelLayer*>(layer);
-        for (const Delta& d : deltas_) pl->tiles().setTile(d.coord, d.before);
+    return apply(doc, /*forward=*/false);
+}
+
+std::size_t PaintCommand::touchedTileCount() const noexcept {
+    switch (depth_) {
+        case BitDepth::U16:
+            return deltas16_.size();
+        case BitDepth::F32:
+            return deltasF_.size();
+        case BitDepth::U8:
+        default:
+            return deltas8_.size();
     }
-    return DocumentChange{DocumentChange::Kind::Pixels, dirty_, layer_};
 }
 
 std::unique_ptr<PaintCommand> paintStroke(Document& doc, LayerId layerId,
