@@ -1,0 +1,27 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+    "name": "photoedit",
+    "version": "0.1.0",
+    "description": "A flagship-level, Photoshop-class image editor (Windows first).",
+    "homepage": "https://github.com/malloythedev/photoedit",
+    "dependencies": [
+        {
+            "name": "qtbase",
+            "default-features": false,
+            "features": [
+                "widgets",
+                "gui",
+                "png",
+                "jpeg"
+            ]
+        },
+        "littlecms",
+        "libpng",
+        "libjpeg-turbo",
+        "tiff",
+        "libwebp",
+        "zlib"
+    ],
+    "builtin-baseline": "0000000000000000000000000000000000000000",
+    "overrides": []
+}

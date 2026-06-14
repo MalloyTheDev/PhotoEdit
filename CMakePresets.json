@@ -1,0 +1,81 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 24,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "vcpkg",
+            "hidden": true,
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+            }
+        },
+        {
+            "name": "windows-msvc",
+            "displayName": "Windows (MSVC, primary target)",
+            "inherits": ["base", "vcpkg"],
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            },
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "VCPKG_TARGET_TRIPLET": "x64-windows"
+            }
+        },
+        {
+            "name": "linux-core-dev",
+            "displayName": "Linux engine-core dev (no Qt, headless engine + tests)",
+            "inherits": ["base"],
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "PHOTOEDIT_BUILD_APP": "OFF",
+                "PHOTOEDIT_BUILD_TESTS": "ON",
+                "PHOTOEDIT_WERROR": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "windows-msvc",
+            "configurePreset": "windows-msvc"
+        },
+        {
+            "name": "linux-core-dev",
+            "configurePreset": "linux-core-dev"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "linux-core-dev",
+            "configurePreset": "linux-core-dev",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "windows-msvc",
+            "configurePreset": "windows-msvc",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

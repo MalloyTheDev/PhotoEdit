@@ -1,0 +1,30 @@
+# Build output
+/build/
+/out/
+/cmake-build-*/
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+
+# vcpkg
+/vcpkg_installed/
+/vcpkg/
+
+# IDE
+/.vs/
+/.vscode/
+/.idea/
+*.user
+CMakeUserPresets.json
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Qt
+*.moc
+moc_*.cpp
+qrc_*.cpp
+ui_*.h

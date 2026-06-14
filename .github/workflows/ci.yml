@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The primary gate: the headless engine core + unit tests. No Qt, no GPU, no
+  # display required, so it is fast and reliable. Warnings are errors here.
+  # ---------------------------------------------------------------------------
+  core-linux:
+    name: Engine core (Linux, -Werror)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: cmake --preset linux-core-dev
+      - name: Build
+        run: cmake --build build/linux-core-dev
+      - name: Test
+        run: ctest --preset linux-core-dev
+
+  # ---------------------------------------------------------------------------
+  # The primary platform target: the full Qt6 application on Windows/MSVC.
+  # Qt comes from aqtinstall; other native libs are added as the engine starts
+  # using them (see vcpkg.json).
+  # ---------------------------------------------------------------------------
+  app-windows:
+    name: Full app (Windows, MSVC + Qt6)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.7.*"
+          cache: true
+      - name: Configure
+        run: >
+          cmake -B build/win -S . -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DPHOTOEDIT_BUILD_APP=ON
+          -DPHOTOEDIT_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build/win
+      - name: Test
+        run: ctest --test-dir build/win --output-on-failure
