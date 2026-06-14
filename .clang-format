@@ -1,0 +1,16 @@
+# PhotoEdit C++ formatting. Authoritative; do not hand-format against this.
+# Based on Google style with project overrides (see docs/04-coding-standards.md).
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+IndentWidth: 4
+ColumnLimit: 100
+PointerAlignment: Left
+DerivePointerAlignment: false
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+...
