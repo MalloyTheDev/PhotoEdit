@@ -184,14 +184,20 @@ void HueSaturation::apply(std::span<Rgbaf> tile) const {
     for (Rgbaf& p : tile) {
         if (!opaqueEnough(p)) continue;
         const Hsl c = rgbToHsl(p.r, p.g, p.b);
+        float rr = 0.0f, gg = 0.0f, bb = 0.0f;
         if (colorize_) {
-            hslToRgb(wrapHue(colorizeHue_), colorizeSat_, c.l, p.r, p.g, p.b);
+            hslToRgb(wrapHue(colorizeHue_), colorizeSat_, clamp01(c.l), rr, gg, bb);
         } else {
             const float h = wrapHue(c.h + hueShift_);
             const float s = clamp01(c.s * satScale_);
             const float l = clamp01(c.l + lightness_);
-            hslToRgb(h, s, l, p.r, p.g, p.b);
+            hslToRgb(h, s, l, rr, gg, bb);
         }
+        // Clamp on write (the codebase's NaN sink): HSL math can exceed [0,1] for
+        // out-of-gamut input and must never emit NaN/out-of-range into the composite.
+        p.r = clamp01(rr);
+        p.g = clamp01(gg);
+        p.b = clamp01(bb);
     }
 }
 
