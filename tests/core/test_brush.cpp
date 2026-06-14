@@ -3,6 +3,7 @@
 #include "pe/core/PixelLayer.hpp"
 #include "pe_test.hpp"
 
+#include <cmath>
 #include <cstdlib>
 #include <vector>
 
@@ -122,4 +123,30 @@ PE_TEST(paint_on_missing_layer_is_null) {
     auto doc = Document::createBlank(Size{64, 64});
     std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
     PE_CHECK(paintStroke(*doc, 999999, hardBrush(16, 1.0f), kRedF, pts) == nullptr);
+}
+
+PE_TEST(paint_nonfinite_points_are_safe) {
+    // NaN/Inf input samples (garbage tablet data) must not crash or deposit
+    // anything (no UB in the float->int casts).
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    const float nan = std::nan("");
+    std::vector<StrokePoint> pts = {{{nan, 32.0f}, 1.0f}, {{INFINITY, 32.0f}, 1.0f}};
+    PE_CHECK(paintStroke(*doc, base, hardBrush(16, 1.0f), kRedF, pts) == nullptr);
+}
+
+PE_TEST(paint_absurd_coordinates_bounded) {
+    // A finite but absurd coordinate is skipped (beyond the off-canvas bound) —
+    // no gigabyte allocation, no overflow.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{1e30f, 1e30f}, 1.0f}};
+    PE_CHECK(paintStroke(*doc, base, hardBrush(16, 1.0f), kRedF, pts) == nullptr);
+}
+
+PE_TEST(erase_empty_space_is_null) {
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    PE_CHECK(eraseStroke(*doc, base, hardBrush(16, 1.0f), pts) == nullptr);  // nothing to erase
 }

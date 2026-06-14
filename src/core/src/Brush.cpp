@@ -31,8 +31,22 @@ using CoverageMap = std::map<CoverageKey, std::vector<float>>;
 // Guard against a degenerate spacing/length combination producing a runaway dab
 // count (it cannot hang, but bound it defensively).
 constexpr int64_t kMaxDabsPerStroke = 2'000'000;
+// Largest brush diameter we honor (caps a single dab's bbox).
+constexpr float kMaxBrushDiameter = 5000.0f;
+// Hard ceiling on stroke-buffer tiles, so a pathological stroke cannot exhaust
+// memory; reached only by degenerate input and degrades gracefully (the stroke
+// is clipped, never a crash/OOM).
+constexpr std::size_t kMaxStrokeTiles = 4096;
+// Coordinate magnitude beyond which a dab is treated as absurdly off-canvas and
+// skipped. Keeps center +/- radius and col*kTileSize comfortably within int.
+constexpr float kCoordBound = static_cast<float>(1 << 26);  // ~67M
 
 void stampDab(CoverageMap& cov, Vec2 center, float radius, float hardness, float flow) {
+    // C1: reject non-finite/absurd coordinates before the float->int casts (which
+    // are UB for NaN/Inf/out-of-range values).
+    if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(radius)) return;
+    if (std::fabs(center.x) > kCoordBound || std::fabs(center.y) > kCoordBound) return;
+
     const int x0 = static_cast<int>(std::floor(center.x - radius));
     const int x1 = static_cast<int>(std::ceil(center.x + radius));
     const int y0 = static_cast<int>(std::floor(center.y - radius));
@@ -49,8 +63,16 @@ void stampDab(CoverageMap& cov, Vec2 center, float radius, float hardness, float
 
             const int col = floorDiv(x, kTileSize);
             const int row = floorDiv(y, kTileSize);
-            std::vector<float>& buf = cov[CoverageKey{col, row}];
-            if (buf.empty()) buf.assign(static_cast<std::size_t>(kTilePixels), 0.0f);
+            const CoverageKey key{col, row};
+            auto it = cov.find(key);
+            if (it == cov.end()) {
+                // C2: bound total stroke-buffer memory; stop adding tiles past the cap.
+                if (cov.size() >= kMaxStrokeTiles) continue;
+                it = cov.emplace(key,
+                                 std::vector<float>(static_cast<std::size_t>(kTilePixels), 0.0f))
+                         .first;
+            }
+            std::vector<float>& buf = it->second;
 
             const int lx = x - col * kTileSize;
             const int ly = y - row * kTileSize;
@@ -68,7 +90,8 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
     if (points.empty()) return nullptr;
     auto* pl = static_cast<PixelLayer*>(layer);
 
-    const float diameter = std::max(0.1f, in.diameter);
+    float diameter = std::isfinite(in.diameter) ? in.diameter : 20.0f;
+    diameter = std::clamp(diameter, 0.1f, kMaxBrushDiameter);
     const float hardness = clamp01(in.hardness);
     const float opacity = clamp01(in.opacity);
     const float flow = clamp01(in.flow);
@@ -95,7 +118,7 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
         const float dx = b.pos.x - a.pos.x;
         const float dy = b.pos.y - a.pos.y;
         const float segLen = std::sqrt(dx * dx + dy * dy);
-        if (segLen <= 1e-6f) continue;
+        if (!(segLen > 1e-6f)) continue;  // also skips NaN (non-finite input points)
         float consumed = 0.0f;
         while (distSinceLast + (segLen - consumed) >= step && dabCount < kMaxDabsPerStroke) {
             const float advance = step - distSinceLast;
