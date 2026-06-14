@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace pe {
@@ -237,6 +238,59 @@ void findEdges(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h) {
                 Rgbaf{edge(tl.r, tc.r, tr.r, ml.r, mr.r, bl.r, bc.r, br.r),
                       edge(tl.g, tc.g, tr.g, ml.g, mr.g, bl.g, bc.g, br.g),
                       edge(tl.b, tc.b, tr.b, ml.b, mr.b, bl.b, bc.b, br.b), clamp01(at(x, y).a)};
+        }
+    }
+}
+
+namespace {
+// SplitMix32-style integer hash: maps a key to a well-mixed 32-bit value.
+inline uint32_t hashU32(uint32_t x) noexcept {
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+// Uniform float in [0,1) from a hashed value's top 24 bits.
+inline float uniform01(uint32_t h) noexcept {
+    return static_cast<float>(h >> 8) * (1.0f / 16777216.0f);
+}
+}  // namespace
+
+void addNoise(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, float amount,
+              bool monochromatic, bool gaussian, uint32_t seed) {
+    if (w <= 0 || h <= 0) return;
+    if (amount <= 0.0f) {
+        copyImage(src, dst);
+        return;
+    }
+    const float sigma = amount * 0.5f;  // Gaussian std-dev at full amount
+    const uint32_t seedMix = seed * 0x9e3779b9U;
+    // Deterministic, reproducible noise: derived purely from the pixel index, the
+    // channel, and the seed (no global RNG state), so the same inputs always
+    // produce the same output and it parallelizes trivially.
+    const auto noiseDelta = [&](std::size_t i, int ch) -> float {
+        const uint32_t key = (static_cast<uint32_t>(i) * 4u + static_cast<uint32_t>(ch)) ^ seedMix;
+        if (gaussian) {
+            const float u1 = std::max(uniform01(hashU32(key * 2u)), 1e-7f);  // avoid log(0)
+            const float u2 = uniform01(hashU32(key * 2u + 1u));
+            const float z =
+                std::sqrt(-2.0f * std::log(u1)) * std::cos(6.28318530718f * u2);  // Box-Muller
+            return z * sigma;
+        }
+        return (uniform01(hashU32(key)) * 2.0f - 1.0f) * amount;  // uniform [-amount,amount]
+    };
+
+    const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+    for (std::size_t i = 0; i < n; ++i) {
+        const Rgbaf& s = src[i];
+        if (monochromatic) {
+            const float d = noiseDelta(i, 0);  // same noise added to each channel
+            dst[i] = Rgbaf{clamp01(s.r + d), clamp01(s.g + d), clamp01(s.b + d), clamp01(s.a)};
+        } else {
+            dst[i] = Rgbaf{clamp01(s.r + noiseDelta(i, 0)), clamp01(s.g + noiseDelta(i, 1)),
+                           clamp01(s.b + noiseDelta(i, 2)), clamp01(s.a)};
         }
     }
 }

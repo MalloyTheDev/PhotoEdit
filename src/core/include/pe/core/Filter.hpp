@@ -5,6 +5,7 @@
 #include "pe/core/Geometry.hpp"
 #include "pe/core/Layer.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <span>
@@ -54,6 +55,14 @@ void medianFilter(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h
 // Find Edges (stylize): per-channel Sobel gradient magnitude, inverted so flat areas
 // are white and edges are dark (as in Photoshop). Alpha is preserved. Edges clamp.
 void findEdges(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h);
+
+// Add Noise: add zero-mean noise scaled by amount in [0,1]. The noise is derived
+// from a per-pixel hash of (index, seed), so it is fully deterministic and
+// reproducible. monochromatic adds the same value to R/G/B; otherwise each channel
+// gets independent noise. gaussian selects a Gaussian distribution (vs uniform).
+// Alpha is preserved; results clamp on write. amount <= 0 copies src to dst.
+void addNoise(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, float amount,
+              bool monochromatic, bool gaussian, uint32_t seed);
 
 // ---- Polymorphic filter ----
 
@@ -161,6 +170,30 @@ public:
     [[nodiscard]] std::unique_ptr<Filter> clone() const override {
         return std::make_unique<FindEdgesFilter>(*this);
     }
+};
+
+class AddNoiseFilter final : public Filter {
+public:
+    explicit AddNoiseFilter(float amount = 0.1f, bool monochromatic = false, bool gaussian = true,
+                            uint32_t seed = 1u)
+        : amount_(amount < 0.0f ? 0.0f : (amount > 1.0f ? 1.0f : amount)),
+          monochromatic_(monochromatic),
+          gaussian_(gaussian),
+          seed_(seed) {}
+    [[nodiscard]] std::string id() const override { return "noise.add"; }
+    [[nodiscard]] std::string displayName() const override { return "Add Noise"; }
+    void apply(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h) const override {
+        addNoise(src, dst, w, h, amount_, monochromatic_, gaussian_, seed_);
+    }
+    [[nodiscard]] std::unique_ptr<Filter> clone() const override {
+        return std::make_unique<AddNoiseFilter>(*this);
+    }
+
+private:
+    float amount_;
+    bool monochromatic_;
+    bool gaussian_;
+    uint32_t seed_;
 };
 
 // Apply a filter destructively to a pixel layer's content, as a reversible
