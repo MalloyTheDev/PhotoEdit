@@ -121,3 +121,53 @@ PE_TEST(paint_is_gated_by_selection) {
     PE_CHECK_EQ(alphaAt(*doc, base, 10, 32), 255);  // inside selection -> painted
     PE_CHECK_EQ(alphaAt(*doc, base, 50, 32), 0);    // outside selection -> blocked
 }
+
+PE_TEST(selection_save_to_mask) {
+    Selection sel;
+    sel.selectRect(Rect{2, 2, 3, 3});  // [2,5) x [2,5)
+    PixelBuffer mask = sel.toMask(Rect{0, 0, 8, 8});
+    PE_CHECK_EQ(mask.width(), 8);
+    PE_CHECK_EQ(mask.at(2, 2), (Rgba8{255, 255, 255, 255}));  // selected -> white, opaque
+    PE_CHECK_EQ(mask.at(4, 4).r, 255);
+    PE_CHECK_EQ(mask.at(0, 0).r, 0);  // outside -> black
+    PE_CHECK_EQ(mask.at(5, 5).r, 0);  // exclusive bottom-right
+}
+
+PE_TEST(selection_load_mask_roundtrip) {
+    Selection a;
+    a.selectRect(Rect{1, 1, 4, 2});
+    PixelBuffer mask = a.toMask(Rect{0, 0, 8, 8});
+
+    Selection b;
+    b.loadMask(mask, 0, 0);
+    PE_CHECK(b.active());
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) PE_CHECK_EQ(b.value(x, y), a.value(x, y));
+    }
+}
+
+PE_TEST(selection_load_partial_coverage) {
+    // A feathered (grayscale) mask loads as partial selection coverage.
+    PixelBuffer mask(2, 1);
+    mask.set(0, 0, Rgba8{128, 128, 128, 255});
+    mask.set(1, 0, Rgba8{0, 0, 0, 255});
+    Selection s;
+    s.loadMask(mask, 0, 0);
+    PE_CHECK_EQ(s.value(0, 0), static_cast<uint8_t>(128));  // partial
+    PE_CHECK_NEAR(s.coverage(0, 0), 128.0f / 255.0f);
+    PE_CHECK_EQ(s.value(1, 0), static_cast<uint8_t>(0));  // unselected
+}
+
+PE_TEST(selection_inactive_to_mask_is_full) {
+    Selection s;  // inactive -> whole document selected
+    PixelBuffer m = s.toMask(Rect{0, 0, 4, 4});
+    PE_CHECK_EQ(m.at(0, 0).r, 255);
+    PE_CHECK_EQ(m.at(3, 3).r, 255);
+}
+
+PE_TEST(selection_load_empty_deselects) {
+    Selection s;
+    s.selectRect(Rect{0, 0, 4, 4});
+    s.loadMask(PixelBuffer{}, 0, 0);  // empty channel -> nothing selected
+    PE_CHECK(!s.active());
+}
