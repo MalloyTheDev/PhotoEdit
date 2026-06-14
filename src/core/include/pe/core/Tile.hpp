@@ -41,8 +41,8 @@ struct TileCoord {
 struct TileSpan {
     int colBegin = 0;
     int rowBegin = 0;
-    int colEnd = 0; // exclusive
-    int rowEnd = 0; // exclusive
+    int colEnd = 0;  // exclusive
+    int rowEnd = 0;  // exclusive
 
     [[nodiscard]] constexpr int count() const noexcept {
         const int cols = colEnd - colBegin;
@@ -61,4 +61,4 @@ struct TileSpan {
     };
 }
 
-} // namespace pe
+}  // namespace pe

@@ -42,8 +42,7 @@ struct Rgbaf {
 }
 
 [[nodiscard]] constexpr Rgbaf toFloat(Rgba8 c) noexcept {
-    return Rgbaf{toLinearUnit(c.r), toLinearUnit(c.g),
-                 toLinearUnit(c.b), toLinearUnit(c.a)};
+    return Rgbaf{toLinearUnit(c.r), toLinearUnit(c.g), toLinearUnit(c.b), toLinearUnit(c.a)};
 }
 
 [[nodiscard]] constexpr Rgba8 toRgba8(Rgbaf c) noexcept {
@@ -62,4 +61,4 @@ struct Rgbaf {
     return Rgbaf{c.r * inv, c.g * inv, c.b * inv, c.a};
 }
 
-} // namespace pe
+}  // namespace pe

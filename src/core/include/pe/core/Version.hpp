@@ -12,4 +12,4 @@ struct Version {
     static constexpr const char* string() noexcept { return "0.1.0"; }
 };
 
-} // namespace pe
+}  // namespace pe

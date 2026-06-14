@@ -20,9 +20,7 @@ struct Size {
     int height = 0;
 
     constexpr bool operator==(const Size&) const = default;
-    [[nodiscard]] constexpr bool isEmpty() const noexcept {
-        return width <= 0 || height <= 0;
-    }
+    [[nodiscard]] constexpr bool isEmpty() const noexcept { return width <= 0 || height <= 0; }
     [[nodiscard]] constexpr int64_t area() const noexcept {
         return static_cast<int64_t>(width) * static_cast<int64_t>(height);
     }
@@ -43,9 +41,7 @@ struct Rect {
     [[nodiscard]] constexpr int right() const noexcept { return x + width; }
     [[nodiscard]] constexpr int bottom() const noexcept { return y + height; }
 
-    [[nodiscard]] constexpr bool isEmpty() const noexcept {
-        return width <= 0 || height <= 0;
-    }
+    [[nodiscard]] constexpr bool isEmpty() const noexcept { return width <= 0 || height <= 0; }
 
     [[nodiscard]] constexpr bool contains(Point p) const noexcept {
         return p.x >= x && p.x < right() && p.y >= y && p.y < bottom();
@@ -77,4 +73,4 @@ struct Rect {
     }
 };
 
-} // namespace pe
+}  // namespace pe

@@ -20,4 +20,4 @@ private:
     void buildStatusBar();
 };
 
-} // namespace pe::app
+}  // namespace pe::app

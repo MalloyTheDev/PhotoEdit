@@ -20,8 +20,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     // Placeholder canvas area. The real tile-based canvas viewport replaces this
     // in the canvas/rendering milestone (docs/systems/02-canvas-rendering.md).
-    auto* canvasPlaceholder = new QLabel(
-        QStringLiteral("Canvas viewport (tile renderer lands in M2)"), this);
+    auto* canvasPlaceholder =
+        new QLabel(QStringLiteral("Canvas viewport (tile renderer lands in M2)"), this);
     canvasPlaceholder->setAlignment(Qt::AlignCenter);
     canvasPlaceholder->setMinimumSize(640, 480);
     setCentralWidget(canvasPlaceholder);
@@ -56,12 +56,9 @@ void MainWindow::buildDockPanels() {
         const char* title;
         Qt::DockWidgetArea area;
     } panels[] = {
-        {"Layers", Qt::RightDockWidgetArea},
-        {"Channels", Qt::RightDockWidgetArea},
-        {"Properties", Qt::RightDockWidgetArea},
-        {"History", Qt::RightDockWidgetArea},
-        {"Color", Qt::RightDockWidgetArea},
-        {"Tools", Qt::LeftDockWidgetArea},
+        {"Layers", Qt::RightDockWidgetArea},     {"Channels", Qt::RightDockWidgetArea},
+        {"Properties", Qt::RightDockWidgetArea}, {"History", Qt::RightDockWidgetArea},
+        {"Color", Qt::RightDockWidgetArea},      {"Tools", Qt::LeftDockWidgetArea},
     };
 
     for (const auto& p : panels) {
@@ -75,4 +72,4 @@ void MainWindow::buildStatusBar() {
     statusBar()->showMessage(QStringLiteral("Ready"));
 }
 
-} // namespace pe::app
+}  // namespace pe::app
