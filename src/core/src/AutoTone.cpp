@@ -45,6 +45,9 @@ void endpointsFor(const Histogram::Bins& bins, double clip, int& black, int& whi
 }  // namespace
 
 AutoToneLevels computeAutoTone(const Histogram& hist, AutoToneMode mode, double clipFraction) {
+    // NaN guard first (NaN fails every comparison, so the range clamp alone would let
+    // it through and silently no-op); fall back to no clipping. Then clamp to [0,0.49].
+    if (clipFraction != clipFraction) clipFraction = 0.0;
     const double clip = clipFraction < 0.0 ? 0.0 : (clipFraction > 0.49 ? 0.49 : clipFraction);
 
     AutoToneLevels out;

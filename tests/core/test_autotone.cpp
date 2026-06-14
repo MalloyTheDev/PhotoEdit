@@ -3,6 +3,7 @@
 #include "pe/core/PixelBuffer.hpp"
 #include "pe_test.hpp"
 
+#include <limits>
 #include <vector>
 
 using namespace pe;
@@ -92,6 +93,16 @@ PE_TEST(autotone_skips_transparent_pixels) {
     std::vector<Rgbaf> px = {Rgbaf{0.1f, 0.1f, 0.1f, 0.0f}};  // fully transparent
     applyAutoTone(px, lv);
     PE_CHECK_NEAR(px[0].r, 0.1f);  // unchanged
+}
+
+PE_TEST(autotone_nan_clip_falls_back_to_no_clip) {
+    // A NaN clip fraction must not slip past the range clamp; it falls back to no
+    // clipping (endpoints = lowest/highest populated levels), same as clip 0.
+    Histogram h = grayHist({64, 128, 192});
+    AutoToneLevels lv =
+        computeAutoTone(h, AutoToneMode::Contrast, std::numeric_limits<double>::quiet_NaN());
+    PE_CHECK_EQ(lv.blackPoint[0], 64);
+    PE_CHECK_EQ(lv.whitePoint[0], 192);
 }
 
 PE_TEST(autotone_clip_fraction_trims_outliers) {
