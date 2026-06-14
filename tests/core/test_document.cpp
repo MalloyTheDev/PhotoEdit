@@ -92,3 +92,25 @@ PE_TEST(document_flatten_empty_is_transparent) {
     PE_CHECK_EQ(i16.at(0, 0), (Rgba16{0, 0, 0, 0}));
     PE_CHECK_NEAR(iF.at(2, 2).a, 0.0f);
 }
+
+PE_TEST(document_createblank_honors_bit_depth) {
+    // The base layer is created at the document's bit depth.
+    auto d8 = Document::createBlank(Size{8, 8}, ColorMode::RGB, BitDepth::U8);
+    auto d16 = Document::createBlank(Size{8, 8}, ColorMode::RGB, BitDepth::U16);
+    auto d32 = Document::createBlank(Size{8, 8}, ColorMode::RGB, BitDepth::F32);
+    PE_CHECK(d16->bitDepth() == BitDepth::U16);
+
+    auto* base8 = static_cast<const PixelLayer*>(d8->findLayer(d8->activeLayer()));
+    auto* base16 = static_cast<const PixelLayer*>(d16->findLayer(d16->activeLayer()));
+    auto* base32 = static_cast<const PixelLayer*>(d32->findLayer(d32->activeLayer()));
+    PE_CHECK(base8->depth() == BitDepth::U8);
+    PE_CHECK(base16->depth() == BitDepth::U16);
+    PE_CHECK(base32->depth() == BitDepth::F32);
+
+    // A 16-bit document round-trips a deep value through paint + flatten with no
+    // 8-bit quantization in storage.
+    auto* edit16 = static_cast<PixelLayer*>(d16->findLayer(d16->activeLayer()));
+    edit16->tiles16().fillRect(Rect{0, 0, 8, 8}, Rgba16{40000, 40000, 40000, 65535});
+    PixelBuffer16 flat = d16->compositeImage16();
+    PE_CHECK_EQ(flat.at(0, 0).r, static_cast<uint16_t>(40000));  // exact, not 8-bit-snapped
+}

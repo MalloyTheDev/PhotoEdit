@@ -32,9 +32,9 @@ public:
 // docs/systems/01-document-system.md.
 class Document {
 public:
-    // Create a blank RGB/8-bit document with one transparent base pixel layer and
-    // no tiles allocated. Returns nullptr for a degenerate size or non-positive
-    // ppi. Mode/depth beyond RGB/U8 are modeled but inert in M1.
+    // Create a blank document with one transparent base pixel layer (at the given
+    // bit depth) and no tiles allocated. Returns nullptr for a degenerate size or
+    // non-positive ppi. ColorMode beyond RGB is modeled but not yet acted on.
     [[nodiscard]] static std::unique_ptr<Document> createBlank(Size canvasSize,
                                                                ColorMode mode = ColorMode::RGB,
                                                                BitDepth depth = BitDepth::U8,
