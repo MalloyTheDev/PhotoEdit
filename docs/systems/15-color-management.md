@@ -1,6 +1,6 @@
 # 15 — Color Management
 
-> Milestone: M6 · Status: Spec
+> Milestone: M6 · Status: In progress (foundation) — see [STATUS](../STATUS.md)
 
 ## Purpose
 

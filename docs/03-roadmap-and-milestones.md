@@ -9,6 +9,12 @@ depends on.
 > Dependencies, not dates. Each milestone lists its goal, what ships, and the
 > exit criteria that let the next one start. Sizes are rough relative effort.
 
+> 📊 **Current progress** is tracked in [STATUS.md](STATUS.md). In short: the
+> **engine core for M1 and M3–M5 is implemented and tested** (M5 — the full
+> adjustment + filter + analysis set — is complete headless), **M6 has its
+> color foundation** (sRGB⇄linear, 16-bit pixels), and the **app/GPU surface
+> (M2) and M7+ are not yet started**.
+
 ---
 
 ## M0 — Foundations ✅ (this step)
@@ -28,7 +34,7 @@ on Windows; architecture documented. *(All met.)*
 
 ---
 
-## M1 — Document & layers (the spine)
+## M1 — Document & layers (the spine) — 🟡 engine ✅, UI pending
 
 **Goal:** a real document with a layer tree that composites correctly to a flat
 image (headless first).
@@ -50,7 +56,7 @@ and match golden images for every blend mode; all mutations undoable.
 
 ---
 
-## M2 — Canvas & view (see it)
+## M2 — Canvas & view (see it) — ⬜ not started (GPU/viewport)
 
 **Goal:** the document is visible and navigable in the app, fast.
 
@@ -68,7 +74,7 @@ edits in M1 reflect on-screen by recompositing only dirty tiles.
 
 ---
 
-## M3 — Painting (make marks) + history
+## M3 — Painting (make marks) + history — 🟡 brush+history engine ✅
 
 **Goal:** paint naturally, with full undo.
 
@@ -90,7 +96,7 @@ edit; tile-delta undo verified on large documents.
 
 ---
 
-## M4 — Selections & masks (control where)
+## M4 — Selections & masks (control where) — 🟡 engine ✅, UI pending
 
 **Goal:** constrain edits and hide pixels non-destructively.
 
@@ -107,7 +113,7 @@ through it; masks honored by the compositor and undo.
 
 ---
 
-## M5 — Adjustments & filters (change the look, non-destructively)
+## M5 — Adjustments & filters (change the look, non-destructively) — ✅ engine complete
 
 **Goal:** non-destructive color/tonal edits and a real filter engine.
 
@@ -126,7 +132,7 @@ mask-aware results; apply destructive filters with preview + undo.
 
 ---
 
-## M6 — Color management (get color right)
+## M6 — Color management (get color right) — 🟡 foundation started
 
 **Goal:** correct color across depths, spaces, screen, and proof.
 
