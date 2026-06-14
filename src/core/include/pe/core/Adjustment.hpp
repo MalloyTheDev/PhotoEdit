@@ -21,7 +21,9 @@ enum class AdjustmentKind : uint8_t {
     HueSaturation,
     ChannelMixer,
     GradientMap,
-    // Vibrance, ColorBalance, BlackAndWhite, SelectiveColor, ColorLookup ... later.
+    Vibrance,
+    ColorBalance,
+    // BlackAndWhite, SelectiveColor, ColorLookup ... later.
 };
 
 // A baked 256-entry 1D lookup table over the [0,1] domain (exact for 8-bit input),
@@ -238,6 +240,57 @@ public:
 private:
     float m_[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
     bool mono_ = false;
+};
+
+// Vibrance: a non-linear saturation boost that affects less-saturated colors more
+// (protecting already-saturated ones), plus a linear saturation. Both in [-1,1].
+class Vibrance final : public Adjustment {
+public:
+    explicit Vibrance(float vibrance = 0.0f, float saturation = 0.0f)
+        : vibrance_(std::clamp(vibrance, -1.0f, 1.0f)),
+          saturation_(std::clamp(saturation, -1.0f, 1.0f)) {}
+    void setVibrance(float v) noexcept { vibrance_ = std::clamp(v, -1.0f, 1.0f); }
+    void setSaturation(float s) noexcept { saturation_ = std::clamp(s, -1.0f, 1.0f); }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override { return AdjustmentKind::Vibrance; }
+    [[nodiscard]] std::string name() const override { return "Vibrance"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<Vibrance>(*this);
+    }
+
+private:
+    float vibrance_, saturation_;
+};
+
+// Color Balance: shift colors per tonal range (shadows/midtones/highlights). Each
+// range carries an R/G/B shift in [-1,1] (cyan-red, magenta-green, yellow-blue).
+class ColorBalance final : public Adjustment {
+public:
+    void setShadows(float r, float g, float b) noexcept { set(shadows_, r, g, b); }
+    void setMidtones(float r, float g, float b) noexcept { set(midtones_, r, g, b); }
+    void setHighlights(float r, float g, float b) noexcept { set(highlights_, r, g, b); }
+    void setPreserveLuminosity(bool on) noexcept { preserveLum_ = on; }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override {
+        return AdjustmentKind::ColorBalance;
+    }
+    [[nodiscard]] std::string name() const override { return "Color Balance"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<ColorBalance>(*this);
+    }
+
+private:
+    static void set(float (&dst)[3], float r, float g, float b) noexcept {
+        dst[0] = std::clamp(r, -1.0f, 1.0f);
+        dst[1] = std::clamp(g, -1.0f, 1.0f);
+        dst[2] = std::clamp(b, -1.0f, 1.0f);
+    }
+    float shadows_[3] = {0, 0, 0};
+    float midtones_[3] = {0, 0, 0};
+    float highlights_[3] = {0, 0, 0};
+    bool preserveLum_ = true;
 };
 
 // Gradient Map: map each pixel's luminance to a two-stop gradient (color0..color1).

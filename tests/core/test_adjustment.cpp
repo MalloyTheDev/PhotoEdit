@@ -226,3 +226,22 @@ PE_TEST(destructive_adjustment_on_empty_is_null) {
     auto doc = Document::createBlank(Size{16, 16});
     PE_CHECK(applyAdjustment(*doc, doc->activeLayer(), Invert{}) == nullptr);
 }
+
+PE_TEST(adjustment_vibrance_boosts_saturation) {
+    // A lightly-saturated color becomes more saturated (r-g gap widens).
+    Rgbaf out = applyOne(Vibrance(1.0f, 0.0f), Rgbaf{0.6f, 0.5f, 0.5f, 1.0f});
+    PE_CHECK((out.r - out.g) > 0.1f);  // was 0.1
+    // Pure gray stays gray (no hue to boost).
+    Rgbaf gray = applyOne(Vibrance(1.0f, 0.0f), Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});
+    PE_CHECK_NEAR(gray.r, 0.5f);
+    PE_CHECK_NEAR(gray.g, 0.5f);
+}
+
+PE_TEST(adjustment_color_balance_midtone_red) {
+    ColorBalance cb;
+    cb.setPreserveLuminosity(false);
+    cb.setMidtones(0.5f, 0.0f, 0.0f);  // push midtones toward red
+    Rgbaf out = applyOne(cb, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});
+    PE_CHECK_NEAR(out.r, 0.75f);  // 0.5 + 0.5*1.0(midW)*0.5
+    PE_CHECK_NEAR(out.g, 0.5f);
+}

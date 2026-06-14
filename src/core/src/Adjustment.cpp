@@ -227,4 +227,49 @@ void GradientMap::apply(std::span<Rgbaf> tile) const {
     }
 }
 
+void Vibrance::apply(std::span<Rgbaf> tile) const {
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        const Hsl c = rgbToHsl(p.r, p.g, p.b);
+        // Vibrance boosts less-saturated colors more (the (1-s) factor) and protects
+        // already-saturated ones; gray (s==0) is left gray.
+        float s = c.s + vibrance_ * (1.0f - c.s) * c.s;
+        s = clamp01(s * (1.0f + saturation_));  // linear saturation on top
+        float rr = 0.0f, gg = 0.0f, bb = 0.0f;
+        hslToRgb(c.h, s, c.l, rr, gg, bb);
+        p.r = clamp01(rr);
+        p.g = clamp01(gg);
+        p.b = clamp01(bb);
+    }
+}
+
+void ColorBalance::apply(std::span<Rgbaf> tile) const {
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        const float origLum = luminance(p.r, p.g, p.b);
+        const float shadowW = clamp01(1.0f - origLum * 2.0f);  // strong near black
+        const float highW = clamp01((origLum - 0.5f) * 2.0f);  // strong near white
+        const float midW = clamp01(1.0f - shadowW - highW);    // peak at mid-gray
+        const auto shift = [&](int ch, float v) {
+            const float s = shadows_[ch] * shadowW + midtones_[ch] * midW + highlights_[ch] * highW;
+            return clamp01(v + s * 0.5f);  // modest strength
+        };
+        float r = shift(0, p.r);
+        float g = shift(1, p.g);
+        float b = shift(2, p.b);
+        if (preserveLum_) {
+            const float newLum = luminance(r, g, b);
+            if (newLum > 1e-5f) {
+                const float k = origLum / newLum;
+                r = clamp01(r * k);
+                g = clamp01(g * k);
+                b = clamp01(b * k);
+            }
+        }
+        p.r = r;
+        p.g = g;
+        p.b = b;
+    }
+}
+
 }  // namespace pe
