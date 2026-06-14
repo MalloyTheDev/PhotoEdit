@@ -96,6 +96,12 @@ public:
     // Implementations must fill every pixel (transparent where there is none).
     virtual void renderInto(TileCoord coord, std::span<Rgbaf> dst) const = 0;
 
+    // Adjustment layers transform the accumulated backdrop in place instead of
+    // contributing pixels. Default: not an adjustment (applyTo is a no-op). The
+    // compositor branches on isAdjustment() and calls applyTo() on the backdrop.
+    [[nodiscard]] virtual bool isAdjustment() const noexcept { return false; }
+    virtual void applyTo(std::span<Rgbaf> /*backdrop*/, TileCoord /*coord*/) const {}
+
     // Deep copy with a fresh id (for DuplicateLayer). Each kind clones itself.
     [[nodiscard]] virtual std::unique_ptr<Layer> clone() const = 0;
 

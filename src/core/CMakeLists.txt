@@ -22,6 +22,8 @@ add_library(pe_core
     src/Brush.cpp
     src/Selection.cpp
     src/Mask.cpp
+    src/Adjustment.cpp
+    src/AdjustmentLayer.cpp
 )
 
 add_library(PhotoEdit::Core ALIAS pe_core)
