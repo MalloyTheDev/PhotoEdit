@@ -141,6 +141,107 @@ void unsharpMask(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h,
     }
 }
 
+void mosaic(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int cell) {
+    if (w <= 0 || h <= 0) return;
+    if (cell <= 1) {
+        copyImage(src, dst);
+        return;
+    }
+    for (int by = 0; by < h; by += cell) {
+        const int y1 = std::min(by + cell, h);
+        for (int bx = 0; bx < w; bx += cell) {
+            const int x1 = std::min(bx + cell, w);
+            // Average in premultiplied alpha so transparent pixels add no color.
+            Rgbaf sum{};
+            int count = 0;
+            for (int y = by; y < y1; ++y) {
+                for (int x = bx; x < x1; ++x) {
+                    const Rgbaf pm = premultiply(src[idx(x, y, w)]);
+                    sum.r += pm.r;
+                    sum.g += pm.g;
+                    sum.b += pm.b;
+                    sum.a += pm.a;
+                    ++count;
+                }
+            }
+            const float inv = count > 0 ? 1.0f / static_cast<float>(count) : 0.0f;
+            const Rgbaf avg =
+                unpremultiply(Rgbaf{sum.r * inv, sum.g * inv, sum.b * inv, sum.a * inv});
+            for (int y = by; y < y1; ++y) {
+                for (int x = bx; x < x1; ++x) dst[idx(x, y, w)] = avg;
+            }
+        }
+    }
+}
+
+void medianFilter(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int radius) {
+    if (w <= 0 || h <= 0) return;
+    if (radius <= 0) {
+        copyImage(src, dst);
+        return;
+    }
+    const int window = (2 * radius + 1) * (2 * radius + 1);
+    std::vector<float> rs(static_cast<std::size_t>(window));
+    std::vector<float> gs(static_cast<std::size_t>(window));
+    std::vector<float> bs(static_cast<std::size_t>(window));
+    std::vector<float> as(static_cast<std::size_t>(window));
+    const auto median = [](std::vector<float>& v) -> float {
+        const std::size_t mid = v.size() / 2;
+        std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid), v.end());
+        return v[mid];  // odd-sized window -> the middle element is the median
+    };
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            std::size_t n = 0;
+            for (int j = -radius; j <= radius; ++j) {
+                for (int i = -radius; i <= radius; ++i) {
+                    const Rgbaf& s = src[idx(clampi(x + i, 0, w - 1), clampi(y + j, 0, h - 1), w)];
+                    rs[n] = s.r;
+                    gs[n] = s.g;
+                    bs[n] = s.b;
+                    as[n] = s.a;
+                    ++n;
+                }
+            }
+            rs.resize(n);
+            gs.resize(n);
+            bs.resize(n);
+            as.resize(n);
+            dst[idx(x, y, w)] = Rgbaf{median(rs), median(gs), median(bs), median(as)};
+            rs.resize(static_cast<std::size_t>(window));
+            gs.resize(static_cast<std::size_t>(window));
+            bs.resize(static_cast<std::size_t>(window));
+            as.resize(static_cast<std::size_t>(window));
+        }
+    }
+}
+
+void findEdges(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    // Sobel kernels: Gx detects horizontal gradients, Gy vertical. The output is the
+    // inverted gradient magnitude per channel (flat -> white, edge -> dark).
+    const auto at = [&](int x, int y) -> const Rgbaf& {
+        return src[idx(clampi(x, 0, w - 1), clampi(y, 0, h - 1), w)];
+    };
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const Rgbaf tl = at(x - 1, y - 1), tc = at(x, y - 1), tr = at(x + 1, y - 1);
+            const Rgbaf ml = at(x - 1, y), mr = at(x + 1, y);
+            const Rgbaf bl = at(x - 1, y + 1), bc = at(x, y + 1), br = at(x + 1, y + 1);
+            const auto edge = [](float a0, float a1, float a2, float a3, float a5, float a6,
+                                 float a7, float a8) {
+                const float gx = (a2 + 2.0f * a5 + a8) - (a0 + 2.0f * a3 + a6);
+                const float gy = (a6 + 2.0f * a7 + a8) - (a0 + 2.0f * a1 + a2);
+                return clamp01(1.0f - std::sqrt(gx * gx + gy * gy));
+            };
+            dst[idx(x, y, w)] =
+                Rgbaf{edge(tl.r, tc.r, tr.r, ml.r, mr.r, bl.r, bc.r, br.r),
+                      edge(tl.g, tc.g, tr.g, ml.g, mr.g, bl.g, bc.g, br.g),
+                      edge(tl.b, tc.b, tr.b, ml.b, mr.b, bl.b, bc.b, br.b), clamp01(at(x, y).a)};
+        }
+    }
+}
+
 std::unique_ptr<PaintCommand> bakePixelEdit(
     Document& doc, LayerId layerId, std::string name,
     const std::function<void(std::span<Rgbaf>, int, int)>& transform, const Selection* selection) {
