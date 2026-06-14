@@ -81,4 +81,30 @@ std::unique_ptr<Command> convertToProfile(Document& doc, ColorProfileRef target,
                                                    std::move(target));
 }
 
+PixelBuffer convertForDisplay(const PixelBufferF& working, const ColorProfileRef& workingProfile,
+                              const ColorProfileRef& displayProfile, ColorEngine& engine,
+                              RenderingIntent intent, bool blackPointCompensation) {
+    PixelBuffer out(working.width(), working.height());
+    if (working.isEmpty()) return out;
+
+    const std::size_t n =
+        static_cast<std::size_t>(working.width()) * static_cast<std::size_t>(working.height());
+
+    ColorTransformRef xform;
+    if (workingProfile && displayProfile) {
+        xform = engine.transform(workingProfile, displayProfile, intent, blackPointCompensation);
+    }
+
+    if (xform) {
+        // Transform the working pixels into display space, then quantize to 8-bit.
+        std::vector<Rgbaf> buf(working.data(), working.data() + n);
+        xform->applyInPlace(buf);
+        for (std::size_t i = 0; i < n; ++i) out.data()[i] = toRgba8(buf[i]);
+    } else {
+        // No color management available: present the working values directly.
+        for (std::size_t i = 0; i < n; ++i) out.data()[i] = toRgba8(working.data()[i]);
+    }
+    return out;
+}
+
 }  // namespace pe
