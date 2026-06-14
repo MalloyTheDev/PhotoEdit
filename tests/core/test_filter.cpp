@@ -66,6 +66,17 @@ PE_TEST(filter_unsharp_creates_halo) {
     PE_CHECK(dst[1].r < 0.5f);  // neighbor of the spike is darkened (sharpening halo)
 }
 
+PE_TEST(filter_blur_no_color_bleed_from_transparent) {
+    // An opaque red next to a fully transparent pixel must not pick up the
+    // transparent pixel's (arbitrary) color — premultiplied blur weights color by
+    // coverage, so transparent pixels contribute zero color.
+    std::vector<Rgbaf> src = {Rgbaf{1, 0, 0, 1}, Rgbaf{0, 0, 1, 0}};  // red opaque | blue transp.
+    std::vector<Rgbaf> dst(2);
+    boxBlur(src, dst, 2, 1, 1);
+    PE_CHECK(dst[0].b < 0.01f);     // no blue bleed into the red pixel
+    PE_CHECK_NEAR(dst[0].r, 1.0f);  // red color preserved
+}
+
 PE_TEST(filter_apply_command_and_undo) {
     auto doc = Document::createBlank(Size{32, 32});
     const LayerId base = doc->activeLayer();

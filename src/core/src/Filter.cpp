@@ -1,7 +1,6 @@
 #include "pe/core/Filter.hpp"
 
-#include "pe/core/Compositor.hpp"  // kMaxCompositeImagePixels
-#include "pe/core/Document.hpp"    // kMaxCanvasDimension
+#include "pe/core/Document.hpp"  // kMaxCanvasDimension
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
 
@@ -13,6 +12,12 @@
 namespace pe {
 
 namespace {
+
+// Max content area a destructive filter rasterizes at once. Tighter than the
+// compositor's 8-bit cap because filters allocate several full-region FLOAT
+// buffers (premultiplied src, tmp, dst, blurred) — ~16 bytes/px each. 16 MP keeps
+// transient memory ~1 GB. Larger regions need tile-streaming (a later increment).
+constexpr int64_t kMaxFilterPixels = 16'000'000;
 
 inline std::size_t idx(int x, int y, int w) noexcept {
     return static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x);
@@ -60,6 +65,20 @@ void convolveV(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h,
     }
 }
 
+// Separable H+V convolution done in PREMULTIPLIED alpha, so transparent pixels
+// (whose straight color is arbitrary) contribute zero color and don't bleed into
+// opaque neighbors. Premultiply -> convolve -> unpremultiply.
+void convolveSeparablePremult(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h,
+                              std::span<const float> kernel, int radius) {
+    const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+    std::vector<Rgbaf> pmul(n);
+    std::vector<Rgbaf> tmp(n);
+    for (std::size_t i = 0; i < n; ++i) pmul[i] = premultiply(src[i]);
+    convolveH(pmul, tmp, w, h, kernel, radius);
+    convolveV(tmp, dst, w, h, kernel, radius);
+    for (std::size_t i = 0; i < n; ++i) dst[i] = unpremultiply(dst[i]);
+}
+
 void copyImage(std::span<const Rgbaf> src, std::span<Rgbaf> dst) {
     std::copy(src.begin(), src.end(), dst.begin());
 }
@@ -74,9 +93,7 @@ void boxBlur(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int
     }
     const float weight = 1.0f / static_cast<float>(2 * radius + 1);
     std::vector<float> kernel(static_cast<std::size_t>(2 * radius + 1), weight);
-    std::vector<Rgbaf> tmp(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
-    convolveH(src, tmp, w, h, kernel, radius);
-    convolveV(tmp, dst, w, h, kernel, radius);
+    convolveSeparablePremult(src, dst, w, h, kernel, radius);
 }
 
 void gaussianBlur(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, float sigma) {
@@ -96,9 +113,7 @@ void gaussianBlur(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h
     }
     for (float& k : kernel) k /= sum;  // normalize
 
-    std::vector<Rgbaf> tmp(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
-    convolveH(src, tmp, w, h, kernel, radius);
-    convolveV(tmp, dst, w, h, kernel, radius);
+    convolveSeparablePremult(src, dst, w, h, kernel, radius);
 }
 
 void unsharpMask(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, float radius,
@@ -113,14 +128,16 @@ void unsharpMask(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h,
 
     const auto sharpen = [&](float s, float b) {
         const float detail = s - b;
-        if (std::fabs(detail) < threshold) return s;
+        // Always clamp on write (self-consistent output bound; matters once 16/32f
+        // float output ships and the final 8-bit clamp no longer applies).
+        if (std::fabs(detail) < threshold) return clamp01(s);
         return clamp01(s + amount * detail);
     };
     const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
     for (std::size_t i = 0; i < n; ++i) {
         const Rgbaf& s = src[i];
         const Rgbaf& b = blurred[i];
-        dst[i] = Rgbaf{sharpen(s.r, b.r), sharpen(s.g, b.g), sharpen(s.b, b.b), s.a};
+        dst[i] = Rgbaf{sharpen(s.r, b.r), sharpen(s.g, b.g), sharpen(s.b, b.b), clamp01(s.a)};
     }
 }
 
@@ -134,7 +151,7 @@ std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const 
     if (bb.isEmpty()) return nullptr;
     if (bb.width > kMaxCanvasDimension || bb.height > kMaxCanvasDimension) return nullptr;
     const int64_t area = static_cast<int64_t>(bb.width) * static_cast<int64_t>(bb.height);
-    if (area > kMaxCompositeImagePixels) return nullptr;
+    if (area > kMaxFilterPixels) return nullptr;
 
     const int w = bb.width;
     const int h = bb.height;
