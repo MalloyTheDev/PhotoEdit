@@ -68,6 +68,13 @@ public:
     // --- compositing convenience (headless preview / tests) ---
     [[nodiscard]] PixelBuffer compositeImage() const;
 
+    // Flatten at higher precision (docs/systems/15). Even with today's 8-bit layer
+    // storage these are worthwhile: compositing and adjustment layers run in float,
+    // so emitting 16-bit/float avoids the final 8-bit quantization that bands a
+    // heavily-adjusted stack. The document's bitDepth() tells a caller which to use.
+    [[nodiscard]] PixelBuffer16 compositeImage16() const;
+    [[nodiscard]] PixelBufferF compositeImageF() const;
+
     // --- mutation entry point & observers ---
     [[nodiscard]] History& history() noexcept { return history_; }
     void addObserver(DocumentObserver*);

@@ -59,3 +59,36 @@ PE_TEST(document_set_active_layer) {
     doc->setActiveLayer(424242);  // nonexistent -> ignored
     PE_CHECK_EQ(doc->activeLayer(), base);
 }
+
+PE_TEST(document_depth_aware_flatten) {
+    // Paint a flat mid-gray on the base layer; flatten at 8/16/32-bit.
+    auto doc = Document::createBlank(Size{8, 8});
+    auto* base = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    base->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{128, 128, 128, 255});
+
+    PixelBuffer i8 = doc->compositeImage();
+    PixelBuffer16 i16 = doc->compositeImage16();
+    PixelBufferF iF = doc->compositeImageF();
+
+    PE_CHECK_EQ(i8.width(), 8);
+    PE_CHECK_EQ(i16.width(), 8);
+    PE_CHECK_EQ(iF.width(), 8);
+
+    // 8-bit 128 widens losslessly to 16-bit 128*257 = 32896, and to float 128/255.
+    const Rgba16 c16 = i16.at(0, 0);
+    PE_CHECK_EQ(c16.r, static_cast<uint16_t>(32896));
+    PE_CHECK_EQ(c16.a, static_cast<uint16_t>(65535));
+    PE_CHECK_NEAR(iF.at(0, 0).r, 128.0f / 255.0f);
+
+    // All three agree once reduced to 8 bits.
+    PE_CHECK_EQ(to8(c16).r, i8.at(0, 0).r);
+    PE_CHECK_EQ(toRgba8(iF.at(0, 0)).r, i8.at(0, 0).r);
+}
+
+PE_TEST(document_flatten_empty_is_transparent) {
+    auto doc = Document::createBlank(Size{4, 4});  // no painted content
+    PixelBuffer16 i16 = doc->compositeImage16();
+    PixelBufferF iF = doc->compositeImageF();
+    PE_CHECK_EQ(i16.at(0, 0), (Rgba16{0, 0, 0, 0}));
+    PE_CHECK_NEAR(iF.at(2, 2).a, 0.0f);
+}
