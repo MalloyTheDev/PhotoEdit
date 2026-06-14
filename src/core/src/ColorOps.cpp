@@ -6,11 +6,27 @@
 #include "pe/core/Filter.hpp"  // bakePixelEdit
 #include "pe/core/GroupLayer.hpp"
 
+#include <lcms2.h>
+
 #include <vector>
 
 namespace pe {
 
 namespace {
+
+cmsUInt32Number lcmsIntent(RenderingIntent intent) noexcept {
+    switch (intent) {
+        case RenderingIntent::Perceptual:
+            return INTENT_PERCEPTUAL;
+        case RenderingIntent::Saturation:
+            return INTENT_SATURATION;
+        case RenderingIntent::AbsoluteColorimetric:
+            return INTENT_ABSOLUTE_COLORIMETRIC;
+        case RenderingIntent::RelativeColorimetric:
+        default:
+            return INTENT_RELATIVE_COLORIMETRIC;
+    }
+}
 
 // Collect the ids of every pixel layer in the tree (recursing into groups).
 void collectPixelLayerIds(const Layer* layer, std::vector<LayerId>& out) {
@@ -100,6 +116,62 @@ PixelBuffer convertForDisplay(const PixelBufferF& working, const ColorProfileRef
         std::vector<Rgbaf> buf(working.data(), working.data() + n);
         xform->applyInPlace(buf);
         for (std::size_t i = 0; i < n; ++i) out.data()[i] = toRgba8(buf[i]);
+    } else {
+        // No color management available: present the working values directly.
+        for (std::size_t i = 0; i < n; ++i) out.data()[i] = toRgba8(working.data()[i]);
+    }
+    return out;
+}
+
+PixelBuffer convertForProof(const PixelBufferF& working, const ColorProfileRef& workingProfile,
+                            const ColorProfileRef& displayProfile,
+                            const ColorProfileRef& proofProfile, RenderingIntent intent,
+                            RenderingIntent proofIntent, bool blackPointCompensation,
+                            bool gamutCheck, Rgbaf gamutAlarm) {
+    PixelBuffer out(working.width(), working.height());
+    if (working.isEmpty()) return out;
+
+    const std::size_t n =
+        static_cast<std::size_t>(working.width()) * static_cast<std::size_t>(working.height());
+
+    // Build the proofing transform with FLOAT input and 8-BIT output directly: lcms2's
+    // gamut-check alarm codes are honored for integer output (not float), and the
+    // result IS the 8-bit display raster. proof may be any space; working/display RGB.
+    cmsHTRANSFORM t = nullptr;
+    if (workingProfile && displayProfile && proofProfile &&
+        workingProfile->mode() == ColorMode::RGB && displayProfile->mode() == ColorMode::RGB) {
+        if (gamutCheck) {
+            // NOTE: cmsSetAlarmCodes is process-global; safe single-threaded (set just
+            // before the build, which bakes it in). A reentrant proofing path is later.
+            cmsUInt16Number alarm[cmsMAXCHANNELS] = {0};
+            alarm[0] = static_cast<cmsUInt16Number>(clamp01(gamutAlarm.r) * 65535.0f);
+            alarm[1] = static_cast<cmsUInt16Number>(clamp01(gamutAlarm.g) * 65535.0f);
+            alarm[2] = static_cast<cmsUInt16Number>(clamp01(gamutAlarm.b) * 65535.0f);
+            cmsSetAlarmCodes(alarm);
+        }
+        cmsUInt32Number flags = cmsFLAGS_COPY_ALPHA | cmsFLAGS_SOFTPROOFING;
+        if (gamutCheck) flags |= cmsFLAGS_GAMUTCHECK;
+        if (blackPointCompensation) flags |= cmsFLAGS_BLACKPOINTCOMPENSATION;
+        t = cmsCreateProofingTransform(
+            static_cast<cmsHPROFILE>(workingProfile->nativeHandle()), TYPE_RGBA_FLT,
+            static_cast<cmsHPROFILE>(displayProfile->nativeHandle()), TYPE_RGBA_8,
+            static_cast<cmsHPROFILE>(proofProfile->nativeHandle()), lcmsIntent(intent),
+            lcmsIntent(proofIntent), flags);
+    }
+
+    if (t != nullptr) {
+        const Rgbaf* src = working.data();
+        Rgba8* dst = out.data();
+        std::size_t remaining = n;
+        constexpr std::size_t kChunk = 0x4000000;  // 64M pixels per cmsDoTransform call
+        while (remaining > 0) {
+            const std::size_t c = remaining < kChunk ? remaining : kChunk;
+            cmsDoTransform(t, src, dst, static_cast<cmsUInt32Number>(c));
+            src += c;
+            dst += c;
+            remaining -= c;
+        }
+        cmsDeleteTransform(t);
     } else {
         // No color management available: present the working values directly.
         for (std::size_t i = 0; i < n; ++i) out.data()[i] = toRgba8(working.data()[i]);

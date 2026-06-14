@@ -119,4 +119,43 @@ PE_TEST(display_convert_empty_is_empty) {
     PE_CHECK(disp.isEmpty());
 }
 
+PE_TEST(soft_proof_gamut_warning_marks_out_of_gamut) {
+    auto prophoto = ColorProfile::builtin(BuiltinSpace::ProPhotoRGB);
+    auto srgb = ColorProfile::builtin(BuiltinSpace::sRGB);
+    PixelBufferF working(1, 1);
+    working.set(0, 0, Rgbaf{0.0f, 1.0f, 0.0f, 1.0f});  // pure ProPhoto green (outside sRGB gamut)
+
+    const Rgbaf alarm{1.0f, 0.0f, 1.0f, 1.0f};  // magenta alarm
+    PixelBuffer warned =
+        convertForProof(working, prophoto, srgb, srgb, RenderingIntent::RelativeColorimetric,
+                        RenderingIntent::RelativeColorimetric, true, /*gamutCheck=*/true, alarm);
+    // Out-of-gamut -> painted the configured alarm color (magenta).
+    PE_CHECK(near8(warned.at(0, 0), Rgba8{255, 0, 255, 255}, 2));
+
+    // Without the gamut check, the color is proofed normally (not the alarm magenta).
+    PixelBuffer plain =
+        convertForProof(working, prophoto, srgb, srgb, RenderingIntent::RelativeColorimetric,
+                        RenderingIntent::RelativeColorimetric, true, /*gamutCheck=*/false, alarm);
+    PE_CHECK(!near8(plain.at(0, 0), Rgba8{255, 0, 255, 255}, 2));
+}
+
+PE_TEST(soft_proof_in_gamut_color_not_alarmed) {
+    auto srgb = ColorProfile::builtin(BuiltinSpace::sRGB);
+    PixelBufferF working(1, 1);
+    working.set(0, 0, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});  // neutral gray, in every gamut
+    PixelBuffer p =
+        convertForProof(working, srgb, srgb, srgb, RenderingIntent::RelativeColorimetric,
+                        RenderingIntent::RelativeColorimetric, true, true,
+                        Rgbaf{1.0f, 0.0f, 1.0f, 1.0f});         // magenta alarm
+    PE_CHECK(!near8(p.at(0, 0), Rgba8{255, 0, 255, 255}, 4));   // NOT magenta
+    PE_CHECK(near8(p.at(0, 0), toRgba8(working.at(0, 0)), 3));  // ~unchanged neutral
+}
+
+PE_TEST(soft_proof_fallback_without_profiles) {
+    PixelBufferF working(1, 1);
+    working.set(0, 0, Rgbaf{0.3f, 0.6f, 0.9f, 1.0f});
+    PixelBuffer p = convertForProof(working, nullptr, nullptr, nullptr);  // no profiles -> direct
+    PE_CHECK(near8(p.at(0, 0), toRgba8(working.at(0, 0))));
+}
+
 #endif  // PHOTOEDIT_HAVE_LCMS2
