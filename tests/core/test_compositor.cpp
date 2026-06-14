@@ -267,3 +267,44 @@ PE_TEST(composite_float_oversized_returns_empty) {
     PixelBufferF iF = compositeToImageF(stack, Rect{0, 0, 100000, 100000});
     PE_CHECK(iF.isEmpty());
 }
+
+PE_TEST(composite_16bit_matches_8bit_after_narrow) {
+    // The 16-bit output, narrowed back to 8-bit, equals the 8-bit output: both run
+    // the identical tile logic; 16-bit just keeps more precision per channel.
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed));
+    auto top = solid(kBlue);
+    top->setOpacity(0.5f);
+    stack.push_back(std::move(top));
+
+    PixelBuffer i8 = compositeToImage(stack, kCanvas);
+    PixelBuffer16 i16 = compositeToImage16(stack, kCanvas);
+    PE_CHECK_EQ(i16.width(), kW);
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            PE_CHECK(near8(to8(i16.at(x, y)), i8.at(x, y)));
+        }
+    }
+}
+
+PE_TEST(composite_16bit_preserves_sub_8bit_precision) {
+    // 50% blend -> exactly 0.5 -> 16-bit 32768, which is NOT a multiple of 257
+    // (the 8-bit grid), proving sub-8-bit precision is retained.
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed));
+    auto top = solid(kBlue);
+    top->setOpacity(0.5f);
+    stack.push_back(std::move(top));
+    PixelBuffer16 i16 = compositeToImage16(stack, kCanvas);
+    const Rgba16 c = i16.at(0, 0);
+    PE_CHECK_EQ(c.r, static_cast<uint16_t>(32768));  // 0.5 -> round(0.5*65535)+... = 32768
+    PE_CHECK_EQ(c.b, static_cast<uint16_t>(32768));
+    PE_CHECK_EQ(c.a, static_cast<uint16_t>(65535));
+}
+
+PE_TEST(composite_16bit_oversized_returns_empty) {
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed, Rect{0, 0, 100000, 100000}));
+    PixelBuffer16 i16 = compositeToImage16(stack, Rect{0, 0, 100000, 100000});
+    PE_CHECK(i16.isEmpty());
+}

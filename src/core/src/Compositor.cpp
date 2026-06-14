@@ -193,4 +193,10 @@ PixelBufferF compositeToImageF(std::span<const std::unique_ptr<Layer>> stack, Re
     return compositeToBuffer<PixelBufferF, Rgbaf>(stack, canvas, [](const Rgbaf& c) { return c; });
 }
 
+PixelBuffer16 compositeToImage16(std::span<const std::unique_ptr<Layer>> stack, Rect canvas) {
+    // Quantize the float composite to 16-bit (round + clamp + NaN-sink via toRgba16).
+    return compositeToBuffer<PixelBuffer16, Rgba16>(stack, canvas,
+                                                    [](const Rgbaf& c) { return toRgba16(c); });
+}
+
 }  // namespace pe
