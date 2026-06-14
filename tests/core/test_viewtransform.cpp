@@ -2,6 +2,7 @@
 #include "pe_test.hpp"
 
 #include <cmath>
+#include <numbers>
 
 using namespace pe;
 
@@ -25,7 +26,7 @@ PE_TEST(affine_compose_and_inverse) {
 }
 
 PE_TEST(affine_rotation_quarter_turn) {
-    Affine2 r = Affine2::rotation(M_PI / 2);  // 90 degrees
+    Affine2 r = Affine2::rotation(std::numbers::pi / 2);  // 90 degrees
     PointD p = r.apply(PointD{1, 0});
     PE_CHECK(nd(p.x, 0, 1e-9));
     PE_CHECK(nd(p.y, 1, 1e-9));
