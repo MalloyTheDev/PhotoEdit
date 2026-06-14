@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pe/core/BlendMode.hpp"
+#include "pe/core/ColorProfile.hpp"
 #include "pe/core/Command.hpp"
 #include "pe/core/Layer.hpp"
 
@@ -124,6 +125,25 @@ private:
     LayerId layerId_;
     std::string newName_;
     std::string oldName_;
+};
+
+// --- Color management ---
+
+// Assign a color profile to the document: reinterpret its numbers under a new
+// profile (the pixel values are unchanged; the appearance changes). Reversible.
+// Pass a null profile to untag. (Convert, which transforms the pixels to preserve
+// appearance, is a separate command.)
+class AssignProfileCommand final : public Command {
+public:
+    explicit AssignProfileCommand(ColorProfileRef profile);
+    [[nodiscard]] std::string name() const override { return "Assign Profile"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    ColorProfileRef newProfile_;
+    ColorProfileRef oldProfile_;
+    bool captured_ = false;  // oldProfile_ is filled on first execute
 };
 
 }  // namespace pe

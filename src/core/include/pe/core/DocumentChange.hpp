@@ -18,6 +18,7 @@ struct DocumentChange {
         LayerProps,      // opacity / blend / visibility / name / lock
         ActiveLayer,     // active-layer session change (not undoable)
         DirtyState,      // saved/unsaved transition
+        Profile,         // document color profile assigned/converted (recomposite)
     };
 
     Kind kind = Kind::Pixels;

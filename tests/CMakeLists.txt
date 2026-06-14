@@ -26,6 +26,7 @@ add_executable(pe_core_tests
     core/test_colorprofile.cpp
     core/test_colortransform.cpp
     core/test_colorengine.cpp
+    core/test_colorops.cpp
 )
 
 target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)

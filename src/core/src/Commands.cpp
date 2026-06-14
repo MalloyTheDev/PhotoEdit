@@ -189,4 +189,21 @@ DocumentChange RenameLayerCommand::undo(Document& doc) {
     return propsChange(layer, layerId_);
 }
 
+AssignProfileCommand::AssignProfileCommand(ColorProfileRef profile)
+    : newProfile_(std::move(profile)) {}
+
+DocumentChange AssignProfileCommand::execute(Document& doc) {
+    if (!captured_) {
+        oldProfile_ = doc.colorProfile();  // remember the prior tag for undo (once)
+        captured_ = true;
+    }
+    doc.cmdSetColorProfile(newProfile_);
+    return DocumentChange{DocumentChange::Kind::Profile, Rect{}, kNoLayer};
+}
+
+DocumentChange AssignProfileCommand::undo(Document& doc) {
+    doc.cmdSetColorProfile(oldProfile_);
+    return DocumentChange{DocumentChange::Kind::Profile, Rect{}, kNoLayer};
+}
+
 }  // namespace pe
