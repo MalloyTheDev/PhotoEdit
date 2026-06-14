@@ -180,18 +180,25 @@ void medianFilter(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h
         copyImage(src, dst);
         return;
     }
-    const int window = (2 * radius + 1) * (2 * radius + 1);
-    std::vector<float> rs(static_cast<std::size_t>(window));
-    std::vector<float> gs(static_cast<std::size_t>(window));
-    std::vector<float> bs(static_cast<std::size_t>(window));
-    std::vector<float> as(static_cast<std::size_t>(window));
-    const auto median = [](std::vector<float>& v) -> float {
-        const std::size_t mid = v.size() / 2;
+    // Self-guard the radius here too (not only in the wrapper class): the cost grows
+    // as r^2 and the window allocation is (2r+1)^2, so an unbounded radius from a
+    // direct caller would overflow `int` and over-allocate. kMaxMedianRadius keeps
+    // the window <= 31x31 and the arithmetic well within int range.
+    constexpr int kMaxMedianRadius = 15;
+    if (radius > kMaxMedianRadius) radius = kMaxMedianRadius;
+
+    const int side = 2 * radius + 1;
+    const std::size_t window = static_cast<std::size_t>(side) * static_cast<std::size_t>(side);
+    const std::size_t mid = window / 2;  // odd window -> middle element is the median
+    std::vector<float> rs(window), gs(window), bs(window), as(window);
+    const auto median = [mid](std::vector<float>& v) -> float {
         std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid), v.end());
-        return v[mid];  // odd-sized window -> the middle element is the median
+        return v[mid];
     };
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
+            // Clamping changes which source pixel is read, never the count, so the
+            // window is always full — fill all `window` slots, overwriting last pixel.
             std::size_t n = 0;
             for (int j = -radius; j <= radius; ++j) {
                 for (int i = -radius; i <= radius; ++i) {
@@ -203,15 +210,7 @@ void medianFilter(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h
                     ++n;
                 }
             }
-            rs.resize(n);
-            gs.resize(n);
-            bs.resize(n);
-            as.resize(n);
             dst[idx(x, y, w)] = Rgbaf{median(rs), median(gs), median(bs), median(as)};
-            rs.resize(static_cast<std::size_t>(window));
-            gs.resize(static_cast<std::size_t>(window));
-            bs.resize(static_cast<std::size_t>(window));
-            as.resize(static_cast<std::size_t>(window));
         }
     }
 }
