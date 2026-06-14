@@ -25,6 +25,7 @@ add_library(pe_core
     src/AdjustmentLayer.cpp
     src/Filter.cpp
     src/Histogram.cpp
+    src/Channels.cpp
     src/AutoTone.cpp
     src/ColorSpace.cpp
 )
