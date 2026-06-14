@@ -103,4 +103,128 @@ void Invert::apply(std::span<Rgbaf> tile) const {
     }
 }
 
+namespace {
+
+struct Hsl {
+    float h = 0.0f;  // degrees [0,360)
+    float s = 0.0f;  // [0,1]
+    float l = 0.0f;  // [0,1]
+};
+
+Hsl rgbToHsl(float r, float g, float b) noexcept {
+    const float mx = std::max(r, std::max(g, b));
+    const float mn = std::min(r, std::min(g, b));
+    Hsl out;
+    out.l = (mx + mn) * 0.5f;
+    const float d = mx - mn;
+    if (d > 1e-6f) {
+        out.s = out.l > 0.5f ? d / (2.0f - mx - mn) : d / (mx + mn);
+        if (mx == r) {
+            out.h = (g - b) / d + (g < b ? 6.0f : 0.0f);
+        } else if (mx == g) {
+            out.h = (b - r) / d + 2.0f;
+        } else {
+            out.h = (r - g) / d + 4.0f;
+        }
+        out.h *= 60.0f;
+    }
+    return out;
+}
+
+float hue2rgb(float p, float q, float t) noexcept {
+    if (t < 0.0f) t += 1.0f;
+    if (t > 1.0f) t -= 1.0f;
+    if (t < 1.0f / 6.0f) return p + (q - p) * 6.0f * t;
+    if (t < 0.5f) return q;
+    if (t < 2.0f / 3.0f) return p + (q - p) * (2.0f / 3.0f - t) * 6.0f;
+    return p;
+}
+
+void hslToRgb(float hDeg, float s, float l, float& r, float& g, float& b) noexcept {
+    if (s <= 1e-6f) {
+        r = g = b = l;
+        return;
+    }
+    const float h = hDeg / 360.0f;
+    const float q = l < 0.5f ? l * (1.0f + s) : l + s - l * s;
+    const float p = 2.0f * l - q;
+    r = hue2rgb(p, q, h + 1.0f / 3.0f);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1.0f / 3.0f);
+}
+
+float wrapHue(float h) noexcept {
+    h = std::fmod(h, 360.0f);
+    if (h < 0.0f) h += 360.0f;
+    return h;
+}
+
+float luminance(float r, float g, float b) noexcept {
+    return 0.299f * r + 0.587f * g + 0.114f * b;  // Rec.601 luma (encoded, M5)
+}
+
+}  // namespace
+
+void Exposure::apply(std::span<Rgbaf> tile) const {
+    const float gain = std::exp2(stops_);
+    const float invGamma = 1.0f / gamma_;
+    const auto map = [&](float v) {
+        const float lit = std::max(0.0f, v * gain + offset_);
+        return clamp01(std::pow(lit, invGamma));
+    };
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        p.r = map(p.r);
+        p.g = map(p.g);
+        p.b = map(p.b);
+    }
+}
+
+void HueSaturation::apply(std::span<Rgbaf> tile) const {
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        const Hsl c = rgbToHsl(p.r, p.g, p.b);
+        float rr = 0.0f, gg = 0.0f, bb = 0.0f;
+        if (colorize_) {
+            hslToRgb(wrapHue(colorizeHue_), colorizeSat_, clamp01(c.l), rr, gg, bb);
+        } else {
+            const float h = wrapHue(c.h + hueShift_);
+            const float s = clamp01(c.s * satScale_);
+            const float l = clamp01(c.l + lightness_);
+            hslToRgb(h, s, l, rr, gg, bb);
+        }
+        // Clamp on write (the codebase's NaN sink): HSL math can exceed [0,1] for
+        // out-of-gamut input and must never emit NaN/out-of-range into the composite.
+        p.r = clamp01(rr);
+        p.g = clamp01(gg);
+        p.b = clamp01(bb);
+    }
+}
+
+void ChannelMixer::apply(std::span<Rgbaf> tile) const {
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        const float r = p.r, g = p.g, b = p.b;
+        if (mono_) {
+            const float gray = clamp01(m_[0][0] * r + m_[0][1] * g + m_[0][2] * b + m_[0][3]);
+            p.r = p.g = p.b = gray;
+        } else {
+            p.r = clamp01(m_[0][0] * r + m_[0][1] * g + m_[0][2] * b + m_[0][3]);
+            p.g = clamp01(m_[1][0] * r + m_[1][1] * g + m_[1][2] * b + m_[1][3]);
+            p.b = clamp01(m_[2][0] * r + m_[2][1] * g + m_[2][2] * b + m_[2][3]);
+        }
+    }
+}
+
+void GradientMap::apply(std::span<Rgbaf> tile) const {
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        float lum = luminance(p.r, p.g, p.b);
+        if (reverse_) lum = 1.0f - lum;
+        p.r = clamp01(color0_.r + (color1_.r - color0_.r) * lum);
+        p.g = clamp01(color0_.g + (color1_.g - color0_.g) * lum);
+        p.b = clamp01(color0_.b + (color1_.b - color0_.b) * lum);
+    }
+}
+
 }  // namespace pe

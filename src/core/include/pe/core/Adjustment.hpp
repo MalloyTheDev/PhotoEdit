@@ -17,7 +17,11 @@ enum class AdjustmentKind : uint8_t {
     Levels,
     Curves,
     Invert,
-    // Exposure, Vibrance, HueSaturation, ColorBalance, ... arrive in later increments.
+    Exposure,
+    HueSaturation,
+    ChannelMixer,
+    GradientMap,
+    // Vibrance, ColorBalance, BlackAndWhite, SelectiveColor, ColorLookup ... later.
 };
 
 // A baked 256-entry 1D lookup table over the [0,1] domain (exact for 8-bit input),
@@ -154,6 +158,112 @@ public:
     [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
         return std::make_unique<Invert>(*this);
     }
+};
+
+// Exposure: scene gain (2^stops), then offset (lift), then a gamma. Applied to the
+// encoded working values in M5 (linear-light correctness arrives in M6). Per-channel.
+class Exposure final : public Adjustment {
+public:
+    explicit Exposure(float stops = 0.0f, float offset = 0.0f, float gamma = 1.0f)
+        : stops_(stops), offset_(offset), gamma_(gamma > 0.0f ? gamma : 1.0f) {}
+    void setStops(float s) noexcept { stops_ = s; }
+    void setOffset(float o) noexcept { offset_ = o; }
+    void setGamma(float g) noexcept { gamma_ = g > 0.0f ? g : 1.0f; }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override { return AdjustmentKind::Exposure; }
+    [[nodiscard]] std::string name() const override { return "Exposure"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<Exposure>(*this);
+    }
+
+private:
+    float stops_, offset_, gamma_;
+};
+
+// Hue/Saturation (master band): rotate hue, scale saturation, shift lightness in
+// HSL. Colorize maps everything to one hue/saturation. Perceptual (cross-channel).
+class HueSaturation final : public Adjustment {
+public:
+    void setHueShiftDegrees(float d) noexcept { hueShift_ = d; }
+    void setSaturationScale(float s) noexcept { satScale_ = s < 0.0f ? 0.0f : s; }
+    void setLightness(float l) noexcept { lightness_ = std::clamp(l, -1.0f, 1.0f); }
+    void setColorize(bool on, float hueDeg = 0.0f, float sat = 0.5f) noexcept {
+        colorize_ = on;
+        colorizeHue_ = hueDeg;
+        colorizeSat_ = clamp01(sat);
+    }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override {
+        return AdjustmentKind::HueSaturation;
+    }
+    [[nodiscard]] std::string name() const override { return "Hue/Saturation"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<HueSaturation>(*this);
+    }
+
+private:
+    float hueShift_ = 0.0f;   // degrees
+    float satScale_ = 1.0f;   // multiplier
+    float lightness_ = 0.0f;  // [-1,1] add to L
+    bool colorize_ = false;
+    float colorizeHue_ = 0.0f;  // degrees
+    float colorizeSat_ = 0.5f;  // [0,1]
+};
+
+// Channel Mixer: each output channel is a linear combination of the inputs plus a
+// constant; monochrome collapses to a single weighted gray. Cross-channel.
+class ChannelMixer final : public Adjustment {
+public:
+    // m[out][0..2] = R,G,B coefficients; m[out][3] = constant. Defaults to identity.
+    void setRow(int out, float r, float g, float b, float constant) noexcept {
+        if (out < 0 || out > 2) return;
+        m_[out][0] = r;
+        m_[out][1] = g;
+        m_[out][2] = b;
+        m_[out][3] = constant;
+    }
+    void setMonochrome(bool on) noexcept { mono_ = on; }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override {
+        return AdjustmentKind::ChannelMixer;
+    }
+    [[nodiscard]] std::string name() const override { return "Channel Mixer"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<ChannelMixer>(*this);
+    }
+
+private:
+    float m_[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+    bool mono_ = false;
+};
+
+// Gradient Map: map each pixel's luminance to a two-stop gradient (color0..color1).
+// Cross-channel; defaults to black->white (luminance to grayscale).
+class GradientMap final : public Adjustment {
+public:
+    explicit GradientMap(Rgbaf color0 = Rgbaf{0, 0, 0, 1}, Rgbaf color1 = Rgbaf{1, 1, 1, 1})
+        : color0_(color0), color1_(color1) {}
+    void setColors(Rgbaf c0, Rgbaf c1) noexcept {
+        color0_ = c0;
+        color1_ = c1;
+    }
+    void setReverse(bool r) noexcept { reverse_ = r; }
+
+    [[nodiscard]] AdjustmentKind kind() const noexcept override {
+        return AdjustmentKind::GradientMap;
+    }
+    [[nodiscard]] std::string name() const override { return "Gradient Map"; }
+    void apply(std::span<Rgbaf> tile) const override;
+    [[nodiscard]] std::unique_ptr<Adjustment> clone() const override {
+        return std::make_unique<GradientMap>(*this);
+    }
+
+private:
+    Rgbaf color0_, color1_;
+    bool reverse_ = false;
 };
 
 }  // namespace pe

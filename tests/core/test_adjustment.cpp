@@ -97,6 +97,60 @@ PE_TEST(adjustment_skips_transparent) {
     PE_CHECK_NEAR(out.r, 0.2f);  // transparent -> untouched
 }
 
+PE_TEST(adjustment_exposure) {
+    // +1 stop doubles the value (gamma/offset identity).
+    Rgbaf out = applyOne(Exposure(1.0f, 0.0f, 1.0f), Rgbaf{0.25f, 0.25f, 0.25f, 1.0f});
+    PE_CHECK_NEAR(out.r, 0.5f);
+}
+
+PE_TEST(adjustment_hue_saturation_desaturate) {
+    HueSaturation h;
+    h.setSaturationScale(0.0f);                              // fully desaturate
+    Rgbaf out = applyOne(h, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f});  // red -> mid gray (L=0.5)
+    PE_CHECK_NEAR(out.r, 0.5f);
+    PE_CHECK_NEAR(out.g, 0.5f);
+    PE_CHECK_NEAR(out.b, 0.5f);
+}
+
+PE_TEST(adjustment_hue_shift_red_to_green) {
+    HueSaturation h;
+    h.setHueShiftDegrees(120.0f);  // red -> green
+    Rgbaf out = applyOne(h, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f});
+    PE_CHECK_NEAR(out.r, 0.0f);
+    PE_CHECK_NEAR(out.g, 1.0f);
+    PE_CHECK_NEAR(out.b, 0.0f);
+}
+
+PE_TEST(adjustment_channel_mixer_monochrome) {
+    ChannelMixer cm;
+    cm.setMonochrome(true);
+    cm.setRow(0, 0.299f, 0.587f, 0.114f, 0.0f);
+    Rgbaf out = applyOne(cm, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f});
+    PE_CHECK_NEAR(out.r, 0.299f);
+    PE_CHECK_NEAR(out.g, 0.299f);
+    PE_CHECK_NEAR(out.b, 0.299f);
+}
+
+PE_TEST(adjustment_channel_mixer_swap) {
+    ChannelMixer cm;
+    cm.setRow(0, 0.0f, 1.0f, 0.0f, 0.0f);  // R output takes the green input
+    Rgbaf out = applyOne(cm, Rgbaf{0.0f, 1.0f, 0.0f, 1.0f});
+    PE_CHECK_NEAR(out.r, 1.0f);
+}
+
+PE_TEST(adjustment_gradient_map) {
+    // Default black->white maps luminance to grayscale.
+    Rgbaf gray = applyOne(GradientMap{}, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f});
+    PE_CHECK_NEAR(gray.r, 0.299f);
+    PE_CHECK_NEAR(gray.g, 0.299f);
+
+    // black->red gradient: white luminance (1) maps to red.
+    Rgbaf red =
+        applyOne(GradientMap(Rgbaf{0, 0, 0, 1}, Rgbaf{1, 0, 0, 1}), Rgbaf{1.0f, 1.0f, 1.0f, 1.0f});
+    PE_CHECK_NEAR(red.r, 1.0f);
+    PE_CHECK_NEAR(red.g, 0.0f);
+}
+
 PE_TEST(compositor_adjustment_inverts_backdrop) {
     PixelBuffer img = renderAdjusted(std::make_unique<Invert>());
     PE_CHECK(near8(img.at(0, 0), kCyan));  // red inverted -> cyan
