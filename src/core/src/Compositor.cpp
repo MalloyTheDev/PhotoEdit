@@ -30,12 +30,13 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
     for (const auto& layerPtr : stack) {
         const Layer* layer = layerPtr.get();
         if (layer == nullptr) continue;
-        if (!layer->visible() || layer->opacity() <= 0.0f) continue;
+        const bool hidden = !layer->visible() || layer->opacity() <= 0.0f;
 
         // Adjustment layers transform the accumulated backdrop instead of
         // contributing pixels (the "twist" in the compositor loop). They cover the
         // whole backdrop, so they are never culled; the mask scopes where they apply.
         if (layer->isAdjustment()) {
+            if (hidden) continue;
             if (adjusted.size() < static_cast<std::size_t>(kTilePixels)) {
                 adjusted.assign(static_cast<std::size_t>(kTilePixels), Rgbaf{});
             }
@@ -111,9 +112,10 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
         const bool touches = !cb.isEmpty() && cb.intersects(tile);
 
         if (layer->clipped()) {
-            // A clipped layer is confined to the coverage (alpha) of the base layer
-            // directly below it. With no base below, it behaves as a normal layer.
-            if (!touches) continue;
+            // Confine a clipped layer to the base layer's coverage. A hidden or
+            // off-tile clipped layer contributes nothing (and does not affect the
+            // base for other clipped layers).
+            if (hidden || !touches) continue;
             renderSrc(layer);
             if (baseValid) {
                 for (std::size_t i = 0; i < src.size(); ++i) src[i].a *= baseClipAlpha[i];
@@ -122,9 +124,10 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
             continue;  // clipped layers do not become a base
         }
 
-        // A non-clipped layer is the base for any clipped layers above it. Record its
-        // coverage (0 where it has no content on this tile, so clipped layers hide).
-        if (!touches) {
+        // A non-clipped layer is the base for any clipped layers above it. A base
+        // that is HIDDEN or has no content on this tile records ZERO coverage, so a
+        // clipped run above it is hidden here (per the layer-system spec).
+        if (hidden || !touches) {
             std::fill(baseClipAlpha.begin(), baseClipAlpha.end(), 0.0f);
             baseValid = true;
             continue;
