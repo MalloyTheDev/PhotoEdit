@@ -22,6 +22,7 @@ add_executable(pe_core_tests
     core/test_filter.cpp
     core/test_histogram.cpp
     core/test_autotone.cpp
+    core/test_colorspace.cpp
 )
 
 target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)
