@@ -5,10 +5,12 @@
 namespace pe {
 
 namespace {
-// An adjustment layer affects "everything beneath it"; report a very large bounds
-// so it is never culled and an edit invalidates the whole composite below it (the
-// renderer collapses an over-threshold invalidate region into a full recomposite).
-constexpr Rect kEverywhere{-(1 << 24), -(1 << 24), 1 << 25, 1 << 25};
+// An adjustment layer affects "everything beneath it"; report a large bounds so it
+// is never culled and an edit invalidates the whole composite below it (the renderer
+// collapses an over-threshold invalidate region into a full recomposite). Sized so
+// tilesForRect(kEverywhere).count() stays within int (no overflow) while still
+// covering any realistic canvas (max dimension 300000).
+constexpr Rect kEverywhere{-2'000'000, -2'000'000, 4'000'000, 4'000'000};
 }  // namespace
 
 AdjustmentLayer::AdjustmentLayer(std::unique_ptr<Adjustment> adjustment, std::string name)

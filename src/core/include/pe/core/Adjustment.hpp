@@ -2,6 +2,7 @@
 
 #include "pe/core/Color.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -63,10 +64,11 @@ public:
 class BrightnessContrast final : public Adjustment {
 public:
     explicit BrightnessContrast(float brightness = 0.0f, float contrast = 0.0f)
-        : brightness_(brightness), contrast_(contrast) {}
+        : brightness_(std::clamp(brightness, -1.0f, 1.0f)),
+          contrast_(std::clamp(contrast, -1.0f, 1.0f)) {}
 
-    void setBrightness(float b) noexcept { brightness_ = b; }
-    void setContrast(float c) noexcept { contrast_ = c; }
+    void setBrightness(float b) noexcept { brightness_ = std::clamp(b, -1.0f, 1.0f); }
+    void setContrast(float c) noexcept { contrast_ = std::clamp(c, -1.0f, 1.0f); }
     [[nodiscard]] float brightness() const noexcept { return brightness_; }
     [[nodiscard]] float contrast() const noexcept { return contrast_; }
 
@@ -88,11 +90,15 @@ private:
 // channel (per-channel arrives with the channel set in M6). Baked to a 1D LUT.
 class Levels final : public Adjustment {
 public:
-    void setInputBlack(float v) noexcept { dirty_ = true, inBlack_ = clamp01(v); }
-    void setInputWhite(float v) noexcept { dirty_ = true, inWhite_ = clamp01(v); }
-    void setGamma(float g) noexcept { dirty_ = true, gamma_ = g; }
-    void setOutputBlack(float v) noexcept { dirty_ = true, outBlack_ = clamp01(v); }
-    void setOutputWhite(float v) noexcept { dirty_ = true, outWhite_ = clamp01(v); }
+    // The LUT is baked eagerly in the constructor and on every setter, so apply()
+    // is read-only and therefore safe for the future multithreaded compositor.
+    Levels() { rebuild(); }
+
+    void setInputBlack(float v) { inBlack_ = clamp01(v), rebuild(); }
+    void setInputWhite(float v) { inWhite_ = clamp01(v), rebuild(); }
+    void setGamma(float g) { gamma_ = g, rebuild(); }
+    void setOutputBlack(float v) { outBlack_ = clamp01(v), rebuild(); }
+    void setOutputWhite(float v) { outWhite_ = clamp01(v), rebuild(); }
 
     [[nodiscard]] AdjustmentKind kind() const noexcept override { return AdjustmentKind::Levels; }
     [[nodiscard]] std::string name() const override { return "Levels"; }
@@ -104,20 +110,20 @@ public:
     [[nodiscard]] float mapChannel(float v) const noexcept;  // reference (analytic)
 
 private:
-    void rebuild() const;
+    void rebuild();
 
     float inBlack_ = 0.0f, inWhite_ = 1.0f, gamma_ = 1.0f, outBlack_ = 0.0f, outWhite_ = 1.0f;
-    mutable Lut1D lut_;
-    mutable bool dirty_ = true;
+    Lut1D lut_;
 };
 
 // Curves: a monotone piecewise-linear tone curve (>=2 x-monotonic points in [0,1])
 // on the composite channel, baked to a 1D LUT. Spline smoothing arrives later.
 class Curves final : public Adjustment {
 public:
-    Curves() : points_{{0.0f, 0.0f}, {1.0f, 1.0f}} {}
+    Curves() : points_{{0.0f, 0.0f}, {1.0f, 1.0f}} { rebuild(); }
 
-    // Replace the control points (sorted/sanitized to be x-monotonic on set).
+    // Replace the control points (sorted/sanitized to be x-monotonic on set). Bakes
+    // the LUT immediately, so apply() stays read-only (thread-safe).
     void setPoints(std::vector<std::pair<float, float>> pts);
     [[nodiscard]] const std::vector<std::pair<float, float>>& points() const noexcept {
         return points_;
@@ -133,11 +139,10 @@ public:
     [[nodiscard]] float evalCurve(float x) const noexcept;  // reference (analytic)
 
 private:
-    void rebuild() const;
+    void rebuild();
 
     std::vector<std::pair<float, float>> points_;
-    mutable Lut1D lut_;
-    mutable bool dirty_ = true;
+    Lut1D lut_;
 };
 
 // Invert: out = 1 - in per channel.

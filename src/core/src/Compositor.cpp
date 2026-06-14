@@ -54,8 +54,11 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
                 Rgbaf& a = acc[i];
                 const Rgbaf& d = adjusted[i];
                 // Blend the adjusted color back over the backdrop via the layer's
-                // blend mode, mixed in by t (opacity x mask). Color only; alpha
-                // unchanged (an adjustment never adds or removes coverage).
+                // blend mode, mixed in by t (opacity x mask). This is intentionally
+                // an ALPHA-PRESERVING color lerp (not compositeOver): an adjustment
+                // modifies existing pixels' color, it never adds coverage. Exact for
+                // Normal and any opaque backdrop; per-mode parity on partially
+                // transparent backdrops is a later refinement.
                 a.r += t * (blendChannel(mode, a.r, d.r) - a.r);
                 a.g += t * (blendChannel(mode, a.g, d.g) - a.g);
                 a.b += t * (blendChannel(mode, a.b, d.b) - a.b);

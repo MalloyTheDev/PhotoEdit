@@ -35,13 +35,11 @@ float Levels::mapChannel(float v) const noexcept {
     return clamp01(outBlack_ + g * (outWhite_ - outBlack_));
 }
 
-void Levels::rebuild() const {
+void Levels::rebuild() {
     lut_.bake([this](float v) { return mapChannel(v); });
-    dirty_ = false;
 }
 
 void Levels::apply(std::span<Rgbaf> tile) const {
-    if (dirty_) rebuild();
     for (Rgbaf& p : tile) {
         if (!opaqueEnough(p)) continue;
         p.r = lut_.apply(p.r);
@@ -63,7 +61,7 @@ void Curves::setPoints(std::vector<std::pair<float, float>> pts) {
         if (clean.empty() || pt.first > clean.back().first) clean.push_back(pt);
     }
     if (clean.size() >= 2) points_ = std::move(clean);
-    dirty_ = true;
+    rebuild();
 }
 
 float Curves::evalCurve(float x) const noexcept {
@@ -83,13 +81,11 @@ float Curves::evalCurve(float x) const noexcept {
     return x;
 }
 
-void Curves::rebuild() const {
+void Curves::rebuild() {
     lut_.bake([this](float v) { return evalCurve(v); });
-    dirty_ = false;
 }
 
 void Curves::apply(std::span<Rgbaf> tile) const {
-    if (dirty_) rebuild();
     for (Rgbaf& p : tile) {
         if (!opaqueEnough(p)) continue;
         p.r = lut_.apply(p.r);
