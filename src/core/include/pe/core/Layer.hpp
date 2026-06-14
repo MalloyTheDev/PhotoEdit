@@ -3,6 +3,7 @@
 #include "pe/core/BlendMode.hpp"
 #include "pe/core/Color.hpp"
 #include "pe/core/Geometry.hpp"
+#include "pe/core/Mask.hpp"
 #include "pe/core/Tile.hpp"
 
 #include <cstdint>
@@ -51,7 +52,9 @@ struct LayerLocks {
 class Layer {
 public:
     explicit Layer(LayerKind kind, std::string name);
-    virtual ~Layer() = default;
+    // Defined out-of-line so the unique_ptr<Mask> member only needs a forward
+    // declaration of Mask in this header.
+    virtual ~Layer();
 
     Layer(const Layer&) = delete;
     Layer& operator=(const Layer&) = delete;
@@ -75,6 +78,13 @@ public:
     void setFillOpacity(float o) noexcept { fillOpacity_ = clamp01(o); }
     void setBlendMode(BlendMode m) noexcept { blendMode_ = m; }
     void setClipped(bool c) noexcept { clipped_ = c; }
+
+    // Optional layer mask (raster). The compositor multiplies its coverage into
+    // this layer's alpha before blending. nullptr == no mask (the common case).
+    [[nodiscard]] const Mask* mask() const noexcept { return mask_.get(); }
+    [[nodiscard]] Mask* mask() noexcept { return mask_.get(); }
+    void setMask(std::unique_ptr<Mask> m) noexcept { mask_ = std::move(m); }
+    [[nodiscard]] std::unique_ptr<Mask> takeMask() noexcept { return std::move(mask_); }
 
     // Tightest document-space rect this layer can affect (for cull). Empty rect
     // means "no content"; a Fill/Group may report finite or content-derived bounds.
@@ -103,6 +113,7 @@ private:
     float fillOpacity_ = 1.0f;
     BlendMode blendMode_ = BlendMode::Normal;
     bool clipped_ = false;
+    std::unique_ptr<Mask> mask_;  // optional layer mask
 };
 
 }  // namespace pe

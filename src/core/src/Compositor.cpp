@@ -2,6 +2,7 @@
 
 #include "pe/core/BlendMode.hpp"
 #include "pe/core/GroupLayer.hpp"
+#include "pe/core/Mask.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -36,6 +37,25 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
             compositeStack(group->children(), coord, srcSpan, depth + 1);
         } else {
             layer->renderInto(coord, srcSpan);
+        }
+
+        // Layer mask: multiply the layer's coverage (alpha) by the mask before
+        // blending, so a gray mask makes the layer partly transparent (color
+        // unchanged), orthogonal to blend mode and opacity. Skipped entirely when
+        // there is no enabled mask or the mask is a trivial no-op.
+        const Mask* mask = layer->mask();
+        if (mask != nullptr && mask->enabled()) {
+            const bool trivial =
+                !mask->inverted() && mask->density() >= 1.0f && mask->buffer().empty();
+            if (!trivial) {
+                const int baseX = coord.col * kTileSize;
+                const int baseY = coord.row * kTileSize;
+                for (std::size_t i = 0; i < src.size(); ++i) {
+                    const int lx = static_cast<int>(i % static_cast<std::size_t>(kTileSize));
+                    const int ly = static_cast<int>(i / static_cast<std::size_t>(kTileSize));
+                    src[i].a *= mask->evaluate(baseX + lx, baseY + ly);
+                }
+            }
         }
 
         const BlendMode mode = layer->blendMode();

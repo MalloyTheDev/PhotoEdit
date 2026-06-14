@@ -21,6 +21,7 @@ add_library(pe_core
     src/CanvasRenderer.cpp
     src/Brush.cpp
     src/Selection.cpp
+    src/Mask.cpp
 )
 
 add_library(PhotoEdit::Core ALIAS pe_core)
