@@ -83,6 +83,63 @@ void stampDab(CoverageMap& cov, Vec2 center, float radius, float hardness, float
     }
 }
 
+// Composite the accumulated stroke coverage into `store` at its native depth: for
+// each touched tile, blend the dab color (or erase alpha) over the prior pixels in
+// float and write back native-depth tile deltas. One template per pixel type keeps
+// the dab/composite math identical across depths.
+template <class Pixel>
+std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& store,
+                                          const CoverageMap& cov, std::string name, Rgbaf color,
+                                          BlendMode blendMode, float opacity, PaintOp op,
+                                          const Selection* selection) {
+    std::vector<PaintCommand::DeltaT<Pixel>> deltas;
+    Rect dirty{};
+    const float colorA = clamp01(color.a);
+    const bool gate = selection != nullptr && selection->active();
+    for (const auto& [key, buf] : cov) {
+        const TileCoord coord{key.first, key.second};
+        const int baseX = coord.col * kTileSize;
+        const int baseY = coord.row * kTileSize;
+        std::shared_ptr<TileDataT<Pixel>> before = store.sharedTile(coord);
+        auto after = std::make_shared<TileDataT<Pixel>>();
+        if (before) *after = *before;  // start from prior pixels (else transparent)
+
+        bool changed = false;
+        for (std::size_t idx = 0; idx < static_cast<std::size_t>(kTilePixels); ++idx) {
+            float a = std::min(buf[idx], opacity);
+            if (a <= 0.0f) continue;
+            if (gate) {
+                // Confine the stroke to the active selection (soft edges for free).
+                const int lx = static_cast<int>(idx % static_cast<std::size_t>(kTileSize));
+                const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
+                a *= selection->coverage(baseX + lx, baseY + ly);
+                if (a <= 0.0f) continue;
+            }
+            const Rgbaf dst = toFloat(after->px[idx]);
+            Rgbaf out;
+            if (op == PaintOp::Paint) {
+                const Rgbaf src{color.r, color.g, color.b, a * colorA};
+                out = compositeOver(blendMode, dst, src, 1.0f);
+            } else {
+                out = dst;
+                out.a = dst.a * (1.0f - a);  // erase: reduce alpha
+            }
+            const Pixel newPx = fromFloat<Pixel>(out);
+            if (!pixelEqual(newPx, after->px[idx])) {
+                after->px[idx] = newPx;
+                changed = true;
+            }
+        }
+        if (changed) {
+            deltas.push_back(
+                PaintCommand::DeltaT<Pixel>{coord, std::move(before), std::move(after)});
+            dirty = dirty.united(tileBounds(coord));
+        }
+    }
+    if (deltas.empty()) return nullptr;
+    return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), std::move(name));
+}
+
 std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const BrushSettings& in,
                                           Rgbaf color, std::span<const StrokePoint> points,
                                           PaintOp op, std::string name,
@@ -91,9 +148,6 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
     if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
     if (points.empty()) return nullptr;
     auto* pl = static_cast<PixelLayer*>(layer);
-    // The brush dab path is 8-bit only for now; refuse high-depth layers rather than
-    // silently painting the inactive 8-bit store (depth-aware brushing is a follow-up).
-    if (pl->depth() != BitDepth::U8) return nullptr;
 
     float diameter = std::isfinite(in.diameter) ? in.diameter : 20.0f;
     diameter = std::clamp(diameter, 0.1f, kMaxBrushDiameter);
@@ -136,52 +190,20 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
         distSinceLast += (segLen - consumed);
     }
 
-    // Flush the stroke buffer into tile deltas (one composite, capped at opacity).
-    std::vector<PaintCommand::Delta> deltas;
-    Rect dirty{};
-    const float colorA = clamp01(color.a);
-    const bool gate = selection != nullptr && selection->active();
-    for (const auto& [key, buf] : cov) {
-        const TileCoord coord{key.first, key.second};
-        const int baseX = coord.col * kTileSize;
-        const int baseY = coord.row * kTileSize;
-        std::shared_ptr<TileData> before = pl->tiles().sharedTile(coord);
-        auto after = std::make_shared<TileData>();
-        if (before) *after = *before;  // start from prior pixels (else transparent)
-
-        bool changed = false;
-        for (std::size_t idx = 0; idx < static_cast<std::size_t>(kTilePixels); ++idx) {
-            float a = std::min(buf[idx], opacity);
-            if (a <= 0.0f) continue;
-            if (gate) {
-                // Confine the stroke to the active selection (soft edges for free).
-                const int lx = static_cast<int>(idx % static_cast<std::size_t>(kTileSize));
-                const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
-                a *= selection->coverage(baseX + lx, baseY + ly);
-                if (a <= 0.0f) continue;
-            }
-            const Rgbaf dst = toFloat(after->px[idx]);
-            Rgbaf out;
-            if (op == PaintOp::Paint) {
-                const Rgbaf src{color.r, color.g, color.b, a * colorA};
-                out = compositeOver(in.blendMode, dst, src, 1.0f);
-            } else {
-                out = dst;
-                out.a = dst.a * (1.0f - a);  // erase: reduce alpha
-            }
-            const Rgba8 newPx = toRgba8(out);
-            if (!(newPx == after->px[idx])) {
-                after->px[idx] = newPx;
-                changed = true;
-            }
-        }
-        if (changed) {
-            deltas.push_back(PaintCommand::Delta{coord, std::move(before), std::move(after)});
-            dirty = dirty.united(tileBounds(coord));
-        }
+    // Flush the accumulated coverage into native-depth tile deltas (one composite,
+    // capped at opacity), editing the layer's store at its own bit depth.
+    switch (pl->depth()) {
+        case BitDepth::U16:
+            return flushStroke<Rgba16>(layerId, pl->tiles16(), cov, std::move(name), color,
+                                       in.blendMode, opacity, op, selection);
+        case BitDepth::F32:
+            return flushStroke<Rgbaf>(layerId, pl->tilesF(), cov, std::move(name), color,
+                                      in.blendMode, opacity, op, selection);
+        case BitDepth::U8:
+        default:
+            return flushStroke<Rgba8>(layerId, pl->tiles(), cov, std::move(name), color,
+                                      in.blendMode, opacity, op, selection);
     }
-    if (deltas.empty()) return nullptr;
-    return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), std::move(name));
 }
 
 }  // namespace

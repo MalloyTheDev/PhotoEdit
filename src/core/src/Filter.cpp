@@ -84,43 +84,6 @@ void copyImage(std::span<const Rgbaf> src, std::span<Rgbaf> dst) {
     std::copy(src.begin(), src.end(), dst.begin());
 }
 
-// Native-pixel <-> working-float conversions for the depth-generic bakePixelEdit.
-// Overloads pick the right direction by the store's pixel type.
-inline Rgbaf toWorking(Rgba8 c) noexcept {
-    return toFloat(c);
-}
-inline Rgbaf toWorking(Rgba16 c) noexcept {
-    return toFloat(c);
-}
-inline Rgbaf toWorking(Rgbaf c) noexcept {
-    return c;
-}
-template <class Pixel>
-[[nodiscard]] Pixel fromWorking(Rgbaf c) noexcept;
-template <>
-[[nodiscard]] inline Rgba8 fromWorking<Rgba8>(Rgbaf c) noexcept {
-    return toRgba8(c);
-}
-template <>
-[[nodiscard]] inline Rgba16 fromWorking<Rgba16>(Rgbaf c) noexcept {
-    return toRgba16(c);
-}
-template <>
-[[nodiscard]] inline Rgbaf fromWorking<Rgbaf>(Rgbaf c) noexcept {
-    return c;  // float store preserves out-of-range/HDR values
-}
-
-// Bit-exact "did the pixel change" test for delta detection (Rgbaf has no ==).
-inline bool pixelEqual(Rgba8 a, Rgba8 b) noexcept {
-    return a == b;
-}
-inline bool pixelEqual(Rgba16 a, Rgba16 b) noexcept {
-    return a == b;
-}
-inline bool pixelEqual(const Rgbaf& a, const Rgbaf& b) noexcept {
-    return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
-}
-
 }  // namespace
 
 void boxBlur(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int radius) {
@@ -346,7 +309,7 @@ std::unique_ptr<PaintCommand> bakePixelEditImpl(
     std::vector<Rgbaf> orig(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            orig[idx(x, y, w)] = toWorking(store.pixel(bb.left() + x, bb.top() + y));
+            orig[idx(x, y, w)] = toFloat(store.pixel(bb.left() + x, bb.top() + y));
         }
     }
     std::vector<Rgbaf> work = orig;  // the transform mutates this in place
@@ -379,7 +342,7 @@ std::unique_ptr<PaintCommand> bakePixelEditImpl(
                         out.b = o.b + (out.b - o.b) * cov;
                         out.a = o.a + (out.a - o.a) * cov;
                     }
-                    const Pixel np = fromWorking<Pixel>(out);
+                    const Pixel np = fromFloat<Pixel>(out);
                     const std::size_t li = static_cast<std::size_t>(y - tb.top()) * kTileSize +
                                            static_cast<std::size_t>(x - tb.left());
                     if (!pixelEqual(np, after->px[li])) {
