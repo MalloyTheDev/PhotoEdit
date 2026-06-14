@@ -272,4 +272,73 @@ void ColorBalance::apply(std::span<Rgbaf> tile) const {
     }
 }
 
+void BlackAndWhite::apply(std::span<Rgbaf> tile) const {
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        const float mx = std::max(p.r, std::max(p.g, p.b));
+        const float mn = std::min(p.r, std::min(p.g, p.b));
+        const float chroma = mx - mn;
+        // Interpolate the band multiplier across the six hue sectors. A neutral
+        // pixel (chroma == 0) has no hue; its gray is just mn (== mx), unweighted.
+        float w = 1.0f;
+        if (chroma > 1e-6f) {
+            const Hsl c = rgbToHsl(p.r, p.g, p.b);
+            const float seg = wrapHue(c.h) / 60.0f;  // [0,6)
+            const int i0 = static_cast<int>(seg) % BlackAndWhite::kBandCount;
+            const int i1 = (i0 + 1) % BlackAndWhite::kBandCount;
+            const float t = seg - std::floor(seg);
+            w = bands_[static_cast<std::size_t>(i0)] * (1.0f - t) +
+                bands_[static_cast<std::size_t>(i1)] * t;
+        }
+        const float gray = clamp01(mn + chroma * w);
+        p.r = p.g = p.b = gray;
+    }
+}
+
+void PhotoFilter::apply(std::span<Rgbaf> tile) const {
+    const float d = density_;
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        // Multiply blend toward the filter color, mixed in by density.
+        float r = p.r + d * (p.r * color_.r - p.r);
+        float g = p.g + d * (p.g * color_.g - p.g);
+        float b = p.b + d * (p.b * color_.b - p.b);
+        if (preserveLum_) {
+            const float origLum = luminance(p.r, p.g, p.b);
+            const float newLum = luminance(r, g, b);
+            if (newLum > 1e-5f) {
+                const float k = origLum / newLum;
+                r *= k;
+                g *= k;
+                b *= k;
+            }
+        }
+        p.r = clamp01(r);
+        p.g = clamp01(g);
+        p.b = clamp01(b);
+    }
+}
+
+void Posterize::rebuild() {
+    const float steps = static_cast<float>(levels_ - 1);  // levels_ >= 2 -> steps >= 1
+    lut_.bake([steps](float v) { return std::round(clamp01(v) * steps) / steps; });
+}
+
+void Posterize::apply(std::span<Rgbaf> tile) const {
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        p.r = lut_.apply(p.r);
+        p.g = lut_.apply(p.g);
+        p.b = lut_.apply(p.b);
+    }
+}
+
+void Threshold::apply(std::span<Rgbaf> tile) const {
+    for (Rgbaf& p : tile) {
+        if (!opaqueEnough(p)) continue;
+        const float v = luminance(p.r, p.g, p.b) >= level_ ? 1.0f : 0.0f;
+        p.r = p.g = p.b = v;
+    }
+}
+
 }  // namespace pe

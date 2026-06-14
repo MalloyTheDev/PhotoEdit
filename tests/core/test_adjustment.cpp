@@ -245,3 +245,58 @@ PE_TEST(adjustment_color_balance_midtone_red) {
     PE_CHECK_NEAR(out.r, 0.75f);  // 0.5 + 0.5*1.0(midW)*0.5
     PE_CHECK_NEAR(out.g, 0.5f);
 }
+
+PE_TEST(adjustment_black_and_white_grays_and_weights) {
+    // Output is always neutral gray (r==g==b).
+    Rgbaf out = applyOne(BlackAndWhite{}, Rgbaf{0.8f, 0.2f, 0.1f, 1.0f});
+    PE_CHECK_NEAR(out.r, out.g);
+    PE_CHECK_NEAR(out.g, out.b);
+    // Pure red maps to the Reds band weight (default 0.40): gray = mn + chroma*w
+    // = 0 + 1*0.40 = 0.40.
+    Rgbaf red = applyOne(BlackAndWhite{}, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f});
+    PE_CHECK_NEAR(red.r, 0.40f);
+    // Raising the Reds band brightens reds; an already-gray pixel is unchanged.
+    BlackAndWhite bw;
+    bw.setBand(BlackAndWhite::Reds, 1.0f);
+    PE_CHECK_NEAR(applyOne(bw, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f}).r, 1.0f);
+    PE_CHECK_NEAR(applyOne(bw, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f}).r, 0.5f);  // neutral passes through
+}
+
+PE_TEST(adjustment_photo_filter_warms_toward_color) {
+    // A pure-blue filter at full density with no luminosity preservation tints
+    // a gray toward blue (red/green multiplied out).
+    PhotoFilter pf(Rgbaf{0.0f, 0.0f, 1.0f, 1.0f}, 1.0f);
+    pf.setPreserveLuminosity(false);
+    Rgbaf out = applyOne(pf, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});
+    PE_CHECK_NEAR(out.r, 0.0f);
+    PE_CHECK_NEAR(out.b, 0.5f);
+    // Zero density is a no-op.
+    PhotoFilter none(Rgbaf{1.0f, 0.0f, 0.0f, 1.0f}, 0.0f);
+    Rgbaf same = applyOne(none, Rgbaf{0.4f, 0.5f, 0.6f, 1.0f});
+    PE_CHECK_NEAR(same.r, 0.4f);
+    PE_CHECK_NEAR(same.b, 0.6f);
+}
+
+PE_TEST(adjustment_posterize_quantizes) {
+    // 2 levels: snaps each channel to 0 or 1 (round at the 0.5 boundary).
+    Posterize p(2);
+    Rgbaf out = applyOne(p, Rgbaf{0.2f, 0.7f, 0.49f, 1.0f});
+    PE_CHECK_NEAR(out.r, 0.0f);
+    PE_CHECK_NEAR(out.g, 1.0f);
+    PE_CHECK_NEAR(out.b, 0.0f);
+    // 3 levels snaps to {0, 0.5, 1}.
+    Posterize p3(3);
+    PE_CHECK_NEAR(applyOne(p3, Rgbaf{0.6f, 0.6f, 0.6f, 1.0f}).r, 0.5f);
+}
+
+PE_TEST(adjustment_threshold_binarizes) {
+    Threshold t(0.5f);
+    // Luminance of pure red (Rec.601) is 0.299 < 0.5 -> black.
+    Rgbaf dark = applyOne(t, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f});
+    PE_CHECK_NEAR(dark.r, 0.0f);
+    // A bright gray is above the level -> white, neutral.
+    Rgbaf light = applyOne(t, Rgbaf{0.8f, 0.8f, 0.8f, 1.0f});
+    PE_CHECK_NEAR(light.r, 1.0f);
+    PE_CHECK_NEAR(light.g, 1.0f);
+    PE_CHECK_NEAR(light.b, 1.0f);
+}
