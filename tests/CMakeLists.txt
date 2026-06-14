@@ -20,6 +20,7 @@ add_executable(pe_core_tests
     core/test_mask.cpp
     core/test_adjustment.cpp
     core/test_filter.cpp
+    core/test_histogram.cpp
 )
 
 target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)
