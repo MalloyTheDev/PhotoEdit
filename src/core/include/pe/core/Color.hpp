@@ -5,8 +5,10 @@
 
 namespace pe {
 
-// Clamp a float to the normalized [0,1] range.
+// Clamp a float to the normalized [0,1] range. NaN maps to 0 (a plain
+// comparison clamp would let NaN pass through and poison downstream math).
 [[nodiscard]] constexpr float clamp01(float v) noexcept {
+    if (v != v) return 0.0f;  // NaN
     return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
 }
 

@@ -47,6 +47,14 @@ public:
     [[nodiscard]] TileData& editable(TileCoord c);
 
     [[nodiscard]] bool hasTileAt(TileCoord c) const noexcept;
+
+    // Tile-delta support (for PaintCommand undo). sharedTile() returns the stored
+    // shared tile pointer (or nullptr if absent) WITHOUT forking; holding it keeps
+    // the prior bytes alive (a later editable() write forks, copy-on-write). The
+    // returned snapshot must be treated as immutable. setTile() replaces (or, with
+    // a null pointer, removes) the tile — used to restore a snapshot on undo.
+    [[nodiscard]] std::shared_ptr<TileData> sharedTile(TileCoord c) const;
+    void setTile(TileCoord c, std::shared_ptr<TileData> data);
     [[nodiscard]] std::size_t tileCount() const noexcept { return tiles_.size(); }
     [[nodiscard]] bool empty() const noexcept { return tiles_.empty(); }
 

@@ -1,0 +1,152 @@
+#include "pe/core/Brush.hpp"
+#include "pe/core/Document.hpp"
+#include "pe/core/PixelLayer.hpp"
+#include "pe_test.hpp"
+
+#include <cmath>
+#include <cstdlib>
+#include <vector>
+
+using namespace pe;
+
+namespace {
+constexpr Rgbaf kRedF{1.0f, 0.0f, 0.0f, 1.0f};
+
+int alphaAt(const Document& doc, LayerId id, int x, int y) {
+    const Layer* l = doc.findLayer(id);
+    const auto* pl = static_cast<const PixelLayer*>(l);
+    return pl->tiles().pixel(x, y).a;
+}
+
+BrushSettings hardBrush(float diameter, float opacity) {
+    BrushSettings b;
+    b.diameter = diameter;
+    b.hardness = 1.0f;
+    b.opacity = opacity;
+    b.flow = 1.0f;
+    b.spacing = 0.25f;
+    return b;
+}
+}  // namespace
+
+PE_TEST(dab_coverage_table) {
+    PE_CHECK_NEAR(dabCoverage(0.0f, 1.0f), 1.0f);   // center solid
+    PE_CHECK_NEAR(dabCoverage(0.99f, 1.0f), 1.0f);  // inside crisp tip
+    PE_CHECK_NEAR(dabCoverage(1.0f, 1.0f), 0.0f);   // rim
+    PE_CHECK_NEAR(dabCoverage(0.0f, 0.0f), 1.0f);   // soft tip center
+    PE_CHECK_NEAR(dabCoverage(0.5f, 0.0f), 0.5f);   // smoothstep midpoint
+    PE_CHECK_NEAR(dabCoverage(0.5f, 0.5f), 1.0f);   // d<=hardness solid
+    PE_CHECK_NEAR(dabCoverage(0.75f, 0.5f), 0.5f);  // shoulder midpoint
+    PE_CHECK_NEAR(dabCoverage(2.0f, 0.5f), 0.0f);   // outside
+}
+
+PE_TEST(paint_stroke_deposits_and_undo_restores) {
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{8, 32}, 1.0f}, {{56, 32}, 1.0f}};
+
+    auto cmd = paintStroke(*doc, base, hardBrush(12, 1.0f), kRedF, pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    // Pixels along the stroke centerline are painted opaque red.
+    PE_CHECK_EQ(alphaAt(*doc, base, 32, 32), 255);
+    PE_CHECK_EQ(doc->findLayer(base)->contentBounds().isEmpty(), false);
+
+    doc->history().undo();
+    PE_CHECK_EQ(alphaAt(*doc, base, 32, 32), 0);  // restored transparent
+    PE_CHECK(doc->findLayer(base)->contentBounds().isEmpty());
+
+    doc->history().redo();
+    PE_CHECK_EQ(alphaAt(*doc, base, 32, 32), 255);  // repainted
+}
+
+PE_TEST(paint_single_click_one_dab) {
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};  // a single click
+    auto cmd = paintStroke(*doc, base, hardBrush(16, 1.0f), kRedF, pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK_EQ(alphaAt(*doc, base, 32, 32), 255);  // dab landed at the click
+}
+
+PE_TEST(opacity_no_double_darken_within_stroke) {
+    // A stroke that crosses itself at 50% opacity must NOT exceed 50% at the
+    // crossing (stroke-buffer cap). Center alpha ~= 128.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{16, 32}, 1.0f}, {{48, 32}, 1.0f}, {{16, 32}, 1.0f}};
+    auto cmd = paintStroke(*doc, base, hardBrush(14, 0.5f), kRedF, pts);
+    doc->history().push(std::move(cmd));
+    const int a = alphaAt(*doc, base, 32, 32);
+    PE_CHECK(a >= 126 && a <= 130);  // ~128, not doubled
+}
+
+PE_TEST(separate_strokes_stack) {
+    // Two SEPARATE 50% strokes over the same spot stack toward 75% (~191).
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    doc->history().push(paintStroke(*doc, base, hardBrush(16, 0.5f), kRedF, pts));
+    doc->history().push(paintStroke(*doc, base, hardBrush(16, 0.5f), kRedF, pts));
+    const int a = alphaAt(*doc, base, 32, 32);
+    PE_CHECK(a >= 189 && a <= 193);  // ~191
+}
+
+PE_TEST(paint_tile_delta_is_local) {
+    // A small stroke on a large canvas touches only a few tiles (not the whole
+    // document) — the tile-delta undo memory scales with painted area.
+    auto doc = Document::createBlank(Size{2048, 2048});  // 8x8 = 64 tiles
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{40, 40}, 1.0f}, {{80, 40}, 1.0f}};
+    auto cmd = paintStroke(*doc, base, hardBrush(10, 1.0f), kRedF, pts);
+    PE_CHECK(cmd != nullptr);
+    PE_CHECK(cmd->touchedTileCount() <= static_cast<std::size_t>(2));
+}
+
+PE_TEST(erase_reduces_alpha) {
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    doc->history().push(paintStroke(*doc, base, hardBrush(20, 1.0f), kRedF, pts));
+    PE_CHECK_EQ(alphaAt(*doc, base, 32, 32), 255);
+
+    doc->history().push(eraseStroke(*doc, base, hardBrush(20, 1.0f), pts));
+    PE_CHECK_EQ(alphaAt(*doc, base, 32, 32), 0);  // fully erased at center
+
+    doc->history().undo();                          // undo erase
+    PE_CHECK_EQ(alphaAt(*doc, base, 32, 32), 255);  // red restored
+}
+
+PE_TEST(paint_on_missing_layer_is_null) {
+    auto doc = Document::createBlank(Size{64, 64});
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    PE_CHECK(paintStroke(*doc, 999999, hardBrush(16, 1.0f), kRedF, pts) == nullptr);
+}
+
+PE_TEST(paint_nonfinite_points_are_safe) {
+    // NaN/Inf input samples (garbage tablet data) must not crash or deposit
+    // anything (no UB in the float->int casts).
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    const float nan = std::nan("");
+    std::vector<StrokePoint> pts = {{{nan, 32.0f}, 1.0f}, {{INFINITY, 32.0f}, 1.0f}};
+    PE_CHECK(paintStroke(*doc, base, hardBrush(16, 1.0f), kRedF, pts) == nullptr);
+}
+
+PE_TEST(paint_absurd_coordinates_bounded) {
+    // A finite but absurd coordinate is skipped (beyond the off-canvas bound) —
+    // no gigabyte allocation, no overflow.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{1e30f, 1e30f}, 1.0f}};
+    PE_CHECK(paintStroke(*doc, base, hardBrush(16, 1.0f), kRedF, pts) == nullptr);
+}
+
+PE_TEST(erase_empty_space_is_null) {
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    PE_CHECK(eraseStroke(*doc, base, hardBrush(16, 1.0f), pts) == nullptr);  // nothing to erase
+}

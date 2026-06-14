@@ -45,6 +45,20 @@ bool TileStore::hasTileAt(TileCoord c) const noexcept {
     return tiles_.find(keyOf(c)) != tiles_.end();
 }
 
+std::shared_ptr<TileData> TileStore::sharedTile(TileCoord c) const {
+    auto it = tiles_.find(keyOf(c));
+    return it == tiles_.end() ? nullptr : it->second;
+}
+
+void TileStore::setTile(TileCoord c, std::shared_ptr<TileData> data) {
+    const Key key = keyOf(c);
+    if (data == nullptr) {
+        tiles_.erase(key);
+    } else {
+        tiles_[key] = std::move(data);
+    }
+}
+
 TileData& TileStore::editable(TileCoord c) {
     const Key key = keyOf(c);
     auto it = tiles_.find(key);
