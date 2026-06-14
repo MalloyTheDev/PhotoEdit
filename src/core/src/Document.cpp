@@ -50,6 +50,14 @@ PixelBuffer Document::compositeImage() const {
     return compositeToImage(root_.children(), canvasBounds());
 }
 
+PixelBuffer16 Document::compositeImage16() const {
+    return compositeToImage16(root_.children(), canvasBounds());
+}
+
+PixelBufferF Document::compositeImageF() const {
+    return compositeToImageF(root_.children(), canvasBounds());
+}
+
 void Document::addObserver(DocumentObserver* obs) {
     if (obs == nullptr) return;
     if (std::find(observers_.begin(), observers_.end(), obs) == observers_.end()) {
