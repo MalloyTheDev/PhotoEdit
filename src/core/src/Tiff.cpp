@@ -68,6 +68,21 @@ toff_t writeSize(thandle_t h) {
     return static_cast<toff_t>(static_cast<MemWriter*>(h)->data.size());
 }
 
+// Validate the TIFF header ourselves before handing bytes to libtiff: "II"+42/43
+// (little-endian) or "MM"+42/43 (big-endian; 43 == BigTIFF). This rejects garbage up
+// front so libtiff's parser never sees malformed input — some libtiff builds crash on
+// certain malformed streams via a memory client.
+bool looksLikeTiff(std::span<const std::byte> d) {
+    if (d.size() < 8) return false;
+    const auto b0 = std::to_integer<unsigned char>(d[0]);
+    const auto b1 = std::to_integer<unsigned char>(d[1]);
+    const auto b2 = std::to_integer<unsigned char>(d[2]);
+    const auto b3 = std::to_integer<unsigned char>(d[3]);
+    if (b0 == 'I' && b1 == 'I' && (b2 == 0x2A || b2 == 0x2B) && b3 == 0x00) return true;
+    if (b0 == 'M' && b1 == 'M' && b2 == 0x00 && (b3 == 0x2A || b3 == 0x2B)) return true;
+    return false;
+}
+
 int memClose(thandle_t) {
     return 0;
 }
@@ -110,7 +125,14 @@ std::vector<std::byte> encodeTiff(const PixelBuffer& image) {
 }
 
 std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
-    if (data.empty()) return std::nullopt;
+    // Reject non-TIFF input before libtiff ever parses it: cheap, and avoids feeding
+    // garbage to libtiff's parser (some builds crash on certain malformed streams).
+    if (!looksLikeTiff(data)) return std::nullopt;
+
+    // Silence libtiff's process-global warning/error handlers (they print to stderr on
+    // malformed input and behave inconsistently across builds). Idempotent.
+    TIFFSetWarningHandler(nullptr);
+    TIFFSetErrorHandler(nullptr);
 
     MemReader src{data.data(), static_cast<toff_t>(data.size()), 0};
     TIFF* tif = TIFFClientOpen("mem", "r", static_cast<thandle_t>(&src), readRead, readWrite,

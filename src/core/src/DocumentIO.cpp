@@ -7,6 +7,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <fstream>
+#include <ios>
 #include <optional>
 #include <string>
 
@@ -134,6 +137,42 @@ std::vector<std::byte> exportDocument(const Document& doc, ImageFormat fmt) {
         default:
             return {};  // unknown format or codec not built in
     }
+}
+
+namespace {
+// Reading a whole file into memory: cap the size so opening a pathological file can't
+// exhaust memory before the decoders' own dimension caps apply.
+constexpr std::uintmax_t kMaxFileBytes = 512ull * 1024 * 1024;  // 512 MB
+}  // namespace
+
+std::unique_ptr<Document> loadDocument(const std::string& path) {
+    const ImageFormat fmt = formatFromExtension(path);
+    if (fmt == ImageFormat::Unknown) return nullptr;
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return nullptr;
+    file.seekg(0, std::ios::end);
+    const std::streamoff size = file.tellg();
+    if (size < 0 || static_cast<std::uintmax_t>(size) > kMaxFileBytes) return nullptr;
+    file.seekg(0, std::ios::beg);
+
+    std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+    if (size > 0 && !file.read(reinterpret_cast<char*>(bytes.data()), size)) return nullptr;
+    return importDocument(bytes, fmt);
+}
+
+bool saveDocument(const Document& doc, const std::string& path) {
+    const ImageFormat fmt = formatFromExtension(path);
+    if (fmt == ImageFormat::Unknown) return false;
+
+    const std::vector<std::byte> bytes = exportDocument(doc, fmt);
+    if (bytes.empty()) return false;
+
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) return false;
+    file.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    return file.good();
 }
 
 }  // namespace pe
