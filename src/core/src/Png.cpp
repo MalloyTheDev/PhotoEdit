@@ -46,9 +46,11 @@ std::optional<PixelBuffer> decodePng(std::span<const std::byte> data) {
         return std::nullopt;  // not a PNG / malformed header
     }
 
-    // Reject oversized images before allocating the output buffer.
-    if (static_cast<std::int64_t>(png.width) * static_cast<std::int64_t>(png.height) >
-        kMaxImagePixels) {
+    // Reject oversized images before allocating the output buffer. The product uses
+    // uint64_t so it cannot overflow for any png_uint_32 pair (0xFFFFFFFF^2 fits) —
+    // the bound is self-evident without relying on libpng's internal dimension limits.
+    if (static_cast<std::uint64_t>(png.width) * static_cast<std::uint64_t>(png.height) >
+        static_cast<std::uint64_t>(kMaxImagePixels)) {
         png_image_free(&png);
         return std::nullopt;
     }
