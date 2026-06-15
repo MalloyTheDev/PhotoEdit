@@ -121,8 +121,11 @@ std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
     uint32_t h = 0;
     TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
     TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
+    // uint64 product so two 32-bit dimensions can't overflow before the cap compares
+    // (0xFFFFFFFF^2 fits in uint64) — matches the PNG/JPEG decoders.
     if (w == 0 || h == 0 ||
-        static_cast<std::int64_t>(w) * static_cast<std::int64_t>(h) > kMaxImagePixels) {
+        static_cast<std::uint64_t>(w) * static_cast<std::uint64_t>(h) >
+            static_cast<std::uint64_t>(kMaxImagePixels)) {
         TIFFClose(tif);
         return std::nullopt;
     }
