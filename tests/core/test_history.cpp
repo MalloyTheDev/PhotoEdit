@@ -199,6 +199,26 @@ PE_TEST(history_limit_trims_oldest) {
     PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(2));
 }
 
+PE_TEST(history_entry_names_for_panel) {
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.5f));  // "Change Opacity"
+    doc->history().push(
+        std::make_unique<SetVisibilityCommand>(base, false));  // "Toggle Visibility"
+
+    auto un = doc->history().undoNames();
+    PE_CHECK_EQ(un.size(), static_cast<std::size_t>(2));
+    PE_CHECK_EQ(un[0], std::string("Change Opacity"));     // oldest first
+    PE_CHECK_EQ(un[1], std::string("Toggle Visibility"));  // newest last
+    PE_CHECK(doc->history().redoNames().empty());
+
+    doc->history().undo();
+    auto rn = doc->history().redoNames();
+    PE_CHECK_EQ(rn.size(), static_cast<std::size_t>(1));
+    PE_CHECK_EQ(rn[0], std::string("Toggle Visibility"));  // next command redo() replays
+    PE_CHECK_EQ(doc->history().undoNames().size(), static_cast<std::size_t>(1));
+}
+
 PE_TEST(history_new_edit_truncates_redo) {
     auto doc = Document::createBlank(Size{16, 16});
     const LayerId base = doc->activeLayer();

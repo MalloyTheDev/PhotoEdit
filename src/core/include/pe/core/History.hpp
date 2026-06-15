@@ -37,6 +37,12 @@ public:
     [[nodiscard]] std::string topUndoName() const;
     [[nodiscard]] std::string topRedoName() const;
 
+    // Full entry lists for a History panel timeline. undoNames() is oldest-first
+    // (the order the commands were applied; size == undoDepth()). redoNames() is
+    // next-to-redo first (the order redo() will replay them; size == redoDepth()).
+    [[nodiscard]] std::vector<std::string> undoNames() const;
+    [[nodiscard]] std::vector<std::string> redoNames() const;
+
     // Bound the number of retained undo steps (memory). Default 100. A limit of
     // 0 means UNLIMITED (no trimming) — be deliberate, as unbounded history also
     // retains each command's payload (e.g. removed layers) and can grow without

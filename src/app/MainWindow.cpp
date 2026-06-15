@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 
 #include "CanvasView.hpp"
+#include "HistoryPanel.hpp"
 #include "LayersPanel.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
@@ -49,6 +50,7 @@ MainWindow::~MainWindow() {
     // removeObserver() in their destructors.
     if (canvas_ != nullptr) canvas_->setDocument(nullptr);
     if (layers_ != nullptr) layers_->setDocument(nullptr);
+    if (history_ != nullptr) history_->setDocument(nullptr);
 }
 
 void MainWindow::buildMenuBar() {
@@ -156,10 +158,12 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     // Detach the observing widgets from the outgoing document before it is destroyed.
     canvas_->setDocument(nullptr);
     if (layers_ != nullptr) layers_->setDocument(nullptr);
+    if (history_ != nullptr) history_->setDocument(nullptr);
     doc_ = std::move(doc);
     currentPath_ = std::move(path);
     canvas_->setDocument(doc_.get());
     if (layers_ != nullptr) layers_->setDocument(doc_.get());
+    if (history_ != nullptr) history_->setDocument(doc_.get());
     refreshTitle();
 }
 
@@ -185,6 +189,9 @@ void MainWindow::buildDockPanels() {
         if (std::string_view(p.title) == "Layers") {
             layers_ = new LayersPanel(dock);
             dock->setWidget(layers_);
+        } else if (std::string_view(p.title) == "History") {
+            history_ = new HistoryPanel(dock);
+            dock->setWidget(history_);
         } else {
             dock->setWidget(new QLabel(QStringLiteral("(%1 panel)").arg(p.title)));
         }

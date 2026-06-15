@@ -42,6 +42,21 @@ std::string History::topRedoName() const {
     return undone_.empty() ? std::string{} : undone_.back()->name();
 }
 
+std::vector<std::string> History::undoNames() const {
+    std::vector<std::string> names;
+    names.reserve(done_.size());
+    for (const auto& cmd : done_) names.push_back(cmd->name());  // oldest -> newest
+    return names;
+}
+
+std::vector<std::string> History::redoNames() const {
+    std::vector<std::string> names;
+    names.reserve(undone_.size());
+    // undone_.back() is the next command redo() replays; list in that replay order.
+    for (auto it = undone_.rbegin(); it != undone_.rend(); ++it) names.push_back((*it)->name());
+    return names;
+}
+
 void History::markSaved() noexcept {
     savedDepth_ = static_cast<std::ptrdiff_t>(done_.size());
     // Saving clears dirty directly (avoid routing through updateDirty's compare).
