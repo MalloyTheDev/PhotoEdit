@@ -27,12 +27,11 @@ QWidget* makePanelHeader(const QString& title, const QString& iconName, QWidget*
         lay->addWidget(icon);
     }
 
-    auto* label = new QLabel(title.toUpper(), bar);
+    auto* label = new QLabel(title, bar);  // Title Case, Photoshop-style tab label
     label->setObjectName(QStringLiteral("PanelHeaderLabel"));
     QFont f = label->font();
-    f.setPointSizeF(7.5);
-    f.setBold(true);
-    f.setLetterSpacing(QFont::AbsoluteSpacing, 1.2);
+    f.setPointSizeF(8.0);
+    f.setWeight(QFont::Medium);
     label->setFont(f);
     lay->addWidget(label);
     lay->addStretch(1);

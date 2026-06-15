@@ -60,15 +60,19 @@ The engine is no longer headless-only; the Qt6 app provides a real
 
 ### Visual design system (dark pro theme)
 
-The app has a committed visual identity: a Fusion-based dark theme applied as a
-`QPalette` + generated QSS, in **two switchable variants** (View ▸ Theme) — *Graphite*
-(neutral grey + blue accent) and *Slate* (cool blue-grey + amber accent), persisted
-via `QSettings`. The chrome is the scaffold the rest of the toolset wires into: a
-left **tool strip** (Move / Marquee / Lasso / Wand / Crop / Eyedropper / Brush /
-Eraser / Bucket / Type / Hand / Zoom) with bundled Lucide SVG icons (`icons.qrc`,
-ISC) — Brush/Eraser/Hand/Zoom are wired, the rest are scaffolded; styled panel
-headers, menus, controls, scrollbars; and a status bar with the active tool + live
-zoom %. `CanvasView::Tool` gates input per the selected tool.
+The app has a committed visual identity modeled on the classic Photoshop neutral-grey
+UI: a Fusion-based dark theme applied as a `QPalette` + generated QSS, flat and
+monochrome (the accent shows only on menu highlights / input focus; the active tool
+and selected row read as a lighter-grey cell). **Two switchable variants** (View ▸
+Theme), persisted via `QSettings`: *Graphite* (medium neutral grey — the default) and
+*Charcoal* (a darker neutral grey). The chrome is the scaffold the rest of the toolset
+wires into: a left **tool strip** (Move / Marquee / Lasso / Wand / Crop / Eyedropper /
+Brush / Eraser / Bucket / Type / Hand / Zoom) with bundled Lucide SVG icons
+(`icons.qrc`, ISC, re-tinted via `IconUtil`) — Brush/Eraser/Hand/Zoom are wired, the
+rest are scaffolded; custom panel headers (`PanelHeader`: glyph + Title-Case label),
+per-layer thumbnails in the Layers panel, styled menus/lists/controls/scrollbars, and
+a status bar with the active tool + live zoom %. `CanvasView::Tool` gates input per
+the selected tool.
 
 Next app slice: the rest of the tool framework (selection tools with marching ants,
 move, eyedropper) and the adjustments/filters UI (the M5/M6 engine has no UI yet).

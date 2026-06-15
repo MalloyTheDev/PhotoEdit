@@ -50,7 +50,6 @@ private:
     CanvasView* canvas_ = nullptr;
     LayersPanel* layers_ = nullptr;
     HistoryPanel* history_ = nullptr;
-    QLabel* brandMark_ = nullptr;  // tool-strip brand monogram (recolored on theme switch)
     QLabel* toolLabel_ = nullptr;  // status bar: active tool
     QLabel* zoomLabel_ = nullptr;  // status bar: zoom percentage
     QString currentPath_;

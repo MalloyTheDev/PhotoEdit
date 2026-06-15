@@ -16,16 +16,12 @@
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFont>
 #include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
-#include <QPainter>
-#include <QPixmap>
-#include <QRectF>
 #include <QSettings>
 #include <QStatusBar>
 #include <QToolBar>
@@ -47,39 +43,6 @@ constexpr const char* kSaveFilter =
 // A calm light tint for resting tool icons (the active one is marked by an accent
 // outline, so the glyph itself stays restrained).
 const QColor kToolIconColor(0xbe, 0xc4, 0xcc);
-
-// The brand monogram pixmap: an accent-filled rounded tile with a "P".
-[[nodiscard]] QPixmap brandPixmap(const ThemeColors& c) {
-    constexpr int kSize = 30;
-    constexpr qreal kDpr = 2.0;
-    QPixmap pm(static_cast<int>(kSize * kDpr), static_cast<int>(kSize * kDpr));
-    pm.fill(Qt::transparent);
-    pm.setDevicePixelRatio(kDpr);
-    QPainter p(&pm);
-    p.setRenderHint(QPainter::Antialiasing, true);
-    p.setPen(Qt::NoPen);
-    p.setBrush(c.accent);
-    p.drawRoundedRect(QRectF(0, 0, kSize, kSize), 8, 8);
-    QFont bf;
-    bf.setPointSizeF(13.0);
-    bf.setBold(true);
-    p.setFont(bf);
-    p.setPen(c.accentText);
-    p.drawText(QRectF(0, -1, kSize, kSize), Qt::AlignCenter, QStringLiteral("P"));
-    p.end();
-    return pm;
-}
-
-// A compact brand monogram for the top of the tool strip — the app's in-window identity.
-[[nodiscard]] QLabel* makeBrandMark(QWidget* parent) {
-    auto* mark = new QLabel(parent);
-    mark->setObjectName(QStringLiteral("BrandMark"));
-    mark->setPixmap(brandPixmap(themeColors(currentTheme())));
-    mark->setAlignment(Qt::AlignCenter);
-    mark->setToolTip(QStringLiteral("PhotoEdit"));
-    mark->setContentsMargins(0, 2, 0, 6);
-    return mark;
-}
 
 // One tool-strip entry. `tool` == Inactive marks a scaffolded, not-yet-wired tool.
 struct ToolDef {
@@ -176,10 +139,6 @@ void MainWindow::buildToolBar() {
     tb->setIconSize(QSize(22, 22));
     tb->setToolButtonStyle(Qt::ToolButtonIconOnly);
     addToolBar(Qt::LeftToolBarArea, tb);
-
-    brandMark_ = makeBrandMark(tb);  // app identity at the top of the strip
-    tb->addWidget(brandMark_);
-    tb->addSeparator();
 
     // Grouped like a pro editor: select · crop/sample · paint · type · navigate.
     // Brush/Eraser/Hand/Zoom are wired; the rest are scaffolded (Inactive) for now.
@@ -352,9 +311,7 @@ void MainWindow::buildStatusBar() {
 
 void MainWindow::setTheme(ThemeId id) {
     applyTheme(*qApp, id);
-    if (brandMark_ != nullptr)
-        brandMark_->setPixmap(brandPixmap(themeColors(id)));  // recolor accent
-    if (canvas_ != nullptr) canvas_->update();                // repaint the themed pasteboard
+    if (canvas_ != nullptr) canvas_->update();  // repaint the themed pasteboard
     QSettings().setValue(QStringLiteral("theme"), static_cast<int>(id));
 }
 
