@@ -93,12 +93,13 @@ PE_TEST(native_format_rejects_off_canvas_content_rect) {
     std::vector<std::byte> blob = serializeDocument(*doc);
     PE_CHECK(deserializeDocument(blob) != nullptr);  // sanity: valid as-is
 
-    // Layout: header 32 + visible(1)+opacity(4)+blend(1)+nameLen(4)=10 -> cx@42, cy@46.
-    PE_CHECK(blob.size() > 50);
-    blob[46] = std::byte{0xF0};
+    // v4 layout: header 28 + kind(1)+visible(1)+opacity(4)+blend(1)+active(1)+nameLen(4)=12
+    // + hasMask(1) -> cx@41, cy@45.
+    PE_CHECK(blob.size() > 49);
+    blob[45] = std::byte{0xF0};
+    blob[46] = std::byte{0xFF};
     blob[47] = std::byte{0xFF};
-    blob[48] = std::byte{0xFF};
-    blob[49] = std::byte{0x7F};                      // cy ~= 2.1e9, far outside the 4x4 canvas
+    blob[48] = std::byte{0x7F};                      // cy ~= 2.1e9, far outside the 4x4 canvas
     PE_CHECK(deserializeDocument(blob) == nullptr);  // rejected, no UB / over-allocation
 }
 
@@ -170,4 +171,39 @@ PE_TEST(native_format_pixel_compression_roundtrip) {
     // 128*128*4 = 65536 raw pixel bytes; a solid fill must deflate dramatically.
     PE_CHECK(blob.size() < static_cast<std::size_t>(8192));
 #endif
+}
+
+PE_TEST(native_format_roundtrips_layer_mask) {
+    auto doc = Document::createBlank(Size{32, 32});
+    auto* base = asPixel(*doc, 0);
+    base->tiles().fillRect(Rect{0, 0, 32, 32}, Rgba8{200, 50, 50, 255});
+
+    auto mask = std::make_unique<Mask>(Mask::Kind::Layer);
+    mask->setEnabled(true);
+    mask->setDensity(0.6f);
+    mask->setInverted(true);
+    mask->buffer().fillRect(Rect{4, 4, 8, 8}, MaskBuffer::kClear);  // hide a square
+    mask->buffer().setValue(20, 20, 128);                           // a partial-coverage pixel
+    base->setMask(std::move(mask));
+
+    auto loaded = deserializeDocument(serializeDocument(*doc));
+    PE_CHECK(loaded != nullptr);
+    auto* lbase = asPixel(*loaded, 0);
+    const Mask* lm = lbase->mask();
+    PE_CHECK(lm != nullptr);
+    PE_CHECK(lm->kind() == Mask::Kind::Layer);
+    PE_CHECK_EQ(lm->enabled(), true);
+    PE_CHECK_NEAR(lm->density(), 0.6f);
+    PE_CHECK_EQ(lm->inverted(), true);
+    PE_CHECK_EQ(lm->buffer().value(6, 6), static_cast<uint8_t>(MaskBuffer::kClear));
+    PE_CHECK_EQ(lm->buffer().value(20, 20), static_cast<uint8_t>(128));
+    PE_CHECK_EQ(lm->buffer().value(0, 0),
+                static_cast<uint8_t>(MaskBuffer::kOpaque));  // absent -> reveals
+}
+
+PE_TEST(native_format_no_mask_when_absent) {
+    auto doc = Document::createBlank(Size{8, 8});  // layer has no mask
+    auto loaded = deserializeDocument(serializeDocument(*doc));
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK(asPixel(*loaded, 0)->mask() == nullptr);
 }
