@@ -74,3 +74,34 @@ if(LCMS2_FOUND)
 else()
     message(STATUS "  Color mgmt:  DISABLED (lcms2 not found)")
 endif()
+
+# ---------------------------------------------------------------------------
+# Optional PNG I/O (libpng). Same graceful detection as lcms2 above: when libpng
+# is available the PNG codec is compiled and PHOTOEDIT_HAVE_PNG is defined;
+# otherwise the engine builds without it (callers guard with the macro). See
+# docs/systems/16-file-formats.md.
+# ---------------------------------------------------------------------------
+if(PkgConfig_FOUND)
+    pkg_check_modules(PNG IMPORTED_TARGET libpng)
+endif()
+if(NOT PNG_FOUND)
+    find_path(PNG_INCLUDE_DIR NAMES png.h)
+    find_library(PNG_LIBRARY NAMES png png16 libpng libpng16)
+    if(PNG_INCLUDE_DIR AND PNG_LIBRARY)
+        set(PNG_FOUND TRUE)
+    endif()
+endif()
+
+if(PNG_FOUND)
+    target_sources(pe_core PRIVATE src/Png.cpp)
+    target_compile_definitions(pe_core PUBLIC PHOTOEDIT_HAVE_PNG=1)
+    if(TARGET PkgConfig::PNG)
+        target_link_libraries(pe_core PUBLIC PkgConfig::PNG)
+    else()
+        target_include_directories(pe_core PUBLIC ${PNG_INCLUDE_DIR})
+        target_link_libraries(pe_core PUBLIC ${PNG_LIBRARY})
+    endif()
+    message(STATUS "  PNG I/O:     libpng ${PNG_VERSION}")
+else()
+    message(STATUS "  PNG I/O:     DISABLED (libpng not found)")
+endif()
