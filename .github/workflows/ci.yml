@@ -51,7 +51,10 @@ jobs:
         # are built and tested on Windows too (matching the Linux lane). Dynamic
         # x64-windows triplet: transitive deps (libpng->zlib) resolve at load time;
         # the DLL dir is added to PATH for the test step below.
-        run: vcpkg install lcms2 libpng libjpeg-turbo zlib --triplet x64-windows
+        # --classic: the repo's vcpkg.json would otherwise force manifest mode, where
+        # `vcpkg install <pkg>` is rejected. Classic mode installs the named ports only
+        # (Qt still comes from aqtinstall, not vcpkg).
+        run: vcpkg install lcms2 libpng libjpeg-turbo zlib --triplet x64-windows --classic
       - name: Configure
         run: >
           cmake -B build/win -S . -G Ninja
