@@ -93,9 +93,9 @@ void Selection::selectNone() noexcept {
 }
 
 PixelBuffer Selection::toMask(Rect bounds) const {
-    if (bounds.isEmpty()) return PixelBuffer{};
-    // Cap the eager allocation (same budget as the fill paths) so an oversized
-    // bounds can't exhaust memory; the caller normally passes the canvas/doc rect.
+    // Reject empty, out-of-range (so bounds.left()+x can't overflow int), or oversized
+    // bounds — same coordinate/area discipline as the fill paths.
+    if (bounds.isEmpty() || coordsOutOfRange(bounds)) return PixelBuffer{};
     if (static_cast<int64_t>(bounds.width) * bounds.height > kMaxSelectionPixels) {
         return PixelBuffer{};
     }
@@ -111,8 +111,11 @@ PixelBuffer Selection::toMask(Rect bounds) const {
 
 void Selection::loadMask(const PixelBuffer& mask, int originX, int originY) {
     tiles_.clear();
-    if (mask.isEmpty()) {
-        active_ = false;  // an empty channel selects nothing
+    // Apply the same caps as the fill paths: empty, out-of-range origin (so originX+x
+    // can't overflow int), or a mask too large to materialize -> select nothing.
+    const Rect region{originX, originY, mask.width(), mask.height()};
+    if (mask.isEmpty() || rejectFill(region)) {
+        active_ = false;
         return;
     }
     active_ = true;

@@ -1,5 +1,7 @@
 #include "pe/core/Commands.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/GroupLayer.hpp"
+#include "pe/core/PixelLayer.hpp"
 #include "pe/core/SolidColorLayer.hpp"
 #include "pe_test.hpp"
 
@@ -205,4 +207,26 @@ PE_TEST(history_new_edit_truncates_redo) {
     PE_CHECK(doc->history().canRedo());
     doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.3f));
     PE_CHECK(!doc->history().canRedo());  // redo branch discarded
+}
+
+PE_TEST(remove_group_clears_dangling_nested_active_layer) {
+    // Active layer is a descendant of a group; removing the group must clear the active
+    // id (not leave it dangling at a destroyed layer), and undo must restore it.
+    auto doc = Document::createBlank(Size{16, 16});
+    auto group = std::make_unique<GroupLayer>("Grp");
+    auto child = std::make_unique<PixelLayer>("Inner");
+    const LayerId childId = child->id();
+    group->addChild(std::move(child));
+    const LayerId groupId = group->id();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+    doc->setActiveLayer(childId);
+    PE_CHECK_EQ(doc->activeLayer(), childId);
+
+    doc->history().push(std::make_unique<RemoveLayerCommand>(groupId));
+    PE_CHECK(doc->findLayer(childId) == nullptr);  // the nested layer is gone
+    PE_CHECK_EQ(doc->activeLayer(), kNoLayer);     // active was cleared, not dangling
+
+    doc->history().undo();
+    PE_CHECK(doc->findLayer(childId) != nullptr);  // subtree restored
+    PE_CHECK_EQ(doc->activeLayer(), childId);      // active restored
 }

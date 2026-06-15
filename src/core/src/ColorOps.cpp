@@ -8,6 +8,7 @@
 
 #include <lcms2.h>
 
+#include <mutex>
 #include <vector>
 
 namespace pe {
@@ -140,18 +141,22 @@ PixelBuffer convertForProof(const PixelBufferF& working, const ColorProfileRef& 
     cmsHTRANSFORM t = nullptr;
     if (workingProfile && displayProfile && proofProfile &&
         workingProfile->mode() == ColorMode::RGB && displayProfile->mode() == ColorMode::RGB) {
+        cmsUInt32Number flags = cmsFLAGS_COPY_ALPHA | cmsFLAGS_SOFTPROOFING;
+        if (gamutCheck) flags |= cmsFLAGS_GAMUTCHECK;
+        if (blackPointCompensation) flags |= cmsFLAGS_BLACKPOINTCOMPENSATION;
+
+        // cmsSetAlarmCodes is process-GLOBAL state baked into the transform at creation.
+        // Serialize the set+build so a concurrent proofing call (ColorEngine advertises
+        // thread-safe transform sharing) can't change the alarm color in between.
+        static std::mutex alarmMutex;
+        const std::lock_guard<std::mutex> lock(alarmMutex);
         if (gamutCheck) {
-            // NOTE: cmsSetAlarmCodes is process-global; safe single-threaded (set just
-            // before the build, which bakes it in). A reentrant proofing path is later.
             cmsUInt16Number alarm[cmsMAXCHANNELS] = {0};
             alarm[0] = static_cast<cmsUInt16Number>(clamp01(gamutAlarm.r) * 65535.0f);
             alarm[1] = static_cast<cmsUInt16Number>(clamp01(gamutAlarm.g) * 65535.0f);
             alarm[2] = static_cast<cmsUInt16Number>(clamp01(gamutAlarm.b) * 65535.0f);
             cmsSetAlarmCodes(alarm);
         }
-        cmsUInt32Number flags = cmsFLAGS_COPY_ALPHA | cmsFLAGS_SOFTPROOFING;
-        if (gamutCheck) flags |= cmsFLAGS_GAMUTCHECK;
-        if (blackPointCompensation) flags |= cmsFLAGS_BLACKPOINTCOMPENSATION;
         t = cmsCreateProofingTransform(
             static_cast<cmsHPROFILE>(workingProfile->nativeHandle()), TYPE_RGBA_FLT,
             static_cast<cmsHPROFILE>(displayProfile->nativeHandle()), TYPE_RGBA_8,

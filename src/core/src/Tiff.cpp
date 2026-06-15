@@ -161,10 +161,10 @@ std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
                         Rgba8{row[i], row[i + 1], row[i + 2], a});
             }
         }
-        if (ok) {
-            TIFFClose(tif);
-            return out;
-        }
+        // A simple-RGB TIFF is authoritative: if a scanline read fails the file is
+        // corrupt — fail rather than silently taking the premultiplying RGBA fallback.
+        TIFFClose(tif);
+        return ok ? std::optional<PixelBuffer>(std::move(out)) : std::nullopt;
     }
 
     // General fallback: normalize any TIFF (palette, 1/16-bit, CMYK, tiled, ...) to a

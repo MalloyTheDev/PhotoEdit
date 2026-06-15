@@ -171,3 +171,19 @@ PE_TEST(selection_load_empty_deselects) {
     s.loadMask(PixelBuffer{}, 0, 0);  // empty channel -> nothing selected
     PE_CHECK(!s.active());
 }
+
+PE_TEST(selection_loadmask_rejects_extreme_origin) {
+    // A mask placed at an out-of-range origin must be rejected (no int overflow on
+    // originX+x), leaving the selection inactive rather than corrupting tiles.
+    Selection s;
+    s.selectRect(Rect{0, 0, 4, 4});  // make it active first
+    PixelBuffer mask(4, 4, Rgba8{255, 255, 255, 255});
+    s.loadMask(mask, 1 << 28, 0);  // origin far beyond kCoordBound (~67M)
+    PE_CHECK(!s.active());         // rejected -> nothing selected
+}
+
+PE_TEST(selection_tomask_rejects_out_of_range_bounds) {
+    Selection s;
+    s.selectRect(Rect{0, 0, 4, 4});
+    PE_CHECK(s.toMask(Rect{1 << 28, 0, 4, 4}).isEmpty());  // out-of-range origin -> empty
+}
