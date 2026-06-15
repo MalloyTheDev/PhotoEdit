@@ -30,6 +30,7 @@ add_executable(pe_core_tests
     core/test_colorops.cpp
     core/test_channels.cpp
     core/test_png.cpp
+    core/test_jpeg.cpp
 )
 
 target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)
