@@ -152,3 +152,22 @@ PE_TEST(native_format_rejects_excessive_group_nesting) {
     std::vector<std::byte> blob = serializeDocument(*doc);
     PE_CHECK(deserializeDocument(blob) == nullptr);  // depth cap -> reject, no overflow
 }
+
+PE_TEST(native_format_pixel_compression_roundtrip) {
+    // A large, highly-compressible solid layer round-trips exactly and (with zlib)
+    // serializes far smaller than its raw RGBA payload.
+    auto doc = Document::createBlank(Size{128, 128});
+    auto* base = asPixel(*doc, 0);
+    base->tiles().fillRect(Rect{0, 0, 128, 128}, Rgba8{50, 100, 150, 255});
+
+    std::vector<std::byte> blob = serializeDocument(*doc);
+    auto loaded = deserializeDocument(blob);
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK_EQ(asPixel(*loaded, 0)->tiles().pixel(64, 64), (Rgba8{50, 100, 150, 255}));
+    PE_CHECK_EQ(asPixel(*loaded, 0)->tiles().pixel(0, 0), (Rgba8{50, 100, 150, 255}));
+
+#ifdef PHOTOEDIT_HAVE_ZLIB
+    // 128*128*4 = 65536 raw pixel bytes; a solid fill must deflate dramatically.
+    PE_CHECK(blob.size() < static_cast<std::size_t>(8192));
+#endif
+}

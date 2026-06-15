@@ -9,12 +9,16 @@
 #include <cstring>
 #include <string>
 
+#ifdef PHOTOEDIT_HAVE_ZLIB
+#include <zlib.h>
+#endif
+
 namespace pe {
 
 namespace {
 
-constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '2'};
-constexpr std::uint32_t kVersion = 2;
+constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '3'};
+constexpr std::uint32_t kVersion = 3;
 constexpr std::int64_t kMaxLayerPixels = 64'000'000;  // per-layer content cap
 constexpr std::uint32_t kMaxLayers = 100'000;
 constexpr std::uint32_t kMaxNameBytes = 65'536;
@@ -57,6 +61,17 @@ public:
         pos_ += n;
         return true;
     }
+    // Borrow the next n bytes as a span without copying (advances pos_). Empty on
+    // failure / out-of-range.
+    std::span<const std::byte> readSpan(std::size_t n) {
+        if (!ok_ || pos_ + n > data_.size()) {
+            ok_ = false;
+            return {};
+        }
+        auto s = data_.subspan(pos_, n);
+        pos_ += n;
+        return s;
+    }
     std::uint8_t u8() {
         std::uint8_t v = 0;
         read(&v, 1);
@@ -84,7 +99,32 @@ private:
     bool ok_ = true;
 };
 
-// Whether the format serializes this layer (Pixel and Group in v2; adjustment/fill/
+#ifdef PHOTOEDIT_HAVE_ZLIB
+// Deflate `in`. Returns empty on failure (caller falls back to storing raw).
+std::vector<std::byte> zlibDeflate(const std::vector<std::byte>& in) {
+    if (in.empty()) return {};
+    uLongf bound = compressBound(static_cast<uLong>(in.size()));
+    std::vector<std::byte> out(bound);
+    if (compress2(reinterpret_cast<Bytef*>(out.data()), &bound,
+                  reinterpret_cast<const Bytef*>(in.data()), static_cast<uLong>(in.size()),
+                  Z_DEFAULT_COMPRESSION) != Z_OK) {
+        return {};
+    }
+    out.resize(bound);
+    return out;
+}
+// Inflate `in` into a buffer of exactly `expected` bytes. False on any error or if the
+// decompressed size differs (guards against a lying length).
+bool zlibInflate(std::span<const std::byte> in, std::vector<std::byte>& out) {
+    uLongf outLen = static_cast<uLongf>(out.size());
+    const int rc =
+        uncompress(reinterpret_cast<Bytef*>(out.data()), &outLen,
+                   reinterpret_cast<const Bytef*>(in.data()), static_cast<uLong>(in.size()));
+    return rc == Z_OK && outLen == out.size();
+}
+#endif
+
+// Whether the format serializes this layer (Pixel and Group in v3; adjustment/fill/
 // text layers and embedded profiles round-trip later).
 [[nodiscard]] bool serializable(const Layer& layer) {
     return layer.kind() == LayerKind::Group || dynamic_cast<const PixelLayer*>(&layer) != nullptr;
@@ -120,12 +160,31 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
     w.i32(b.y);
     w.i32(b.width);
     w.i32(b.height);
+
+    // Gather the content's raw RGBA bytes, then store them compressed when that is
+    // smaller (and zlib is available) — else raw. A per-block flag keeps the rest of
+    // the record (and thus the layer structure) inspectable/uncompressed.
+    std::vector<std::byte> raw;
+    raw.reserve(static_cast<std::size_t>(b.width) * static_cast<std::size_t>(b.height) *
+                sizeof(Rgba8));
     for (int y = b.y; y < b.y + b.height; ++y) {
         for (int x = b.x; x < b.x + b.width; ++x) {
             const Rgba8 px = pl.tiles().pixel(x, y);
-            w.bytes(&px, sizeof(px));
+            const auto* pb = reinterpret_cast<const std::byte*>(&px);
+            raw.insert(raw.end(), pb, pb + sizeof(px));
         }
     }
+#ifdef PHOTOEDIT_HAVE_ZLIB
+    const std::vector<std::byte> comp = zlibDeflate(raw);
+    if (!comp.empty() && comp.size() < raw.size()) {
+        w.u8(1);  // compressed block: u32 length + deflated bytes
+        w.u32(static_cast<std::uint32_t>(comp.size()));
+        w.bytes(comp.data(), comp.size());
+        return;
+    }
+#endif
+    w.u8(0);  // raw block: width*height*4 bytes follow
+    w.bytes(raw.data(), raw.size());
 }
 
 // Reads one layer (recursively for groups). Returns nullptr on any inconsistency.
@@ -175,11 +234,35 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
             static_cast<std::int64_t>(cw) * ch > kMaxLayerPixels) {
             return nullptr;
         }
+        // cw*ch is capped at kMaxLayerPixels above, so rawSize <= 256 MB.
+        const std::size_t rawSize =
+            static_cast<std::size_t>(cw) * static_cast<std::size_t>(ch) * sizeof(Rgba8);
+        const std::uint8_t pixComp = r.u8();
+        if (!r.ok() || pixComp > 1) return nullptr;
+
+        std::vector<std::byte> raw;
+        if (pixComp == 1) {
+#ifdef PHOTOEDIT_HAVE_ZLIB
+            const std::uint32_t clen = r.u32();
+            const std::span<const std::byte> cspan = r.readSpan(clen);
+            if (!r.ok()) return nullptr;
+            raw.resize(rawSize);
+            if (rawSize > 0 && !zlibInflate(cspan, raw)) return nullptr;
+#else
+            return nullptr;  // compressed pixels, but this build has no zlib to read them
+#endif
+        } else {
+            raw.resize(rawSize);
+            if (rawSize > 0 && !r.read(raw.data(), rawSize)) return nullptr;
+        }
+
         TileStore& store = pl->tiles();
+        std::size_t off = 0;
         for (int y = cy; y < cy + ch; ++y) {
             for (int x = cx; x < cx + cw; ++x) {
                 Rgba8 px{};
-                if (!r.read(&px, sizeof(px))) return nullptr;
+                std::memcpy(&px, raw.data() + off, sizeof(px));
+                off += sizeof(px);
                 store.setPixel(x, y, px);
             }
         }
