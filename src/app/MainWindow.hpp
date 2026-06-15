@@ -7,6 +7,7 @@
 
 #include <memory>
 
+class QAction;
 class QLabel;
 class QSpinBox;
 class QToolBar;
@@ -22,6 +23,8 @@ namespace pe::app {
 class CanvasView;
 class LayersPanel;
 class HistoryPanel;
+class ColorPanel;
+class PropertiesPanel;
 
 // The top-level application window. Wires the File menu to the engine's document I/O
 // and shows the active document on a CanvasView. The dockable panels (layers, tools,
@@ -42,7 +45,9 @@ private:
     void buildStatusBar();
     void setTheme(ThemeId id);
 
-    void updateOptionsBar(bool showBrushOptions, const QString& toolName);
+    // Which contextual control group the options bar shows for the active tool.
+    enum class OptKind { None, Brush, Move };
+    void updateOptionsBar(OptKind kind, const QString& toolName);
     void refreshDocTab();
     [[nodiscard]] QWidget* makeColorSwatches();
     void chooseForegroundColor();
@@ -63,12 +68,17 @@ private:
     CanvasView* canvas_ = nullptr;
     LayersPanel* layers_ = nullptr;
     HistoryPanel* history_ = nullptr;
+    ColorPanel* colorPanel_ = nullptr;
+    PropertiesPanel* properties_ = nullptr;
     QLabel* toolLabel_ = nullptr;  // status bar: active tool
     QLabel* zoomLabel_ = nullptr;  // status bar: zoom percentage
 
     QToolBar* optionsBar_ = nullptr;      // contextual tool options (top)
     QLabel* optToolName_ = nullptr;       // options bar: active tool name
     QWidget* brushOptions_ = nullptr;     // options bar: brush size/opacity group
+    QWidget* moveOptions_ = nullptr;      // options bar: move-tool group
+    QAction* brushOptAction_ = nullptr;   // toolbar action wrapping brushOptions_ (for show/hide)
+    QAction* moveOptAction_ = nullptr;    // toolbar action wrapping moveOptions_
     QSpinBox* sizeSpin_ = nullptr;        // options bar: brush diameter
     QSpinBox* opacitySpinOpt_ = nullptr;  // options bar: brush opacity
     QLabel* docTab_ = nullptr;            // document tab strip above the canvas

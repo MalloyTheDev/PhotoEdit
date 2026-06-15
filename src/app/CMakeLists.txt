@@ -19,6 +19,10 @@ qt_add_executable(photoedit
     LayersPanel.hpp
     HistoryPanel.cpp
     HistoryPanel.hpp
+    ColorPanel.cpp
+    ColorPanel.hpp
+    PropertiesPanel.cpp
+    PropertiesPanel.hpp
     Theme.cpp
     Theme.hpp
     IconUtil.cpp

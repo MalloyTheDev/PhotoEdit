@@ -1,9 +1,11 @@
 #include "MainWindow.hpp"
 
 #include "CanvasView.hpp"
+#include "ColorPanel.hpp"
 #include "HistoryPanel.hpp"
 #include "IconUtil.hpp"
 #include "LayersPanel.hpp"
+#include "PropertiesPanel.hpp"
 #include "pe/core/Color.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
@@ -12,8 +14,10 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QCheckBox>
 #include <QColor>
 #include <QColorDialog>
+#include <QComboBox>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -74,7 +78,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     buildDockPanels();  // tabbed panel groups on the right
     buildStatusBar();
 
-    updateOptionsBar(true, QStringLiteral("Brush"));  // Brush is the default tool
+    updateOptionsBar(OptKind::Brush, QStringLiteral("Brush"));  // Brush is the default tool
     refreshTitle();
 }
 
@@ -86,6 +90,7 @@ MainWindow::~MainWindow() {
     if (canvas_ != nullptr) canvas_->setDocument(nullptr);
     if (layers_ != nullptr) layers_->setDocument(nullptr);
     if (history_ != nullptr) history_->setDocument(nullptr);
+    if (properties_ != nullptr) properties_->setDocument(nullptr);
 }
 
 void MainWindow::buildMenuBar() {
@@ -159,12 +164,22 @@ void MainWindow::buildToolBar() {
         {{"move", "Move", Tool::Inactive, "V"},
          {"marquee", "Rectangular Marquee", Tool::Inactive, "M"},
          {"lasso", "Lasso", Tool::Inactive, "L"},
-         {"wand-sparkles", "Magic Wand", Tool::Inactive, "W"}},
-        {{"crop", "Crop", Tool::Inactive, "C"}, {"pipette", "Eyedropper", Tool::Inactive, "I"}},
-        {{"paintbrush", "Brush", Tool::Brush, "B"},
+         {"wand-sparkles", "Object Selection / Magic Wand", Tool::Inactive, "W"}},
+        {{"crop", "Crop", Tool::Inactive, "C"},
+         {"frame", "Frame", Tool::Inactive, "K"},
+         {"pipette", "Eyedropper", Tool::Inactive, "I"}},
+        {{"bandage", "Spot Healing Brush", Tool::Inactive, "J"},
+         {"paintbrush", "Brush", Tool::Brush, "B"},
+         {"stamp", "Clone Stamp", Tool::Inactive, "S"},
+         {"history", "History Brush", Tool::Inactive, "Y"},
          {"eraser", "Eraser", Tool::Eraser, "E"},
-         {"paint-bucket", "Paint Bucket", Tool::Inactive, "G"}},
-        {{"type", "Type", Tool::Inactive, "T"}},
+         {"blend", "Gradient", Tool::Inactive, "G"},
+         {"paint-bucket", "Paint Bucket", Tool::Inactive, ""}},
+        {{"droplet", "Blur", Tool::Inactive, ""}, {"sun", "Dodge", Tool::Inactive, "O"}},
+        {{"pen-tool", "Pen", Tool::Inactive, "P"},
+         {"type", "Type", Tool::Inactive, "T"},
+         {"mouse-pointer-2", "Path Selection", Tool::Inactive, "A"},
+         {"shapes", "Shape", Tool::Inactive, "U"}},
         {{"hand", "Hand", Tool::Hand, "H"}, {"zoom-in", "Zoom", Tool::Zoom, "Z"}},
     };
 
@@ -179,18 +194,25 @@ void MainWindow::buildToolBar() {
             a->setCheckable(true);
             a->setActionGroup(toolGroup);
             const bool wired = def.tool != Tool::Inactive;
-            a->setToolTip(QStringLiteral("%1  (%2)%3")
-                              .arg(QString::fromUtf8(def.label), QString::fromUtf8(def.shortcut),
-                                   wired ? QString() : QStringLiteral("  — coming soon")));
-            a->setShortcut(QKeySequence(QString::fromUtf8(def.shortcut)));
+            const QString shortcut = QString::fromUtf8(def.shortcut);
+            QString tip = QString::fromUtf8(def.label);
+            if (!shortcut.isEmpty()) tip += QStringLiteral("  (%1)").arg(shortcut);
+            if (!wired) tip += QStringLiteral("  — coming soon");
+            a->setToolTip(tip);
+            if (!shortcut.isEmpty()) a->setShortcut(QKeySequence(shortcut));
             const Tool tool = def.tool;
             const QString label = QString::fromUtf8(def.label);
-            const bool paint = def.tool == Tool::Brush || def.tool == Tool::Eraser;
-            connect(a, &QAction::triggered, this, [this, tool, label, wired, paint] {
+            OptKind kind = OptKind::None;
+            if (def.tool == Tool::Brush || def.tool == Tool::Eraser) {
+                kind = OptKind::Brush;
+            } else if (std::string_view(def.icon) == "move") {
+                kind = OptKind::Move;
+            }
+            connect(a, &QAction::triggered, this, [this, tool, label, wired, kind] {
                 canvas_->setTool(tool);
                 toolLabel_->setText(wired ? label
                                           : QStringLiteral("%1 — not yet implemented").arg(label));
-                updateOptionsBar(paint, label);
+                updateOptionsBar(kind, label);
             });
             if (def.tool == Tool::Brush) brushAction = a;
         }
@@ -234,12 +256,45 @@ void MainWindow::buildOptionsBar() {
     opacitySpinOpt_->setValue(static_cast<int>(canvas_->tool().brush().opacity * 100.0f));
     opacitySpinOpt_->setSuffix(QStringLiteral("%"));
     bl->addWidget(opacitySpinOpt_);
-    optionsBar_->addWidget(brushOptions_);
+    bl->addWidget(new QLabel(QStringLiteral("Flow"), brushOptions_));
+    auto* flowSpin = new QSpinBox(brushOptions_);
+    flowSpin->setRange(1, 100);
+    flowSpin->setValue(static_cast<int>(canvas_->tool().brush().flow * 100.0f));
+    flowSpin->setSuffix(QStringLiteral("%"));
+    bl->addWidget(flowSpin);
+    brushOptAction_ = optionsBar_->addWidget(brushOptions_);
 
     connect(sizeSpin_, &QSpinBox::valueChanged, this,
             [this](int v) { canvas_->tool().brush().diameter = static_cast<float>(v); });
     connect(opacitySpinOpt_, &QSpinBox::valueChanged, this,
             [this](int v) { canvas_->tool().brush().opacity = static_cast<float>(v) / 100.0f; });
+    connect(flowSpin, &QSpinBox::valueChanged, this,
+            [this](int v) { canvas_->tool().brush().flow = static_cast<float>(v) / 100.0f; });
+
+    // Move-tool options — a decorative scaffold matching Photoshop's Move options.
+    moveOptions_ = new QWidget(optionsBar_);
+    auto* ml = new QHBoxLayout(moveOptions_);
+    ml->setContentsMargins(0, 0, 0, 0);
+    ml->setSpacing(8);
+    ml->addWidget(new QCheckBox(QStringLiteral("Auto-Select"), moveOptions_));
+    auto* selKind = new QComboBox(moveOptions_);
+    selKind->addItems({QStringLiteral("Layer"), QStringLiteral("Group")});
+    ml->addWidget(selKind);
+    ml->addWidget(new QCheckBox(QStringLiteral("Show Transform Controls"), moveOptions_));
+    moveOptAction_ = optionsBar_->addWidget(moveOptions_);
+    moveOptAction_->setVisible(false);
+
+    // Right-aligned utility icons (echoing the reference's top-bar actions).
+    auto* rspacer = new QWidget(optionsBar_);
+    rspacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    optionsBar_->addWidget(rspacer);
+    for (const char* ic : {"search", "share-2", "cloud", "settings"}) {
+        auto* b = new QToolButton(optionsBar_);
+        b->setIcon(renderIconAsIcon(QString::fromUtf8(ic), kToolIconColor, 18));
+        b->setAutoRaise(true);
+        b->setToolTip(QString::fromUtf8(ic));
+        optionsBar_->addWidget(b);
+    }
 }
 
 void MainWindow::buildCentral() {
@@ -264,9 +319,12 @@ void MainWindow::buildCentral() {
     refreshDocTab();
 }
 
-void MainWindow::updateOptionsBar(bool showBrushOptions, const QString& toolName) {
+void MainWindow::updateOptionsBar(OptKind kind, const QString& toolName) {
     if (optToolName_ != nullptr) optToolName_->setText(toolName);
-    if (brushOptions_ != nullptr) brushOptions_->setVisible(showBrushOptions);
+    // Toggle the toolbar ACTIONS, not the inner widgets — QToolBar lays widgets out
+    // via their wrapping action, so hiding the widget alone leaves a gap/ghost.
+    if (brushOptAction_ != nullptr) brushOptAction_->setVisible(kind == OptKind::Brush);
+    if (moveOptAction_ != nullptr) moveOptAction_->setVisible(kind == OptKind::Move);
 }
 
 void MainWindow::refreshDocTab() {
@@ -313,6 +371,7 @@ void MainWindow::chooseForegroundColor() {
     fgColor_ = c;
     canvas_->tool().setColor(pe::Rgbaf{static_cast<float>(c.redF()), static_cast<float>(c.greenF()),
                                        static_cast<float>(c.blueF()), 1.0f});
+    if (colorPanel_ != nullptr) colorPanel_->setColor(fgColor_);  // keep the picker in sync
     updateSwatches();
 }
 
@@ -389,11 +448,13 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     canvas_->setDocument(nullptr);
     if (layers_ != nullptr) layers_->setDocument(nullptr);
     if (history_ != nullptr) history_->setDocument(nullptr);
+    if (properties_ != nullptr) properties_->setDocument(nullptr);
     doc_ = std::move(doc);
     currentPath_ = std::move(path);
     canvas_->setDocument(doc_.get());
     if (layers_ != nullptr) layers_->setDocument(doc_.get());
     if (history_ != nullptr) history_->setDocument(doc_.get());
+    if (properties_ != nullptr) properties_->setDocument(doc_.get());
     refreshTitle();
     refreshDocTab();
 }
@@ -428,11 +489,22 @@ void MainWindow::buildDockPanels() {
 
     layers_ = new LayersPanel();
     history_ = new HistoryPanel();
+    colorPanel_ = new ColorPanel();
+    properties_ = new PropertiesPanel();
+
+    // The Color panel drives the foreground/brush colour; seed it and keep in sync.
+    colorPanel_->setColor(fgColor_);
+    connect(colorPanel_, &ColorPanel::colorChanged, this, [this](const QColor& c) {
+        fgColor_ = c;
+        canvas_->tool().setColor(pe::Rgbaf{static_cast<float>(c.redF()),
+                                           static_cast<float>(c.greenF()),
+                                           static_cast<float>(c.blueF()), 1.0f});
+        updateSwatches();
+    });
 
     // Group anchors (one per stacked group).
-    auto* colorDock = makeDock(QStringLiteral("Color"), placeholder(QStringLiteral("Color")));
-    auto* propsDock =
-        makeDock(QStringLiteral("Properties"), placeholder(QStringLiteral("Properties")));
+    auto* colorDock = makeDock(QStringLiteral("Color"), colorPanel_);
+    auto* propsDock = makeDock(QStringLiteral("Properties"), properties_);
     auto* layersDock = makeDock(QStringLiteral("Layers"), layers_);
 
     // Establish the three vertical regions FIRST (split before tabify, or Qt merges
