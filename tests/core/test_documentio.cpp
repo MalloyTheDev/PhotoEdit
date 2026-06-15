@@ -4,8 +4,9 @@
 #include "pe_test.hpp"
 
 #include <cstddef>
-#include <cstdio>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 using namespace pe;
@@ -67,8 +68,12 @@ PE_TEST(documentio_unavailable_or_unknown_is_null) {
 }
 
 PE_TEST(documentio_file_roundtrip_native) {
-    const std::string path = std::string("/tmp/pe_docio_test_") +
-                             std::to_string(reinterpret_cast<std::uintptr_t>(&path)) + ".pedoc";
+    // Portable temp path (works on Windows and Linux CI).
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("pe_docio_" + std::to_string(reinterpret_cast<std::uintptr_t>(&file)) + ".pedoc");
+    const std::string path = file.string();
+
     auto doc = Document::createBlank(Size{10, 6});
     auto* pl = dynamic_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
     pl->tiles().fillRect(Rect{0, 0, 10, 6}, Rgba8{70, 140, 210, 255});
@@ -76,18 +81,25 @@ PE_TEST(documentio_file_roundtrip_native) {
     PE_CHECK(saveDocument(*doc, path));
     auto loaded = loadDocument(path);
     PE_CHECK(loaded != nullptr);
-    PE_CHECK_EQ(loaded->canvasSize().width, 10);
-    auto* lpl = dynamic_cast<PixelLayer*>(loaded->findLayer(loaded->activeLayer()));
-    PE_CHECK_EQ(lpl->tiles().pixel(5, 3), (Rgba8{70, 140, 210, 255}));
-    std::remove(path.c_str());
+    if (loaded != nullptr) {  // guard the deref so a save/load failure reports, not crashes
+        PE_CHECK_EQ(loaded->canvasSize().width, 10);
+        auto* lpl = dynamic_cast<PixelLayer*>(loaded->findLayer(loaded->activeLayer()));
+        if (lpl != nullptr) PE_CHECK_EQ(lpl->tiles().pixel(5, 3), (Rgba8{70, 140, 210, 255}));
+    }
+    std::error_code ec;
+    std::filesystem::remove(file, ec);
 }
 
 PE_TEST(documentio_load_missing_or_unknown_is_null) {
-    PE_CHECK(loadDocument("/tmp/pe_does_not_exist_98765.pedoc") == nullptr);  // missing file
-    PE_CHECK(loadDocument("/tmp/whatever.xyz") == nullptr);                   // unknown extension
+    const std::string missing =
+        (std::filesystem::temp_directory_path() / "pe_does_not_exist_98765.pedoc").string();
+    const std::string unknownExt =
+        (std::filesystem::temp_directory_path() / "whatever.xyz").string();
+    PE_CHECK(loadDocument(missing) == nullptr);     // missing file
+    PE_CHECK(loadDocument(unknownExt) == nullptr);  // unknown extension
 
     auto doc = Document::createBlank(Size{4, 4});
-    PE_CHECK(!saveDocument(*doc, "/tmp/whatever.xyz"));  // unknown extension -> false
+    PE_CHECK(!saveDocument(*doc, unknownExt));  // unknown extension -> false
 }
 
 #ifdef PHOTOEDIT_HAVE_PNG
