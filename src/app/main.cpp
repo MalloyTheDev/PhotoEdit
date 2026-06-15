@@ -12,7 +12,8 @@ int main(int argc, char** argv) {
     // Apply the dark theme before any widgets are shown; honor the last choice
     // (Graphite — the Photoshop medium-grey — is the default).
     const int saved =
-        QSettings().value(QStringLiteral("theme"), static_cast<int>(pe::app::ThemeId::Graphite))
+        QSettings()
+            .value(QStringLiteral("theme"), static_cast<int>(pe::app::ThemeId::Graphite))
             .toInt();
     const pe::app::ThemeId theme = saved == static_cast<int>(pe::app::ThemeId::Slate)
                                        ? pe::app::ThemeId::Slate
