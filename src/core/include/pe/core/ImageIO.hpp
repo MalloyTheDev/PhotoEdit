@@ -33,6 +33,15 @@ class Document;
 // nullopt on malformed input or if the dimensions exceed the decode safety cap.
 [[nodiscard]] std::optional<PixelBuffer> decodeJpeg(std::span<const std::byte> data);
 
+// Encode an 8-bit RGBA image to the bytes of a (lossless, LZW-compressed) TIFF file.
+// Empty on failure or for an empty image. Only built with libtiff (PHOTOEDIT_HAVE_TIFF).
+[[nodiscard]] std::vector<std::byte> encodeTiff(const PixelBuffer& image);
+
+// Decode the bytes of a TIFF file to an 8-bit RGBA image (any layout/depth is
+// normalized to RGBA8 via libtiff's RGBA reader). Returns nullopt on malformed input
+// or if the dimensions exceed the decode safety cap.
+[[nodiscard]] std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data);
+
 // Document-level convenience over the codec:
 // Flatten `doc` to a single raster and encode it as the bytes of a PNG file. Returns
 // an empty vector on failure (e.g. an empty document).

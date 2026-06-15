@@ -124,6 +124,33 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Optional TIFF I/O (libtiff). pkg-config module is libtiff-4. Same graceful pattern.
+# ---------------------------------------------------------------------------
+if(PkgConfig_FOUND)
+    pkg_check_modules(TIFF IMPORTED_TARGET libtiff-4)
+endif()
+if(NOT TIFF_FOUND)
+    find_path(TIFF_INCLUDE_DIR NAMES tiffio.h)
+    find_library(TIFF_LIBRARY NAMES tiff libtiff)
+    if(TIFF_INCLUDE_DIR AND TIFF_LIBRARY)
+        set(TIFF_FOUND TRUE)
+    endif()
+endif()
+if(TIFF_FOUND)
+    target_sources(pe_core PRIVATE src/Tiff.cpp)
+    target_compile_definitions(pe_core PUBLIC PHOTOEDIT_HAVE_TIFF=1)
+    if(TARGET PkgConfig::TIFF)
+        target_link_libraries(pe_core PUBLIC PkgConfig::TIFF)
+    else()
+        target_include_directories(pe_core PUBLIC ${TIFF_INCLUDE_DIR})
+        target_link_libraries(pe_core PUBLIC ${TIFF_LIBRARY})
+    endif()
+    message(STATUS "  TIFF I/O:    libtiff ${TIFF_VERSION}")
+else()
+    message(STATUS "  TIFF I/O:    DISABLED (libtiff not found)")
+endif()
+
+# ---------------------------------------------------------------------------
 # Optional zlib — compresses pixel blocks in the native .pedoc format. The format
 # stays readable without it (blocks written uncompressed); a compressed block can
 # only be read back when zlib is present. Same graceful pattern as above.

@@ -31,6 +31,7 @@ add_executable(pe_core_tests
     core/test_channels.cpp
     core/test_png.cpp
     core/test_jpeg.cpp
+    core/test_tiff.cpp
     core/test_nativeformat.cpp
 )
 
