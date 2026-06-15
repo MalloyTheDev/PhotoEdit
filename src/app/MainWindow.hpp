@@ -13,6 +13,7 @@ namespace pe::app {
 
 class CanvasView;
 class LayersPanel;
+class HistoryPanel;
 
 // The top-level application window. Wires the File menu to the engine's document I/O
 // and shows the active document on a CanvasView. The dockable panels (layers, tools,
@@ -42,6 +43,7 @@ private:
     std::unique_ptr<pe::Document> doc_;
     CanvasView* canvas_ = nullptr;
     LayersPanel* layers_ = nullptr;
+    HistoryPanel* history_ = nullptr;
     QString currentPath_;
 };
 
