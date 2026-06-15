@@ -24,6 +24,15 @@ class Document;
 // input or if the declared dimensions exceed the decode safety cap (untrusted input).
 [[nodiscard]] std::optional<PixelBuffer> decodePng(std::span<const std::byte> data);
 
+// Encode an 8-bit RGBA image to the bytes of a JPEG file. JPEG is opaque, so the
+// alpha channel is dropped. `quality` is 1..100 (clamped). Empty on failure or for an
+// empty image. Only built with libjpeg-turbo (PHOTOEDIT_HAVE_JPEG).
+[[nodiscard]] std::vector<std::byte> encodeJpeg(const PixelBuffer& image, int quality = 90);
+
+// Decode the bytes of a JPEG file to an 8-bit RGBA image (alpha set opaque). Returns
+// nullopt on malformed input or if the dimensions exceed the decode safety cap.
+[[nodiscard]] std::optional<PixelBuffer> decodeJpeg(std::span<const std::byte> data);
+
 // Document-level convenience over the codec:
 // Flatten `doc` to a single raster and encode it as the bytes of a PNG file. Returns
 // an empty vector on failure (e.g. an empty document).

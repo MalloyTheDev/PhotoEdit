@@ -105,3 +105,19 @@ if(PNG_FOUND)
 else()
     message(STATUS "  PNG I/O:     DISABLED (libpng not found)")
 endif()
+
+# ---------------------------------------------------------------------------
+# Optional JPEG I/O (libjpeg-turbo's TurboJPEG API). TurboJPEG ships no pkg-config
+# file, so we detect via find_path/find_library. Same graceful pattern as above.
+# ---------------------------------------------------------------------------
+find_path(TURBOJPEG_INCLUDE_DIR NAMES turbojpeg.h)
+find_library(TURBOJPEG_LIBRARY NAMES turbojpeg libturbojpeg)
+if(TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIBRARY)
+    target_sources(pe_core PRIVATE src/Jpeg.cpp)
+    target_compile_definitions(pe_core PUBLIC PHOTOEDIT_HAVE_JPEG=1)
+    target_include_directories(pe_core PUBLIC ${TURBOJPEG_INCLUDE_DIR})
+    target_link_libraries(pe_core PUBLIC ${TURBOJPEG_LIBRARY})
+    message(STATUS "  JPEG I/O:    libjpeg-turbo (TurboJPEG)")
+else()
+    message(STATUS "  JPEG I/O:    DISABLED (libturbojpeg not found)")
+endif()
