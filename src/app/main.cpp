@@ -9,14 +9,14 @@ int main(int argc, char** argv) {
     QApplication::setApplicationName(QStringLiteral("PhotoEdit"));
     QApplication::setOrganizationName(QStringLiteral("MalloyTheDev"));
 
-    // Apply the dark pro theme before any widgets are shown; honor the last choice.
-    const int saved =
-        QSettings()
-            .value(QStringLiteral("theme"), static_cast<int>(pe::app::ThemeId::Graphite))
-            .toInt();
-    const pe::app::ThemeId theme = saved == static_cast<int>(pe::app::ThemeId::Slate)
-                                       ? pe::app::ThemeId::Slate
-                                       : pe::app::ThemeId::Graphite;
+    // Apply the dark pro theme before any widgets are shown; honor the last choice
+    // (Slate is the default).
+    const int saved = QSettings()
+                          .value(QStringLiteral("theme"), static_cast<int>(pe::app::ThemeId::Slate))
+                          .toInt();
+    const pe::app::ThemeId theme = saved == static_cast<int>(pe::app::ThemeId::Graphite)
+                                       ? pe::app::ThemeId::Graphite
+                                       : pe::app::ThemeId::Slate;
     pe::app::applyTheme(app, theme);
 
     pe::app::MainWindow window;

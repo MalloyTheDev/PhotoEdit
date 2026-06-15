@@ -2,7 +2,9 @@
 
 #include "CanvasView.hpp"
 #include "HistoryPanel.hpp"
+#include "IconUtil.hpp"
 #include "LayersPanel.hpp"
+#include "PanelHeader.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Version.hpp"
@@ -10,9 +12,11 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QColor>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
 #include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
@@ -21,9 +25,9 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPixmap>
+#include <QRectF>
 #include <QSettings>
 #include <QStatusBar>
-#include <QSvgRenderer>
 #include <QToolBar>
 
 #include <cstddef>
@@ -40,18 +44,41 @@ constexpr const char* kOpenFilter =
 constexpr const char* kSaveFilter =
     "PhotoEdit document (*.pedoc);;PNG (*.png);;JPEG (*.jpg);;TIFF (*.tif);;WebP (*.webp)";
 
-// Rasterize a bundled (re-tinted) Lucide SVG into a crisp HiDPI tool-button icon.
-[[nodiscard]] QIcon loadToolIcon(const QString& name) {
-    constexpr int kLogical = 22;
+// A calm light tint for resting tool icons (the active one is marked by an accent
+// outline, so the glyph itself stays restrained).
+const QColor kToolIconColor(0xbe, 0xc4, 0xcc);
+
+// The brand monogram pixmap: an accent-filled rounded tile with a "P".
+[[nodiscard]] QPixmap brandPixmap(const ThemeColors& c) {
+    constexpr int kSize = 30;
     constexpr qreal kDpr = 2.0;
-    QPixmap pm(static_cast<int>(kLogical * kDpr), static_cast<int>(kLogical * kDpr));
+    QPixmap pm(static_cast<int>(kSize * kDpr), static_cast<int>(kSize * kDpr));
     pm.fill(Qt::transparent);
     pm.setDevicePixelRatio(kDpr);
-    QSvgRenderer renderer(QStringLiteral(":/icons/%1.svg").arg(name));
     QPainter p(&pm);
-    renderer.render(&p, QRectF(0, 0, kLogical, kLogical));
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(Qt::NoPen);
+    p.setBrush(c.accent);
+    p.drawRoundedRect(QRectF(0, 0, kSize, kSize), 8, 8);
+    QFont bf;
+    bf.setPointSizeF(13.0);
+    bf.setBold(true);
+    p.setFont(bf);
+    p.setPen(c.accentText);
+    p.drawText(QRectF(0, -1, kSize, kSize), Qt::AlignCenter, QStringLiteral("P"));
     p.end();
-    return QIcon(pm);
+    return pm;
+}
+
+// A compact brand monogram for the top of the tool strip — the app's in-window identity.
+[[nodiscard]] QLabel* makeBrandMark(QWidget* parent) {
+    auto* mark = new QLabel(parent);
+    mark->setObjectName(QStringLiteral("BrandMark"));
+    mark->setPixmap(brandPixmap(themeColors(currentTheme())));
+    mark->setAlignment(Qt::AlignCenter);
+    mark->setToolTip(QStringLiteral("PhotoEdit"));
+    mark->setContentsMargins(0, 2, 0, 6);
+    return mark;
 }
 
 // One tool-strip entry. `tool` == Inactive marks a scaffolded, not-yet-wired tool.
@@ -150,6 +177,10 @@ void MainWindow::buildToolBar() {
     tb->setToolButtonStyle(Qt::ToolButtonIconOnly);
     addToolBar(Qt::LeftToolBarArea, tb);
 
+    brandMark_ = makeBrandMark(tb);  // app identity at the top of the strip
+    tb->addWidget(brandMark_);
+    tb->addSeparator();
+
     // Grouped like a pro editor: select · crop/sample · paint · type · navigate.
     // Brush/Eraser/Hand/Zoom are wired; the rest are scaffolded (Inactive) for now.
     using Tool = CanvasView::Tool;
@@ -171,8 +202,9 @@ void MainWindow::buildToolBar() {
     for (std::size_t g = 0; g < groups.size(); ++g) {
         if (g > 0) tb->addSeparator();
         for (const ToolDef& def : groups[g]) {
-            QAction* a = tb->addAction(loadToolIcon(QString::fromUtf8(def.icon)),
-                                       QString::fromUtf8(def.label));
+            QAction* a =
+                tb->addAction(renderIconAsIcon(QString::fromUtf8(def.icon), kToolIconColor, 22),
+                              QString::fromUtf8(def.label));
             a->setCheckable(true);
             a->setActionGroup(toolGroup);
             const bool wired = def.tool != Tool::Inactive;
@@ -278,14 +310,21 @@ void MainWindow::refreshTitle() {
 void MainWindow::buildDockPanels() {
     const struct {
         const char* title;
+        const char* icon;
         Qt::DockWidgetArea area;
     } panels[] = {
-        {"Layers", Qt::RightDockWidgetArea},     {"Channels", Qt::RightDockWidgetArea},
-        {"Properties", Qt::RightDockWidgetArea}, {"History", Qt::RightDockWidgetArea},
-        {"Color", Qt::RightDockWidgetArea},  // the left tool strip replaces the old Tools dock
+        {"Layers", "layers", Qt::RightDockWidgetArea},
+        {"Channels", "blend", Qt::RightDockWidgetArea},
+        {"Properties", "sliders-horizontal", Qt::RightDockWidgetArea},
+        {"History", "history", Qt::RightDockWidgetArea},
+        {"Color", "palette", Qt::RightDockWidgetArea},
+        // the left tool strip replaces the old Tools dock
     };
     for (const auto& p : panels) {
         auto* dock = new QDockWidget(QString::fromUtf8(p.title), this);
+        dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+        dock->setTitleBarWidget(
+            makePanelHeader(QString::fromUtf8(p.title), QString::fromUtf8(p.icon), dock));
         if (std::string_view(p.title) == "Layers") {
             layers_ = new LayersPanel(dock);
             dock->setWidget(layers_);
@@ -313,7 +352,9 @@ void MainWindow::buildStatusBar() {
 
 void MainWindow::setTheme(ThemeId id) {
     applyTheme(*qApp, id);
-    if (canvas_ != nullptr) canvas_->update();  // repaint the themed pasteboard
+    if (brandMark_ != nullptr)
+        brandMark_->setPixmap(brandPixmap(themeColors(id)));  // recolor accent
+    if (canvas_ != nullptr) canvas_->update();                // repaint the themed pasteboard
     QSettings().setValue(QStringLiteral("theme"), static_cast<int>(id));
 }
 

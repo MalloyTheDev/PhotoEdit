@@ -21,6 +21,10 @@ qt_add_executable(photoedit
     HistoryPanel.hpp
     Theme.cpp
     Theme.hpp
+    IconUtil.cpp
+    IconUtil.hpp
+    PanelHeader.cpp
+    PanelHeader.hpp
     icons.qrc
 )
 
