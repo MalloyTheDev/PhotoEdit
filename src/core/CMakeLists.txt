@@ -151,6 +151,33 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Optional WebP I/O (libwebp). pkg-config module is libwebp. Same graceful pattern.
+# ---------------------------------------------------------------------------
+if(PkgConfig_FOUND)
+    pkg_check_modules(WEBP IMPORTED_TARGET libwebp)
+endif()
+if(NOT WEBP_FOUND)
+    find_path(WEBP_INCLUDE_DIR NAMES webp/decode.h)
+    find_library(WEBP_LIBRARY NAMES webp libwebp)
+    if(WEBP_INCLUDE_DIR AND WEBP_LIBRARY)
+        set(WEBP_FOUND TRUE)
+    endif()
+endif()
+if(WEBP_FOUND)
+    target_sources(pe_core PRIVATE src/Webp.cpp)
+    target_compile_definitions(pe_core PUBLIC PHOTOEDIT_HAVE_WEBP=1)
+    if(TARGET PkgConfig::WEBP)
+        target_link_libraries(pe_core PUBLIC PkgConfig::WEBP)
+    else()
+        target_include_directories(pe_core PUBLIC ${WEBP_INCLUDE_DIR})
+        target_link_libraries(pe_core PUBLIC ${WEBP_LIBRARY})
+    endif()
+    message(STATUS "  WebP I/O:    libwebp ${WEBP_VERSION}")
+else()
+    message(STATUS "  WebP I/O:    DISABLED (libwebp not found)")
+endif()
+
+# ---------------------------------------------------------------------------
 # Optional zlib — compresses pixel blocks in the native .pedoc format. The format
 # stays readable without it (blocks written uncompressed); a compressed block can
 # only be read back when zlib is present. Same graceful pattern as above.
