@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pe/core/Geometry.hpp"
+#include "pe/core/PixelBuffer.hpp"
 #include "pe/core/Tile.hpp"
 
 #include <array>
@@ -36,6 +37,16 @@ public:
     void subtractRect(Rect r);    // remove a rectangle from the selection
     void intersectRect(Rect r);   // keep only the overlap with a rectangle
     void invert(Rect canvas);     // invert selection within the canvas bounds
+
+    // --- saved selections <-> alpha channels (systems/19) ---
+    // Save the selection's coverage over `bounds` to an 8-bit grayscale mask (the
+    // alpha-channel representation): the value is replicated to R=G=B, alpha opaque.
+    // An inactive selection reads as fully selected (255). Empty bounds -> empty.
+    [[nodiscard]] PixelBuffer toMask(Rect bounds) const;
+    // Replace the selection with an 8-bit grayscale mask (load an alpha channel as a
+    // selection), placing the mask's top-left at (originX, originY). The mask's red
+    // channel is the coverage value. Becomes active; an empty mask deselects.
+    void loadMask(const PixelBuffer& mask, int originX, int originY);
 
     // Bounding box of selected tiles (empty if inactive / nothing selected).
     [[nodiscard]] Rect selectedBounds() const noexcept;
