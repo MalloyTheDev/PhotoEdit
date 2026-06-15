@@ -1,4 +1,5 @@
 #include "pe/core/Document.hpp"
+#include "pe/core/GroupLayer.hpp"
 #include "pe/core/NativeFormat.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe_test.hpp"
@@ -99,4 +100,55 @@ PE_TEST(native_format_rejects_off_canvas_content_rect) {
     blob[48] = std::byte{0xFF};
     blob[49] = std::byte{0x7F};                      // cy ~= 2.1e9, far outside the 4x4 canvas
     PE_CHECK(deserializeDocument(blob) == nullptr);  // rejected, no UB / over-allocation
+}
+
+PE_TEST(native_format_roundtrips_nested_groups) {
+    auto doc = Document::createBlank(Size{16, 16});
+    asPixel(*doc, 0)->setName("Bg");
+
+    auto group = std::make_unique<GroupLayer>("Grp");
+    group->setOpacity(0.7f);
+    group->setIsolated(false);
+    auto child = std::make_unique<PixelLayer>("Inner");
+    child->setBlendMode(BlendMode::Screen);
+    child->tiles().setPixel(3, 3, Rgba8{77, 88, 99, 255});
+    const LayerId childId = child->id();
+    group->addChild(std::move(child));
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+    doc->setActiveLayer(childId);  // active layer is nested inside the group
+
+    auto loaded = deserializeDocument(serializeDocument(*doc));
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(2));
+
+    const auto& tops = loaded->topLevelLayers();
+    auto* lgrp = dynamic_cast<GroupLayer*>(const_cast<Layer*>(tops[1].get()));
+    PE_CHECK(lgrp != nullptr);
+    PE_CHECK_EQ(lgrp->name(), std::string("Grp"));
+    PE_CHECK_NEAR(lgrp->opacity(), 0.7f);
+    PE_CHECK_EQ(lgrp->isolated(), false);
+    PE_CHECK_EQ(lgrp->childCount(), static_cast<std::size_t>(1));
+
+    auto* linner = dynamic_cast<PixelLayer*>(const_cast<Layer*>(lgrp->children()[0].get()));
+    PE_CHECK(linner != nullptr);
+    PE_CHECK_EQ(linner->name(), std::string("Inner"));
+    PE_CHECK(linner->blendMode() == BlendMode::Screen);
+    PE_CHECK_EQ(linner->tiles().pixel(3, 3), (Rgba8{77, 88, 99, 255}));
+    // The nested active layer is restored.
+    PE_CHECK_EQ(loaded->activeLayer(), linner->id());
+}
+
+PE_TEST(native_format_rejects_excessive_group_nesting) {
+    // A maliciously deep group chain must be rejected by the recursion cap rather than
+    // overflowing the stack during deserialize.
+    auto doc = Document::createBlank(Size{8, 8});
+    std::unique_ptr<Layer> chain = std::make_unique<GroupLayer>("g");
+    for (int i = 0; i < 300; ++i) {  // 300 > kMaxGroupDepth (256)
+        auto outer = std::make_unique<GroupLayer>("g");
+        outer->addChild(std::move(chain));
+        chain = std::move(outer);
+    }
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(chain));
+    std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK(deserializeDocument(blob) == nullptr);  // depth cap -> reject, no overflow
 }
