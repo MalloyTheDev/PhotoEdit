@@ -76,6 +76,7 @@ std::unique_ptr<Document> importDocumentPng(std::span<const std::byte> data) {
     if (!image || image->isEmpty()) return nullptr;
 
     auto doc = Document::createBlank(Size{image->width(), image->height()});
+    if (doc == nullptr) return nullptr;  // decode cap is by area; canvas cap is per-dim
     auto* layer = dynamic_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
     if (layer == nullptr) return nullptr;  // createBlank always seeds a pixel layer
 

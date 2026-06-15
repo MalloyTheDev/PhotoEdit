@@ -75,4 +75,13 @@ PE_TEST(png_import_garbage_is_null) {
     PE_CHECK(importDocumentPng(junk) == nullptr);
 }
 
+PE_TEST(png_import_extreme_aspect_ratio_is_null_not_crash) {
+    // A 1 x 400000 image is under the 64 MP decode cap but exceeds the document's
+    // per-dimension canvas cap (300000); import must reject it, not dereference null.
+    PixelBuffer tall(1, 400000, Rgba8{1, 2, 3, 255});
+    std::vector<std::byte> png = encodePng(tall);
+    PE_CHECK(!png.empty());
+    PE_CHECK(importDocumentPng(png) == nullptr);
+}
+
 #endif  // PHOTOEDIT_HAVE_PNG
