@@ -109,4 +109,3 @@ Enforced by tests + a per-change correctness/security audit:
 - **Determinism** where it matters (seeded noise).
 - **Headless core / Qt app** one-way dependency
   ([ADR-0006](adr/0006-headless-core-separation.md)).
-</content>
