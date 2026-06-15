@@ -1,6 +1,7 @@
 #include "pe/core/ImageIO.hpp"
 
 #include "pe/core/Document.hpp"
+#include "pe/core/DocumentIO.hpp"
 #include "pe/core/PixelLayer.hpp"
 
 #include <png.h>
@@ -73,18 +74,8 @@ std::vector<std::byte> exportDocumentPng(const Document& doc) {
 
 std::unique_ptr<Document> importDocumentPng(std::span<const std::byte> data) {
     std::optional<PixelBuffer> image = decodePng(data);
-    if (!image || image->isEmpty()) return nullptr;
-
-    auto doc = Document::createBlank(Size{image->width(), image->height()});
-    if (doc == nullptr) return nullptr;  // decode cap is by area; canvas cap is per-dim
-    auto* layer = dynamic_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
-    if (layer == nullptr) return nullptr;  // createBlank always seeds a pixel layer
-
-    TileStore& store = layer->tiles();
-    for (int y = 0; y < image->height(); ++y) {
-        for (int x = 0; x < image->width(); ++x) store.setPixel(x, y, image->at(x, y));
-    }
-    return doc;
+    if (!image) return nullptr;
+    return documentFromImage(*image);  // shared raster -> single-layer document
 }
 
 }  // namespace pe
