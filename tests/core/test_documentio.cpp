@@ -19,6 +19,8 @@ PE_TEST(documentio_format_from_extension) {
     PE_CHECK(formatFromExtension("doc.pedoc") == ImageFormat::Native);
     PE_CHECK(formatFromExtension("noext") == ImageFormat::Unknown);
     PE_CHECK(formatFromExtension("x.gif") == ImageFormat::Unknown);
+    PE_CHECK(formatFromExtension("/dir.png/file") == ImageFormat::Unknown);  // dotted dir, no ext
+    PE_CHECK(formatFromExtension("/a.b/photo.tiff") == ImageFormat::Tiff);   // ext on the file
 }
 
 PE_TEST(documentio_native_always_available_roundtrip) {
