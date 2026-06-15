@@ -26,6 +26,7 @@ add_library(pe_core
     src/Filter.cpp
     src/Histogram.cpp
     src/Channels.cpp
+    src/NativeFormat.cpp
     src/AutoTone.cpp
     src/ColorSpace.cpp
 )
