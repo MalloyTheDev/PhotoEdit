@@ -34,6 +34,7 @@ add_executable(pe_core_tests
     core/test_tiff.cpp
     core/test_webp.cpp
     core/test_nativeformat.cpp
+    core/test_documentio.cpp
 )
 
 target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)
