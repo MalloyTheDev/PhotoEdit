@@ -183,8 +183,14 @@ std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data) {
         const std::int32_t cy = r.i32();
         const std::int32_t cw = r.i32();
         const std::int32_t ch = r.i32();
-        if (!r.ok() || cw < 0 || ch < 0 ||
-            static_cast<std::int64_t>(cw) * static_cast<std::int64_t>(ch) > kMaxLayerPixels) {
+        // The content rect must lie within the canvas (the writer clips it there).
+        // Validating in int64 keeps cx+cw / cy+ch from overflowing the int loop bounds
+        // and confines tile allocation to the canvas — rejecting a hostile file that
+        // sets an extreme origin or a thin region spanning a huge tile span.
+        if (!r.ok() || cw < 0 || ch < 0 || cx < 0 || cy < 0 ||
+            static_cast<std::int64_t>(cx) + cw > canvasW ||
+            static_cast<std::int64_t>(cy) + ch > canvasH ||
+            static_cast<std::int64_t>(cw) * ch > kMaxLayerPixels) {
             return nullptr;
         }
 
