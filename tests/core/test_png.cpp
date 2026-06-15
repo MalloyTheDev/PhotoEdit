@@ -1,5 +1,7 @@
+#include "pe/core/Document.hpp"
 #include "pe/core/ImageIO.hpp"
 #include "pe/core/PixelBuffer.hpp"
+#include "pe/core/PixelLayer.hpp"
 #include "pe_test.hpp"
 
 #ifdef PHOTOEDIT_HAVE_PNG
@@ -46,6 +48,31 @@ PE_TEST(png_solid_image_roundtrip) {
     auto decoded = decodePng(encodePng(img));
     PE_CHECK(decoded.has_value());
     PE_CHECK_EQ(decoded->at(5, 5), (Rgba8{64, 128, 192, 255}));
+}
+
+PE_TEST(png_document_export_import_roundtrip) {
+    auto doc = Document::createBlank(Size{6, 4});
+    auto* pl = dynamic_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    PE_CHECK(pl != nullptr);
+    pl->tiles().fillRect(Rect{0, 0, 6, 4}, Rgba8{30, 90, 150, 255});
+    pl->tiles().setPixel(2, 1, Rgba8{200, 10, 20, 255});
+
+    std::vector<std::byte> png = exportDocumentPng(*doc);
+    PE_CHECK(!png.empty());
+
+    auto loaded = importDocumentPng(png);
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK_EQ(loaded->canvasSize().width, 6);
+    PE_CHECK_EQ(loaded->canvasSize().height, 4);
+    auto* lpl = dynamic_cast<PixelLayer*>(loaded->findLayer(loaded->activeLayer()));
+    PE_CHECK(lpl != nullptr);
+    PE_CHECK_EQ(lpl->tiles().pixel(0, 0), (Rgba8{30, 90, 150, 255}));
+    PE_CHECK_EQ(lpl->tiles().pixel(2, 1), (Rgba8{200, 10, 20, 255}));
+}
+
+PE_TEST(png_import_garbage_is_null) {
+    std::vector<std::byte> junk(32, std::byte{0x7F});
+    PE_CHECK(importDocumentPng(junk) == nullptr);
 }
 
 #endif  // PHOTOEDIT_HAVE_PNG
