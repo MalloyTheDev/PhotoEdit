@@ -33,6 +33,14 @@ class Document;
 // nullopt on malformed input or if the dimensions exceed the decode safety cap.
 [[nodiscard]] std::optional<PixelBuffer> decodeJpeg(std::span<const std::byte> data);
 
+// Encode an 8-bit RGBA image to the bytes of a (lossless) WebP file. Empty on failure
+// or for an empty image. Only built with libwebp (PHOTOEDIT_HAVE_WEBP).
+[[nodiscard]] std::vector<std::byte> encodeWebp(const PixelBuffer& image);
+
+// Decode the bytes of a WebP file to an 8-bit RGBA image. Returns nullopt on malformed
+// input or if the dimensions exceed the decode safety cap.
+[[nodiscard]] std::optional<PixelBuffer> decodeWebp(std::span<const std::byte> data);
+
 // Encode an 8-bit RGBA image to the bytes of a (lossless, LZW-compressed) TIFF file.
 // Empty on failure or for an empty image. Only built with libtiff (PHOTOEDIT_HAVE_TIFF).
 [[nodiscard]] std::vector<std::byte> encodeTiff(const PixelBuffer& image);

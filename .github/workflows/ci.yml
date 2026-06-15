@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build liblcms2-dev libpng-dev libturbojpeg0-dev zlib1g-dev libtiff-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y ninja-build liblcms2-dev libpng-dev libturbojpeg0-dev zlib1g-dev libtiff-dev libwebp-dev pkg-config
       - name: Configure
         run: cmake --preset linux-core-dev
       - name: Build
@@ -54,7 +54,7 @@ jobs:
         # --classic: the repo's vcpkg.json would otherwise force manifest mode, where
         # `vcpkg install <pkg>` is rejected. Classic mode installs the named ports only
         # (Qt still comes from aqtinstall, not vcpkg).
-        run: vcpkg install lcms libpng libjpeg-turbo zlib tiff --triplet x64-windows --classic
+        run: vcpkg install lcms libpng libjpeg-turbo zlib tiff libwebp --triplet x64-windows --classic
       - name: Configure
         run: >
           cmake -B build/win -S . -G Ninja
