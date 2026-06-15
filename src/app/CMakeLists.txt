@@ -14,6 +14,8 @@ qt_add_executable(photoedit
     MainWindow.hpp
     CanvasView.cpp
     CanvasView.hpp
+    LayersPanel.cpp
+    LayersPanel.hpp
 )
 
 target_link_libraries(photoedit
