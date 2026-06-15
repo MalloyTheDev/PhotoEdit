@@ -2,6 +2,7 @@
 
 #include "pe/core/BlendMode.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/GroupLayer.hpp"
 #include "pe/core/PixelLayer.hpp"
 
 #include <cstdint>
@@ -12,11 +13,16 @@ namespace pe {
 
 namespace {
 
-constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '1'};
-constexpr std::uint32_t kVersion = 1;
+constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '2'};
+constexpr std::uint32_t kVersion = 2;
 constexpr std::int64_t kMaxLayerPixels = 64'000'000;  // per-layer content cap
 constexpr std::uint32_t kMaxLayers = 100'000;
 constexpr std::uint32_t kMaxNameBytes = 65'536;
+constexpr int kMaxGroupDepth = 256;  // cap nesting so a hostile file can't blow the stack
+
+// Layer kind discriminators written to the stream.
+constexpr std::uint8_t kKindPixel = 0;
+constexpr std::uint8_t kKindGroup = 1;
 
 // --- little-endian byte writer ---
 class Writer {
@@ -41,7 +47,6 @@ public:
     explicit Reader(std::span<const std::byte> data) : data_(data) {}
 
     [[nodiscard]] bool ok() const noexcept { return ok_; }
-    [[nodiscard]] bool atEnd() const noexcept { return pos_ == data_.size(); }
 
     bool read(void* dst, std::size_t n) {
         if (!ok_ || pos_ + n > data_.size()) {
@@ -79,6 +84,118 @@ private:
     bool ok_ = true;
 };
 
+// Whether the format serializes this layer (Pixel and Group in v2; adjustment/fill/
+// text layers and embedded profiles round-trip later).
+[[nodiscard]] bool serializable(const Layer& layer) {
+    return layer.kind() == LayerKind::Group || dynamic_cast<const PixelLayer*>(&layer) != nullptr;
+}
+
+void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active) {
+    const bool isGroup = layer.kind() == LayerKind::Group;
+    w.u8(isGroup ? kKindGroup : kKindPixel);
+    w.u8(layer.visible() ? 1 : 0);
+    w.f32(layer.opacity());
+    w.u8(static_cast<std::uint8_t>(layer.blendMode()));
+    w.u8(layer.id() == active ? 1 : 0);
+    const std::string& name = layer.name();
+    w.u32(static_cast<std::uint32_t>(name.size()));
+    w.bytes(name.data(), name.size());
+
+    if (isGroup) {
+        const auto& group = static_cast<const GroupLayer&>(layer);
+        w.u8(group.isolated() ? 1 : 0);
+        std::vector<const Layer*> kids;
+        for (const auto& child : group.children()) {
+            if (serializable(*child)) kids.push_back(child.get());
+        }
+        w.u32(static_cast<std::uint32_t>(kids.size()));
+        for (const Layer* child : kids) writeLayer(w, *child, canvasBounds, active);
+        return;
+    }
+
+    // Pixel layer: content clipped to the canvas (contentBounds() is tile-aligned).
+    const auto& pl = static_cast<const PixelLayer&>(layer);
+    const Rect b = pl.tiles().contentBounds().intersected(canvasBounds);
+    w.i32(b.x);
+    w.i32(b.y);
+    w.i32(b.width);
+    w.i32(b.height);
+    for (int y = b.y; y < b.y + b.height; ++y) {
+        for (int x = b.x; x < b.x + b.width; ++x) {
+            const Rgba8 px = pl.tiles().pixel(x, y);
+            w.bytes(&px, sizeof(px));
+        }
+    }
+}
+
+// Reads one layer (recursively for groups). Returns nullptr on any inconsistency.
+// Sets activeId/haveActive if a record carries the active flag.
+std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth depth,
+                                 LayerId& activeId, bool& haveActive, int depthGuard) {
+    if (depthGuard > kMaxGroupDepth) return nullptr;
+
+    const std::uint8_t kind = r.u8();
+    const bool visible = r.u8() != 0;
+    const float opacity = r.f32();
+    const std::uint8_t blendRaw = r.u8();
+    const std::uint8_t activeFlag = r.u8();
+    const std::uint32_t nameLen = r.u32();
+    if (!r.ok() || kind > kKindGroup || blendRaw >= static_cast<std::uint8_t>(BlendMode::Count) ||
+        nameLen > kMaxNameBytes) {
+        return nullptr;
+    }
+    std::string name(nameLen, '\0');
+    if (nameLen > 0 && !r.read(name.data(), nameLen)) return nullptr;
+
+    std::unique_ptr<Layer> layer;
+    if (kind == kKindGroup) {
+        auto group = std::make_unique<GroupLayer>(std::move(name));
+        const std::uint8_t isolated = r.u8();
+        const std::uint32_t childCount = r.u32();
+        if (!r.ok() || childCount > kMaxLayers) return nullptr;
+        group->setIsolated(isolated != 0);
+        for (std::uint32_t i = 0; i < childCount; ++i) {
+            auto child =
+                readLayer(r, canvasW, canvasH, depth, activeId, haveActive, depthGuard + 1);
+            if (child == nullptr) return nullptr;
+            group->addChild(std::move(child));
+        }
+        layer = std::move(group);
+    } else {
+        auto pl = std::make_unique<PixelLayer>(std::move(name), depth);
+        const std::int32_t cx = r.i32();
+        const std::int32_t cy = r.i32();
+        const std::int32_t cw = r.i32();
+        const std::int32_t ch = r.i32();
+        // Content must lie within the canvas (the writer clips to it); int64 math keeps
+        // cx+cw / cy+ch from overflowing and confines the loop (and tile allocation).
+        if (!r.ok() || cw < 0 || ch < 0 || cx < 0 || cy < 0 ||
+            static_cast<std::int64_t>(cx) + cw > canvasW ||
+            static_cast<std::int64_t>(cy) + ch > canvasH ||
+            static_cast<std::int64_t>(cw) * ch > kMaxLayerPixels) {
+            return nullptr;
+        }
+        TileStore& store = pl->tiles();
+        for (int y = cy; y < cy + ch; ++y) {
+            for (int x = cx; x < cx + cw; ++x) {
+                Rgba8 px{};
+                if (!r.read(&px, sizeof(px))) return nullptr;
+                store.setPixel(x, y, px);
+            }
+        }
+        layer = std::move(pl);
+    }
+
+    layer->setVisible(visible);
+    layer->setOpacity(opacity);
+    layer->setBlendMode(static_cast<BlendMode>(blendRaw));
+    if (activeFlag != 0) {
+        activeId = layer->id();
+        haveActive = true;
+    }
+    return layer;
+}
+
 }  // namespace
 
 std::vector<std::byte> serializeDocument(const Document& doc) {
@@ -93,43 +210,13 @@ std::vector<std::byte> serializeDocument(const Document& doc) {
     w.u8(static_cast<std::uint8_t>(doc.bitDepth()));
     w.i32(doc.resolutionPpi());
 
-    // Collect the top-level pixel layers (others are skipped in v1).
-    std::vector<const PixelLayer*> layers;
+    std::vector<const Layer*> tops;
     for (const auto& layer : doc.topLevelLayers()) {
-        if (const auto* pl = dynamic_cast<const PixelLayer*>(layer.get())) layers.push_back(pl);
+        if (serializable(*layer)) tops.push_back(layer.get());
     }
-
-    // The active layer's index among the serialized layers, or -1.
-    std::int32_t activeIndex = -1;
-    for (std::size_t i = 0; i < layers.size(); ++i) {
-        if (layers[i]->id() == doc.activeLayer()) activeIndex = static_cast<std::int32_t>(i);
-    }
-    w.i32(activeIndex);
-    w.u32(static_cast<std::uint32_t>(layers.size()));
-
-    for (const PixelLayer* pl : layers) {
-        w.u8(pl->visible() ? 1 : 0);
-        w.f32(pl->opacity());
-        w.u8(static_cast<std::uint8_t>(pl->blendMode()));
-        const std::string& name = pl->name();
-        w.u32(static_cast<std::uint32_t>(name.size()));
-        w.bytes(name.data(), name.size());
-
-        // contentBounds() is tile-aligned (256px granular); clip to the canvas so the
-        // blob is canvas-proportional, not padded to whole tiles. (Off-canvas layer
-        // content is not preserved in v1.)
-        const Rect b = pl->tiles().contentBounds().intersected(doc.canvasBounds());
-        w.i32(b.x);
-        w.i32(b.y);
-        w.i32(b.width);
-        w.i32(b.height);
-        for (int y = b.y; y < b.y + b.height; ++y) {
-            for (int x = b.x; x < b.x + b.width; ++x) {
-                const Rgba8 px = pl->tiles().pixel(x, y);
-                w.bytes(&px, sizeof(px));
-            }
-        }
-    }
+    w.u32(static_cast<std::uint32_t>(tops.size()));
+    const Rect canvasBounds = doc.canvasBounds();
+    for (const Layer* layer : tops) writeLayer(w, *layer, canvasBounds, doc.activeLayer());
     return w.take();
 }
 
@@ -148,73 +235,31 @@ std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data) {
     const std::uint8_t depthRaw = r.u8();
     const std::int32_t ppi = r.i32();
     if (!r.ok()) return nullptr;
-
-    // Validate the enum codes before trusting them.
     if (modeRaw > static_cast<std::uint8_t>(ColorMode::Bitmap)) return nullptr;
     if (depthRaw != 8 && depthRaw != 16 && depthRaw != 32) return nullptr;
 
     auto doc = Document::createBlank(Size{canvasW, canvasH}, static_cast<ColorMode>(modeRaw),
                                      static_cast<BitDepth>(depthRaw), ppi);
-    if (doc == nullptr) return nullptr;  // createBlank rejects bad size/ppi
+    if (doc == nullptr) return nullptr;
 
-    const std::int32_t activeIndex = r.i32();
-    const std::uint32_t layerCount = r.u32();
-    if (!r.ok() || layerCount > kMaxLayers) return nullptr;
+    const std::uint32_t topCount = r.u32();
+    if (!r.ok() || topCount > kMaxLayers) return nullptr;
 
-    // Drop the default layer(s) createBlank seeded; we rebuild the stack from the file.
+    // Drop the default layer(s) createBlank seeded; rebuild the stack from the file.
     std::vector<LayerId> seeded;
     for (const auto& layer : doc->topLevelLayers()) seeded.push_back(layer->id());
     for (LayerId id : seeded) (void)doc->cmdRemoveTopLevel(id);
 
-    std::vector<LayerId> newIds;
-    for (std::uint32_t i = 0; i < layerCount; ++i) {
-        const bool visible = r.u8() != 0;
-        const float opacity = r.f32();
-        const std::uint8_t blendRaw = r.u8();
-        const std::uint32_t nameLen = r.u32();
-        if (!r.ok() || blendRaw >= static_cast<std::uint8_t>(BlendMode::Count) ||
-            nameLen > kMaxNameBytes) {
-            return nullptr;
-        }
-        std::string name(nameLen, '\0');
-        if (nameLen > 0 && !r.read(name.data(), nameLen)) return nullptr;
-
-        const std::int32_t cx = r.i32();
-        const std::int32_t cy = r.i32();
-        const std::int32_t cw = r.i32();
-        const std::int32_t ch = r.i32();
-        // The content rect must lie within the canvas (the writer clips it there).
-        // Validating in int64 keeps cx+cw / cy+ch from overflowing the int loop bounds
-        // and confines tile allocation to the canvas — rejecting a hostile file that
-        // sets an extreme origin or a thin region spanning a huge tile span.
-        if (!r.ok() || cw < 0 || ch < 0 || cx < 0 || cy < 0 ||
-            static_cast<std::int64_t>(cx) + cw > canvasW ||
-            static_cast<std::int64_t>(cy) + ch > canvasH ||
-            static_cast<std::int64_t>(cw) * ch > kMaxLayerPixels) {
-            return nullptr;
-        }
-
-        auto layer = std::make_unique<PixelLayer>(std::move(name), static_cast<BitDepth>(depthRaw));
-        layer->setVisible(visible);
-        layer->setOpacity(opacity);
-        layer->setBlendMode(static_cast<BlendMode>(blendRaw));
-
-        TileStore& store = layer->tiles();
-        for (int y = cy; y < cy + ch; ++y) {
-            for (int x = cx; x < cx + cw; ++x) {
-                Rgba8 px{};
-                if (!r.read(&px, sizeof(px))) return nullptr;
-                store.setPixel(x, y, px);
-            }
-        }
-
-        newIds.push_back(layer->id());
+    LayerId activeId = 0;
+    bool haveActive = false;
+    const auto depth = static_cast<BitDepth>(depthRaw);
+    for (std::uint32_t i = 0; i < topCount; ++i) {
+        auto layer = readLayer(r, canvasW, canvasH, depth, activeId, haveActive, 0);
+        if (layer == nullptr) return nullptr;
         doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(layer));
     }
 
-    if (activeIndex >= 0 && static_cast<std::size_t>(activeIndex) < newIds.size()) {
-        doc->setActiveLayer(newIds[static_cast<std::size_t>(activeIndex)]);
-    }
+    if (haveActive) doc->setActiveLayer(activeId);
     return doc;
 }
 
