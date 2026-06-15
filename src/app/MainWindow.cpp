@@ -5,10 +5,12 @@
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Version.hpp"
 
+#include <QAction>
 #include <QApplication>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QKeySequence>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -38,7 +40,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     refreshTitle();
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+    // Detach the canvas observer while doc_ is still alive: doc_ (a member) is
+    // destroyed when this body returns, but the CanvasView child widget is deleted
+    // later by the QObject base destructor, so clearing it now avoids a dangling
+    // removeObserver() in ~CanvasView.
+    if (canvas_ != nullptr) canvas_->setDocument(nullptr);
+}
 
 void MainWindow::buildMenuBar() {
     auto* fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
@@ -51,8 +59,10 @@ void MainWindow::buildMenuBar() {
     fileMenu->addAction(QStringLiteral("E&xit"), qApp, &QApplication::quit);
 
     auto* editMenu = menuBar()->addMenu(QStringLiteral("&Edit"));
-    editMenu->addAction(QStringLiteral("&Undo"));
-    editMenu->addAction(QStringLiteral("&Redo"));
+    QAction* undoAct = editMenu->addAction(QStringLiteral("&Undo"), this, &MainWindow::undo);
+    undoAct->setShortcut(QKeySequence::Undo);
+    QAction* redoAct = editMenu->addAction(QStringLiteral("&Redo"), this, &MainWindow::redo);
+    redoAct->setShortcut(QKeySequence::Redo);
 
     menuBar()->addMenu(QStringLiteral("&Image"));
     menuBar()->addMenu(QStringLiteral("&Layer"));
@@ -109,10 +119,27 @@ bool MainWindow::writeTo(const QString& path) {
     return true;
 }
 
+void MainWindow::undo() {
+    if (doc_ == nullptr) return;
+    // A live brush stroke applies an uncommitted preview straight to the tiles
+    // (outside history); mutating history underneath it would desync the preview's
+    // snapshots. Ignore undo/redo until the stroke is committed.
+    if (canvas_ != nullptr && canvas_->tool().isStroking()) return;
+    doc_->history().undo();  // notifies -> canvas refreshes
+}
+
+void MainWindow::redo() {
+    if (doc_ == nullptr) return;
+    if (canvas_ != nullptr && canvas_->tool().isStroking()) return;
+    doc_->history().redo();  // notifies -> canvas refreshes
+}
+
 void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
+    // Detach the canvas from the outgoing document before it is destroyed.
+    canvas_->setDocument(nullptr);
     doc_ = std::move(doc);
     currentPath_ = std::move(path);
-    canvas_->showDocument(doc_.get());
+    canvas_->setDocument(doc_.get());
     refreshTitle();
 }
 

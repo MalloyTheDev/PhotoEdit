@@ -24,7 +24,7 @@ parallel correctness/security audit.
 | **M0** Foundations | ✅ | ✅ | Build system, vcpkg, CI, Qt6 shell, full docs. |
 | **M1** Document & layers | ✅ | 🟡 | Document, layer tree (pixel/group/solid/adjustment), CoW tiled storage, compositor (all separable blend modes), commands/undo. Layers panel UI pending. |
 | **M2** Canvas & view | 🟡 | 🟡 | Engine `ViewTransform` + `CanvasRenderer` (dirty-tile cache); the app now shows the flattened composite on a `CanvasView`. Zoom/scroll viewport and the **RHI / Direct3D 12** GPU path are not started. |
-| **M3** Painting & history | 🟡 | ⬜ | Brush engine (tile-delta paint commands) and the history/undo stack are implemented and tested; the interactive paint tool and the rest of the tool framework are pending. |
+| **M3** Painting & history | 🟡 | 🟡 | Brush engine (tile-delta paint commands) and the history/undo stack are implemented and tested. The app now has a working **interactive brush/eraser** (mouse → `PaintToolController` → `PaintCommand`, live preview, one undo step per stroke, Edit ▸ Undo/Redo). The rest of the tool framework (move/selection/eyedropper/…) and brush dynamics (pressure/stabilization/presets) are pending. |
 | **M4** Selections & masks | ✅ | 🟡 | Selection (marquee/coverage, boolean ops, feather) and masks (layer/clipping, density, invert) implemented and honoured by the compositor; saved-selection ↔ alpha-channel round-trip done. Selection-tool UI / marching ants pending. |
 | **M5** Adjustments & filters | ✅ | ⬜ | **Complete in the engine** (see below). Adjustment-layer dialogs / filter-gallery UI pending. |
 | **M6** Color management | ✅ | ⬜ | **Complete in the engine** (see below): lcms2/ICC profiles, working spaces, transforms (4 intents + BPC), a thread-safe transform cache, document assign/convert, display conversion, soft-proofing + gamut warning, and the channels system, on the 8/16/32-float pixel pipeline. Color-settings UI pending. |
@@ -42,9 +42,17 @@ The engine is no longer headless-only; the Qt6 app provides a real
   read cap on untrusted files.
 - **`MainWindow`** — File ▸ New (blank 800×600), Open…, Save, Save As… wired to
   `DocumentIO`; window title and canvas track the active document.
-- **`CanvasView`** — paints `Document::compositeImage()` (→ `QImage` RGBA8888).
+- **`CanvasView`** — paints `Document::compositeImage()` (→ `QImage` RGBA8888),
+  observes the document (auto-refresh on commit/undo/redo/load), and routes mouse
+  input to the brush tool.
+- **`PaintToolController`** (engine, headless, tested) — the interactive
+  brush/eraser: `begin`/`extend`/`end`/`cancel` turn pointer samples into a live
+  preview and commit exactly one undoable `PaintCommand` per stroke, gated by the
+  active selection. `MainWindow` wires Edit ▸ Undo/Redo (Ctrl+Z / Ctrl+Shift+Z).
 
-Next app slice: the interactive paint tool (mouse → `PaintCommand`).
+Next app slice: a real **viewport** — zoom/pan/fit-to-window + checkerboard
+transparency (the engine `ViewTransform`/`CanvasRenderer` already exist), then the
+Layers/History panels.
 
 ## M5 detail — adjustments, filters, analysis (engine complete)
 

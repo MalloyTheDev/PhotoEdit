@@ -32,6 +32,8 @@ private:
     void openDocument();
     bool saveDocument();    // saves to the current path, or prompts if none
     bool saveDocumentAs();  // always prompts
+    void undo();
+    void redo();
     bool writeTo(const QString& path);
     void setDocument(std::unique_ptr<pe::Document> doc, QString path);
     void refreshTitle();
