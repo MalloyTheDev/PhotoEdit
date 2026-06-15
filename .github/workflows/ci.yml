@@ -54,7 +54,7 @@ jobs:
         # --classic: the repo's vcpkg.json would otherwise force manifest mode, where
         # `vcpkg install <pkg>` is rejected. Classic mode installs the named ports only
         # (Qt still comes from aqtinstall, not vcpkg).
-        run: vcpkg install lcms2 libpng libjpeg-turbo zlib --triplet x64-windows --classic
+        run: vcpkg install lcms libpng libjpeg-turbo zlib --triplet x64-windows --classic
       - name: Configure
         run: >
           cmake -B build/win -S . -G Ninja
