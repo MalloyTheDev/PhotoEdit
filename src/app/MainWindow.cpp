@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 
 #include "CanvasView.hpp"
+#include "LayersPanel.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Version.hpp"
@@ -17,6 +18,7 @@
 #include <QStatusBar>
 
 #include <string>
+#include <string_view>
 
 namespace pe::app {
 
@@ -41,11 +43,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 MainWindow::~MainWindow() {
-    // Detach the canvas observer while doc_ is still alive: doc_ (a member) is
-    // destroyed when this body returns, but the CanvasView child widget is deleted
-    // later by the QObject base destructor, so clearing it now avoids a dangling
-    // removeObserver() in ~CanvasView.
+    // Detach the observing widgets while doc_ is still alive: doc_ (a member) is
+    // destroyed when this body returns, but the child widgets are deleted later by
+    // the QObject base destructor, so clearing them now avoids a dangling
+    // removeObserver() in their destructors.
     if (canvas_ != nullptr) canvas_->setDocument(nullptr);
+    if (layers_ != nullptr) layers_->setDocument(nullptr);
 }
 
 void MainWindow::buildMenuBar() {
@@ -150,11 +153,13 @@ void MainWindow::redo() {
 }
 
 void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
-    // Detach the canvas from the outgoing document before it is destroyed.
+    // Detach the observing widgets from the outgoing document before it is destroyed.
     canvas_->setDocument(nullptr);
+    if (layers_ != nullptr) layers_->setDocument(nullptr);
     doc_ = std::move(doc);
     currentPath_ = std::move(path);
     canvas_->setDocument(doc_.get());
+    if (layers_ != nullptr) layers_->setDocument(doc_.get());
     refreshTitle();
 }
 
@@ -177,7 +182,12 @@ void MainWindow::buildDockPanels() {
     };
     for (const auto& p : panels) {
         auto* dock = new QDockWidget(QString::fromUtf8(p.title), this);
-        dock->setWidget(new QLabel(QStringLiteral("(%1 panel)").arg(p.title)));
+        if (std::string_view(p.title) == "Layers") {
+            layers_ = new LayersPanel(dock);
+            dock->setWidget(layers_);
+        } else {
+            dock->setWidget(new QLabel(QStringLiteral("(%1 panel)").arg(p.title)));
+        }
         addDockWidget(p.area, dock);
     }
 }
