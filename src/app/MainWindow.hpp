@@ -8,6 +8,10 @@
 #include <memory>
 
 class QLabel;
+class QSpinBox;
+class QToolBar;
+class QToolButton;
+class QWidget;
 
 namespace pe {
 class Document;
@@ -32,9 +36,18 @@ public:
 private:
     void buildMenuBar();
     void buildToolBar();
+    void buildOptionsBar();
+    void buildCentral();
     void buildDockPanels();
     void buildStatusBar();
     void setTheme(ThemeId id);
+
+    void updateOptionsBar(bool showBrushOptions, const QString& toolName);
+    void refreshDocTab();
+    [[nodiscard]] QWidget* makeColorSwatches();
+    void chooseForegroundColor();
+    void chooseBackgroundColor();
+    void updateSwatches();
 
     void newDocument();
     void openDocument();
@@ -52,6 +65,18 @@ private:
     HistoryPanel* history_ = nullptr;
     QLabel* toolLabel_ = nullptr;  // status bar: active tool
     QLabel* zoomLabel_ = nullptr;  // status bar: zoom percentage
+
+    QToolBar* optionsBar_ = nullptr;      // contextual tool options (top)
+    QLabel* optToolName_ = nullptr;       // options bar: active tool name
+    QWidget* brushOptions_ = nullptr;     // options bar: brush size/opacity group
+    QSpinBox* sizeSpin_ = nullptr;        // options bar: brush diameter
+    QSpinBox* opacitySpinOpt_ = nullptr;  // options bar: brush opacity
+    QLabel* docTab_ = nullptr;            // document tab strip above the canvas
+    QToolButton* fgSwatch_ = nullptr;     // foreground color swatch (tool strip)
+    QToolButton* bgSwatch_ = nullptr;     // background color swatch (tool strip)
+    QColor fgColor_;                      // current foreground (paint) color
+    QColor bgColor_;                      // current background color
+
     QString currentPath_;
 };
 

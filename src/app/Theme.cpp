@@ -118,9 +118,20 @@ QStatusBar { background: @header@; color: @textDim@; border-top: 1px solid @bord
 QStatusBar::item { border: 0; }
 QStatusBar QLabel { color: @textDim@; padding: 0 9px; }
 
-QWidget#PanelHeaderBar { background: @header@; border-bottom: 1px solid @border@; }
-QLabel#PanelHeaderLabel { color: @textDim@; background: transparent; }
-QLabel#BrandMark { background: transparent; }
+/* Tabbed panel groups — the QTabBar is the panel header (Photoshop-style). */
+QTabBar { background: @header@; }
+QTabBar::tab { background: @header@; color: @textDim@; padding: 5px 11px; border: 0;
+    border-right: 1px solid @border@; }
+QTabBar::tab:selected { background: @panel@; color: @text@; }
+QTabBar::tab:hover:!selected { color: @text@; }
+
+/* Options bar (top) and the document tab strip above the canvas. */
+QToolBar#OptionsBar { background: @header@; border: 0; border-bottom: 1px solid @border@;
+    spacing: 6px; padding: 3px 8px; }
+QLabel#OptToolName { color: @text@; font-weight: 600; padding: 0 4px; background: transparent; }
+QWidget#DocTabStrip { background: @window@; border-bottom: 1px solid @border@; }
+QLabel#DocTab { background: @panel@; color: @text@; padding: 5px 14px;
+    border-right: 1px solid @border@; }
 QToolBar QLabel { background: transparent; }
 )QSS");
 

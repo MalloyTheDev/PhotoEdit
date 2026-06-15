@@ -4,7 +4,7 @@
 #include "HistoryPanel.hpp"
 #include "IconUtil.hpp"
 #include "LayersPanel.hpp"
-#include "PanelHeader.hpp"
+#include "pe/core/Color.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Version.hpp"
@@ -13,9 +13,11 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QColor>
+#include <QColorDialog>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHBoxLayout>
 #include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
@@ -23,8 +25,13 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QSettings>
+#include <QSizePolicy>
+#include <QSpinBox>
 #include <QStatusBar>
+#include <QTabWidget>
 #include <QToolBar>
+#include <QToolButton>
+#include <QVBoxLayout>
 
 #include <cstddef>
 #include <string>
@@ -55,14 +62,19 @@ struct ToolDef {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     resize(1280, 800);
+    fgColor_ = QColor(0, 0, 0);        // Photoshop defaults: black foreground,
+    bgColor_ = QColor(255, 255, 255);  // white background
 
     canvas_ = new CanvasView(this);
-    setCentralWidget(canvas_);
 
     buildMenuBar();
-    buildToolBar();
-    buildDockPanels();
+    buildToolBar();     // left tool strip (+ fg/bg swatches)
+    buildOptionsBar();  // contextual tool options across the top
+    buildCentral();     // document tab strip + canvas
+    buildDockPanels();  // tabbed panel groups on the right
     buildStatusBar();
+
+    updateOptionsBar(true, QStringLiteral("Brush"));  // Brush is the default tool
     refreshTitle();
 }
 
@@ -173,15 +185,142 @@ void MainWindow::buildToolBar() {
             a->setShortcut(QKeySequence(QString::fromUtf8(def.shortcut)));
             const Tool tool = def.tool;
             const QString label = QString::fromUtf8(def.label);
-            connect(a, &QAction::triggered, this, [this, tool, label, wired] {
+            const bool paint = def.tool == Tool::Brush || def.tool == Tool::Eraser;
+            connect(a, &QAction::triggered, this, [this, tool, label, wired, paint] {
                 canvas_->setTool(tool);
                 toolLabel_->setText(wired ? label
                                           : QStringLiteral("%1 — not yet implemented").arg(label));
+                updateOptionsBar(paint, label);
             });
             if (def.tool == Tool::Brush) brushAction = a;
         }
     }
     if (brushAction != nullptr) brushAction->setChecked(true);  // default tool
+
+    // Foreground / background colour swatches anchored at the bottom of the strip.
+    auto* spacer = new QWidget(tb);
+    spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    tb->addWidget(spacer);
+    tb->addSeparator();
+    tb->addWidget(makeColorSwatches());
+}
+
+void MainWindow::buildOptionsBar() {
+    optionsBar_ = new QToolBar(QStringLiteral("Options"), this);
+    optionsBar_->setObjectName(QStringLiteral("OptionsBar"));
+    optionsBar_->setMovable(false);
+    optionsBar_->setFloatable(false);
+    addToolBar(Qt::TopToolBarArea, optionsBar_);
+
+    optToolName_ = new QLabel(optionsBar_);
+    optToolName_->setObjectName(QStringLiteral("OptToolName"));
+    optionsBar_->addWidget(optToolName_);
+    optionsBar_->addSeparator();
+
+    // Brush/eraser options (size + opacity); shown only for paint tools.
+    brushOptions_ = new QWidget(optionsBar_);
+    auto* bl = new QHBoxLayout(brushOptions_);
+    bl->setContentsMargins(0, 0, 0, 0);
+    bl->setSpacing(6);
+    bl->addWidget(new QLabel(QStringLiteral("Size"), brushOptions_));
+    sizeSpin_ = new QSpinBox(brushOptions_);
+    sizeSpin_->setRange(1, 500);
+    sizeSpin_->setValue(static_cast<int>(canvas_->tool().brush().diameter));
+    sizeSpin_->setSuffix(QStringLiteral(" px"));
+    bl->addWidget(sizeSpin_);
+    bl->addWidget(new QLabel(QStringLiteral("Opacity"), brushOptions_));
+    opacitySpinOpt_ = new QSpinBox(brushOptions_);
+    opacitySpinOpt_->setRange(1, 100);
+    opacitySpinOpt_->setValue(static_cast<int>(canvas_->tool().brush().opacity * 100.0f));
+    opacitySpinOpt_->setSuffix(QStringLiteral("%"));
+    bl->addWidget(opacitySpinOpt_);
+    optionsBar_->addWidget(brushOptions_);
+
+    connect(sizeSpin_, &QSpinBox::valueChanged, this,
+            [this](int v) { canvas_->tool().brush().diameter = static_cast<float>(v); });
+    connect(opacitySpinOpt_, &QSpinBox::valueChanged, this,
+            [this](int v) { canvas_->tool().brush().opacity = static_cast<float>(v) / 100.0f; });
+}
+
+void MainWindow::buildCentral() {
+    auto* central = new QWidget(this);
+    auto* v = new QVBoxLayout(central);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(0);
+
+    auto* tabStrip = new QWidget(central);
+    tabStrip->setObjectName(QStringLiteral("DocTabStrip"));
+    auto* h = new QHBoxLayout(tabStrip);
+    h->setContentsMargins(0, 0, 0, 0);
+    h->setSpacing(0);
+    docTab_ = new QLabel(tabStrip);
+    docTab_->setObjectName(QStringLiteral("DocTab"));
+    h->addWidget(docTab_);
+    h->addStretch(1);
+
+    v->addWidget(tabStrip);
+    v->addWidget(canvas_, 1);
+    setCentralWidget(central);
+    refreshDocTab();
+}
+
+void MainWindow::updateOptionsBar(bool showBrushOptions, const QString& toolName) {
+    if (optToolName_ != nullptr) optToolName_->setText(toolName);
+    if (brushOptions_ != nullptr) brushOptions_->setVisible(showBrushOptions);
+}
+
+void MainWindow::refreshDocTab() {
+    if (docTab_ == nullptr) return;
+    if (doc_ == nullptr) {
+        docTab_->setText(QStringLiteral("   No document   "));
+        return;
+    }
+    const QString name =
+        currentPath_.isEmpty() ? QStringLiteral("Untitled") : QFileInfo(currentPath_).fileName();
+    docTab_->setText(
+        QStringLiteral("   %1   %2%   RGB   ").arg(name).arg(canvas_->zoomPercent(), 0, 'f', 1));
+}
+
+QWidget* MainWindow::makeColorSwatches() {
+    auto* w = new QWidget;
+    w->setFixedSize(40, 40);
+    bgSwatch_ = new QToolButton(w);
+    bgSwatch_->setGeometry(15, 14, 22, 22);
+    bgSwatch_->setToolTip(QStringLiteral("Background color"));
+    fgSwatch_ = new QToolButton(w);
+    fgSwatch_->setGeometry(3, 2, 22, 22);  // overlaps the bg swatch, as in Photoshop
+    fgSwatch_->setToolTip(QStringLiteral("Foreground color"));
+    connect(fgSwatch_, &QToolButton::clicked, this, &MainWindow::chooseForegroundColor);
+    connect(bgSwatch_, &QToolButton::clicked, this, &MainWindow::chooseBackgroundColor);
+    updateSwatches();
+    return w;
+}
+
+void MainWindow::updateSwatches() {
+    const auto style = [](const QColor& c) {
+        return QStringLiteral(
+                   "QToolButton{background:%1;border:1px solid #0d0d0d;border-radius:2px;}"
+                   "QToolButton:hover{border:1px solid #aaaaaa;}")
+            .arg(c.name());
+    };
+    if (fgSwatch_ != nullptr) fgSwatch_->setStyleSheet(style(fgColor_));
+    if (bgSwatch_ != nullptr) bgSwatch_->setStyleSheet(style(bgColor_));
+}
+
+void MainWindow::chooseForegroundColor() {
+    const QColor c = QColorDialog::getColor(fgColor_, this, QStringLiteral("Foreground Color"));
+    if (!c.isValid()) return;
+    fgColor_ = c;
+    canvas_->tool().setColor(pe::Rgbaf{static_cast<float>(c.redF()), static_cast<float>(c.greenF()),
+                                       static_cast<float>(c.blueF()), 1.0f});
+    updateSwatches();
+}
+
+void MainWindow::chooseBackgroundColor() {
+    const QColor c = QColorDialog::getColor(bgColor_, this, QStringLiteral("Background Color"));
+    if (!c.isValid()) return;
+    bgColor_ = c;
+    updateSwatches();
 }
 
 void MainWindow::newDocument() {
@@ -256,6 +395,7 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     if (layers_ != nullptr) layers_->setDocument(doc_.get());
     if (history_ != nullptr) history_->setDocument(doc_.get());
     refreshTitle();
+    refreshDocTab();
 }
 
 void MainWindow::refreshTitle() {
@@ -267,37 +407,63 @@ void MainWindow::refreshTitle() {
 }
 
 void MainWindow::buildDockPanels() {
-    const struct {
-        const char* title;
-        const char* icon;
-        Qt::DockWidgetArea area;
-    } panels[] = {
-        {"Layers", "layers", Qt::RightDockWidgetArea},
-        {"Channels", "blend", Qt::RightDockWidgetArea},
-        {"Properties", "sliders-horizontal", Qt::RightDockWidgetArea},
-        {"History", "history", Qt::RightDockWidgetArea},
-        {"Color", "palette", Qt::RightDockWidgetArea},
-        // the left tool strip replaces the old Tools dock
-    };
-    for (const auto& p : panels) {
-        auto* dock = new QDockWidget(QString::fromUtf8(p.title), this);
+    // Photoshop-style tabbed groups: the QTabBar is the header, so each dock hides
+    // its native title bar. Three groups stack vertically on the right.
+    setTabPosition(Qt::RightDockWidgetArea, QTabWidget::North);
+
+    auto makeDock = [this](const QString& title, QWidget* content) {
+        auto* dock = new QDockWidget(title, this);
+        dock->setObjectName(title);
         dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-        dock->setTitleBarWidget(
-            makePanelHeader(QString::fromUtf8(p.title), QString::fromUtf8(p.icon), dock));
-        if (std::string_view(p.title) == "Layers") {
-            layers_ = new LayersPanel(dock);
-            dock->setWidget(layers_);
-        } else if (std::string_view(p.title) == "History") {
-            history_ = new HistoryPanel(dock);
-            dock->setWidget(history_);
-        } else {
-            auto* placeholder = new QLabel(QStringLiteral("%1").arg(p.title));
-            placeholder->setObjectName(QStringLiteral("PanelPlaceholder"));
-            placeholder->setAlignment(Qt::AlignCenter);
-            dock->setWidget(placeholder);
-        }
-        addDockWidget(p.area, dock);
-    }
+        dock->setTitleBarWidget(new QWidget(dock));  // hide native title; tabs are the header
+        dock->setWidget(content);
+        return dock;
+    };
+    auto placeholder = [](const QString& name) {
+        auto* l = new QLabel(name);
+        l->setObjectName(QStringLiteral("PanelPlaceholder"));
+        l->setAlignment(Qt::AlignCenter);
+        return static_cast<QWidget*>(l);
+    };
+
+    layers_ = new LayersPanel();
+    history_ = new HistoryPanel();
+
+    // Group anchors (one per stacked group).
+    auto* colorDock = makeDock(QStringLiteral("Color"), placeholder(QStringLiteral("Color")));
+    auto* propsDock =
+        makeDock(QStringLiteral("Properties"), placeholder(QStringLiteral("Properties")));
+    auto* layersDock = makeDock(QStringLiteral("Layers"), layers_);
+
+    // Establish the three vertical regions FIRST (split before tabify, or Qt merges
+    // everything into one tab group).
+    addDockWidget(Qt::RightDockWidgetArea, colorDock);
+    splitDockWidget(colorDock, propsDock, Qt::Vertical);
+    splitDockWidget(propsDock, layersDock, Qt::Vertical);
+
+    // Then fill each group's tabs, always tabifying onto the group's anchor so the
+    // insertion order (and grouping) is preserved.
+    tabifyDockWidget(colorDock,
+                     makeDock(QStringLiteral("Swatches"), placeholder(QStringLiteral("Swatches"))));
+    tabifyDockWidget(
+        colorDock, makeDock(QStringLiteral("Gradients"), placeholder(QStringLiteral("Gradients"))));
+    tabifyDockWidget(colorDock,
+                     makeDock(QStringLiteral("Patterns"), placeholder(QStringLiteral("Patterns"))));
+
+    tabifyDockWidget(propsDock, makeDock(QStringLiteral("Adjustments"),
+                                         placeholder(QStringLiteral("Adjustments"))));
+    tabifyDockWidget(
+        propsDock, makeDock(QStringLiteral("Libraries"), placeholder(QStringLiteral("Libraries"))));
+
+    tabifyDockWidget(layersDock,
+                     makeDock(QStringLiteral("Channels"), placeholder(QStringLiteral("Channels"))));
+    tabifyDockWidget(layersDock,
+                     makeDock(QStringLiteral("Paths"), placeholder(QStringLiteral("Paths"))));
+    tabifyDockWidget(layersDock, makeDock(QStringLiteral("History"), history_));
+
+    colorDock->raise();  // first tab of each group is the active one
+    propsDock->raise();
+    layersDock->raise();
 }
 
 void MainWindow::buildStatusBar() {
@@ -305,8 +471,10 @@ void MainWindow::buildStatusBar() {
     zoomLabel_ = new QLabel(QStringLiteral("—"), this);
     statusBar()->addWidget(toolLabel_);
     statusBar()->addPermanentWidget(zoomLabel_);
-    connect(canvas_, &CanvasView::zoomChanged, this,
-            [this](double pct) { zoomLabel_->setText(QStringLiteral("%1%").arg(pct, 0, 'f', 0)); });
+    connect(canvas_, &CanvasView::zoomChanged, this, [this](double pct) {
+        zoomLabel_->setText(QStringLiteral("%1%").arg(pct, 0, 'f', 0));
+        refreshDocTab();
+    });
 }
 
 void MainWindow::setTheme(ThemeId id) {

@@ -23,8 +23,6 @@ qt_add_executable(photoedit
     Theme.hpp
     IconUtil.cpp
     IconUtil.hpp
-    PanelHeader.cpp
-    PanelHeader.hpp
     icons.qrc
 )
 
