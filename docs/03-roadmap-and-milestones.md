@@ -10,10 +10,11 @@ depends on.
 > exit criteria that let the next one start. Sizes are rough relative effort.
 
 > 📊 **Current progress** is tracked in [STATUS.md](STATUS.md). In short: the
-> **engine core for M1 and M3–M5 is implemented and tested** (M5 — the full
-> adjustment + filter + analysis set — is complete headless), **M6 has its
-> color foundation** (sRGB⇄linear, 16-bit pixels), and the **app/GPU surface
-> (M2) and M7+ are not yet started**.
+> **engine core for M1, M3–M7 is implemented and tested** — M5 (adjustments +
+> filters + analysis), **M6 (the full lcms2 color-management pipeline)**, and
+> **M7 (PNG/JPEG/TIFF/WebP + the native `.pedoc` format)** are all complete
+> headless. The **application pivot has started**: Open / New / Save and a canvas
+> are wired through the engine. The **GPU path and M8+** are not yet started.
 
 ---
 
@@ -56,7 +57,7 @@ and match golden images for every blend mode; all mutations undoable.
 
 ---
 
-## M2 — Canvas & view (see it) — ⬜ not started (GPU/viewport)
+## M2 — Canvas & view (see it) — 🟡 engine + canvas display; GPU/viewport pending
 
 **Goal:** the document is visible and navigable in the app, fast.
 
@@ -132,7 +133,7 @@ mask-aware results; apply destructive filters with preview + undo.
 
 ---
 
-## M6 — Color management (get color right) — 🟡 foundation started
+## M6 — Color management (get color right) — ✅ engine complete (lcms2)
 
 **Goal:** correct color across depths, spaces, screen, and proof.
 
@@ -150,7 +151,7 @@ soft-proof a CMYK target; 16/32-bit editing verified against references.
 
 ---
 
-## M7 — File formats (open & save real files)
+## M7 — File formats (open & save real files) — ✅ engine complete; app Open/Save wired
 
 **Goal:** interoperate with the world.
 

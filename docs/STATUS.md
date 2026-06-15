@@ -6,13 +6,16 @@ describe the **intended** design; this file records the **current** reality.
 
 > Convention: ✅ implemented & tested · 🟡 partially implemented · ⬜ not started.
 > "Engine core" means the headless `pe_core` library (no Qt); "App" means the Qt6
-> shell. The engine is built bottom-up first, so engine pieces land ahead of their
-> UI.
+> shell. The engine is built bottom-up first, so engine pieces land ahead of their UI.
 
-Last updated against `main` after the M5 engine completion and the M6 high-bit-
-depth (8/16/32-float) pixel pipeline. Test suite: **208 headless cases, 0 failed**,
-built `-Werror`, run under ASan/UBSan, clang-format clean, on every merge (Linux
-core + Windows MSVC/Qt6 CI).
+Last updated against `main` after the **M5–M7 engine completion** (adjustments &
+filters, the full lcms2 color-management pipeline, and the file-format suite) and
+the **start of the application pivot** (a working Open / New / Save + canvas). Test
+suite: **277 headless cases, 0 failed**, built `-Werror`, run under ASan/UBSan,
+clang-format clean, on every merge — **Linux core + Windows MSVC/Qt6** CI, with the
+optional native libraries (lcms2, libpng, libjpeg-turbo, libtiff, libwebp, zlib)
+provisioned and exercised on **both** lanes. The whole engine has had a five-part
+parallel correctness/security audit.
 
 ## Milestones
 
@@ -20,69 +23,89 @@ core + Windows MSVC/Qt6 CI).
 |-----------|:-----------:|:---------:|-------|
 | **M0** Foundations | ✅ | ✅ | Build system, vcpkg, CI, Qt6 shell, full docs. |
 | **M1** Document & layers | ✅ | 🟡 | Document, layer tree (pixel/group/solid/adjustment), CoW tiled storage, compositor (all separable blend modes), commands/undo. Layers panel UI pending. |
-| **M2** Canvas & view | 🟡 | ⬜ | CPU `ViewTransform` + `CanvasRenderer` (dirty-tile cache) exist in the engine; the Qt viewport widget and the **RHI / Direct3D 12** GPU path are not started. |
-| **M3** Painting & history | 🟡 | ⬜ | Brush engine (tile-delta paint commands) and the history/undo stack are implemented and tested; the full tool framework and remaining tools (eraser, bucket, gradient, …) are pending. |
-| **M4** Selections & masks | ✅ | 🟡 | Selection (marquee/coverage, boolean ops, feather) and masks (layer/clipping, density, invert) implemented and honored by the compositor; selection-tool UI and marching-ants overlay pending. |
-| **M5** Adjustments & filters | ✅ | ⬜ | **Complete in the engine** — see below. Adjustment-layer dialogs / filter-gallery UI pending. |
-| **M6** Color management | 🟡 | ⬜ | **High-bit-depth pixel pipeline complete end-to-end** (see below): 8/16/32-float storage, rendering, flatten, and destructive editing with exact undo. sRGB⇄linear transfer functions in place. **lcms2/ICC** transforms, soft-proofing, channels, and depth-aware **brush dabs** are the remaining pieces. |
-| **M7**–**M10** | ⬜ | ⬜ | Not started (file formats, type/vector/smart objects, retouching/AI, automation/print/plugins). |
+| **M2** Canvas & view | 🟡 | 🟡 | Engine `ViewTransform` + `CanvasRenderer` (dirty-tile cache); the app now shows the flattened composite on a `CanvasView`. Zoom/scroll viewport and the **RHI / Direct3D 12** GPU path are not started. |
+| **M3** Painting & history | 🟡 | ⬜ | Brush engine (tile-delta paint commands) and the history/undo stack are implemented and tested; the interactive paint tool and the rest of the tool framework are pending. |
+| **M4** Selections & masks | ✅ | 🟡 | Selection (marquee/coverage, boolean ops, feather) and masks (layer/clipping, density, invert) implemented and honoured by the compositor; saved-selection ↔ alpha-channel round-trip done. Selection-tool UI / marching ants pending. |
+| **M5** Adjustments & filters | ✅ | ⬜ | **Complete in the engine** (see below). Adjustment-layer dialogs / filter-gallery UI pending. |
+| **M6** Color management | ✅ | ⬜ | **Complete in the engine** (see below): lcms2/ICC profiles, working spaces, transforms (4 intents + BPC), a thread-safe transform cache, document assign/convert, display conversion, soft-proofing + gamut warning, and the channels system, on the 8/16/32-float pixel pipeline. Color-settings UI pending. |
+| **M7** File formats | ✅ | 🟡 | **Engine complete** (see below): PNG, JPEG, TIFF, WebP, and the native layered **`.pedoc`** format, all hardened against untrusted input. The app's **Open / New / Save / Save As** are wired through `DocumentIO`. |
+| **M8**–**M10** | ⬜ | ⬜ | Not started (type/vector/smart objects, retouching/AI, automation/print/plugins). |
+
+## App — the interactive shell (pivot started)
+
+The engine is no longer headless-only; the Qt6 app provides a real
+**open → see it on a canvas → save** loop:
+
+- **`DocumentIO`** (engine, tested) — `formatFromExtension`, `importDocument`/
+  `exportDocument` dispatching to every codec (each guarded so a missing codec
+  degrades gracefully), and `loadDocument`/`saveDocument` path helpers with a 512 MB
+  read cap on untrusted files.
+- **`MainWindow`** — File ▸ New (blank 800×600), Open…, Save, Save As… wired to
+  `DocumentIO`; window title and canvas track the active document.
+- **`CanvasView`** — paints `Document::compositeImage()` (→ `QImage` RGBA8888).
+
+Next app slice: the interactive paint tool (mouse → `PaintCommand`).
 
 ## M5 detail — adjustments, filters, analysis (engine complete)
 
 **Adjustment operators** (`Adjustment.hpp`, non-destructive, mask-aware, applied as
 adjustment layers or baked destructively via the shared tile-delta machinery):
+Brightness/Contrast, Levels, Curves, Invert, Exposure, Hue/Saturation, Channel
+Mixer, Gradient Map, Vibrance, Color Balance, Black & White, Photo Filter,
+Posterize, Threshold, Selective Color. (Deferred: Color Lookup `.cube` — asset
+pipeline.)
 
-- Brightness/Contrast, Levels (1D-LUT), Curves (1D-LUT), Invert, Exposure,
-  Hue/Saturation, Channel Mixer, Gradient Map, Vibrance, Color Balance,
-  Black & White, Photo Filter, Posterize, Threshold, **Selective Color**.
-- Deferred: **Color Lookup** (`.cube` 1D/3D LUT) — waits on the asset pipeline.
+**Filter engine** (`Filter.hpp`, reversible selection-gated commands): Gaussian/Box
+blur (separable, premultiplied), Unsharp Mask, Mosaic, Median, Add Noise (seeded),
+Find Edges (Sobel).
 
-**Filter engine** (`Filter.hpp`, edge-clamped reference kernels + `Filter`
-subclasses, runnable as reversible, selection-gated commands):
+**Analysis:** `Histogram` (R/G/B/A + Rec.601 luma, statistics + percentiles) and
+`AutoTone` (Auto Contrast / Auto Levels with clip trimming).
 
-- Blur: Gaussian, Box (separable, premultiplied — no transparent-color bleed).
-- Sharpen: Unsharp Mask. · Pixelate: Mosaic. · Noise: Median (reduce), Add Noise
-  (deterministic, seeded). · Stylize: Find Edges (Sobel).
+## M6 detail — color management (engine complete)
 
-**Analysis:**
+Built on **Little-CMS 2** (graceful optional dependency), on top of the 8/16/32-float
+pixel pipeline:
 
-- `Histogram` — R/G/B/A + Rec.601 luma bins (uint64) with channel statistics
-  (mean, stddev, median, min/max, mode) and percentile queries.
-- `AutoTone` — Auto Contrast (luma-based) and Auto Levels (per-channel), with
-  clip-fraction outlier trimming.
+- **`ColorProfile`** — ICC load/export plus five built-in working spaces (sRGB,
+  linear sRGB, Display P3, Adobe RGB, ProPhoto).
+- **`ColorTransform`** — RGB transforms with the four rendering intents and
+  black-point compensation; **`ColorEngine`** caches them (thread-safe build-or-fetch).
+- **Document operations** — assign vs. convert, working→display conversion, and
+  soft-proofing with a configurable out-of-gamut alarm.
+- **Channels** — split/merge and saved-selection ↔ alpha-channel round-trips.
+- **High-bit-depth storage** — `Rgba16`/float tile stores, depth-aware layers,
+  `compositeImage`/`16`/`F`, and destructive editing at native depth with exact undo.
 
-## M6 detail — high-bit-depth pixel pipeline (complete end-to-end)
+Pending in color: 16-bit mask storage, CMYK/Lab/Gray document modes, depth-aware
+brush dabs.
 
-8-bit, 16-bit, and 32-bit-float documents are carried at native precision through
-every engine stage; the proven 8-bit path is byte-for-byte unchanged (each step
-was audited for zero regression):
+## M7 detail — file formats (engine complete)
 
-- **Pixel types & conversions** — `Rgba16` with exact `8↔16↔float` conversions
-  (lossless 8→16→8); sRGB⇄linear transfer functions (`ColorSpace`).
-- **Storage** — `TileData`/`TileStore` templatized on pixel type
-  (`TileStoreT<Pixel>`), aliased so all callers are unchanged; `TileStore16`,
-  `TileStoreF`.
-- **Layers** — `PixelLayer` carries a `BitDepth` and the matching sparse store;
-  `renderInto`/`clone`/`contentBounds` dispatch on depth.
-- **Documents** — `createBlank` seeds the base layer at the chosen depth;
-  `compositeImage` / `compositeImage16` / `compositeImageF` flatten at 8/16/32f.
-- **Editing** — filters and adjustment-bakes edit at native depth with exact undo
-  (`bakePixelEdit` + a depth-generic `PixelLayer`). Brush dabs are 8-bit for now
-  and fail safe on high-depth layers (depth-aware brushing is pending).
+All decoders cap dimensions (uint64, pre-allocation) and free native resources on
+every path; verified against truncation / garbage / oversized / extreme-aspect input.
 
-What's **not** done in M6: lcms2/ICC profiles & transforms, display conversion,
-soft-proofing, gamut warning, the channels system, and CMYK/Lab/Gray modes.
+- **PNG** (libpng simplified API), **JPEG** (libjpeg-turbo / TurboJPEG), **TIFF**
+  (libtiff, in-memory client + magic-validated), **WebP** (libwebp, lossless).
+- **Native `.pedoc`** (v4) — a self-contained, bounds-checked binary format that
+  preserves the layer **tree**: canvas metadata, recursive groups, per-layer
+  properties, nested active layer, **layer masks**, and **zlib-compressed** pixel
+  blocks. The reader is fuzz-tested against every prefix truncation.
+- **Document I/O** — `importDocument`/`exportDocument` + path-level
+  `loadDocument`/`saveDocument` (see App above).
 
 ## Cross-cutting engineering invariants
 
-These hold across the engine and are enforced by tests + per-change audits:
+Enforced by tests + a per-change correctness/security audit:
 
-- **Float working space.** All blend/filter/adjustment math is `Rgbaf`;
-  `clamp01` is the NaN sink on every channel write.
+- **Float working space.** Blend/filter/adjustment math is `Rgbaf`; `clamp01` is the
+  NaN sink on every channel write.
 - **Copy-on-write tiles** (`shared_ptr<TileData>`) with dirty-region tracking;
   tile-delta undo.
-- **DoS caps** on every whole-image/destructive path (megapixel and radius
-  bounds) so untrusted dimensions can't exhaust memory.
-- **Determinism** where it matters (seeded noise) for reproducibility and future
-  tiling.
-- **Headless core / Qt app** one-way dependency ([ADR-0006](adr/0006-headless-core-separation.md)).
+- **DoS caps** on every whole-image / destructive / decode path (megapixel, radius,
+  coordinate-magnitude, and file-size bounds) so untrusted input can't exhaust memory.
+- **Graceful optional dependencies** — every external library is detected at
+  configure time; absent libraries disable their feature, never break the build.
+- **Determinism** where it matters (seeded noise).
+- **Headless core / Qt app** one-way dependency
+  ([ADR-0006](adr/0006-headless-core-separation.md)).
