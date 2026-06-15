@@ -16,8 +16,7 @@ ImageFormat formatFromExtension(std::string_view path) {
     // Scope to the file name so a dotted *directory* (e.g. "/dir.png/file") can't be
     // mistaken for an extension.
     const std::size_t slash = path.find_last_of("/\\");
-    const std::string_view name =
-        slash == std::string_view::npos ? path : path.substr(slash + 1);
+    const std::string_view name = slash == std::string_view::npos ? path : path.substr(slash + 1);
     const std::size_t dot = name.rfind('.');
     if (dot == std::string_view::npos) return ImageFormat::Unknown;
     std::string ext(name.substr(dot));
