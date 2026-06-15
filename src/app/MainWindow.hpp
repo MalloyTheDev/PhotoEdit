@@ -1,9 +1,13 @@
 #pragma once
 
+#include "Theme.hpp"
+
 #include <QMainWindow>
 #include <QString>
 
 #include <memory>
+
+class QLabel;
 
 namespace pe {
 class Document;
@@ -27,8 +31,10 @@ public:
 
 private:
     void buildMenuBar();
+    void buildToolBar();
     void buildDockPanels();
     void buildStatusBar();
+    void setTheme(ThemeId id);
 
     void newDocument();
     void openDocument();
@@ -44,6 +50,8 @@ private:
     CanvasView* canvas_ = nullptr;
     LayersPanel* layers_ = nullptr;
     HistoryPanel* history_ = nullptr;
+    QLabel* toolLabel_ = nullptr;  // status bar: active tool
+    QLabel* zoomLabel_ = nullptr;  // status bar: zoom percentage
     QString currentPath_;
 };
 

@@ -1,0 +1,28 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource prefix="/icons">
+    <file alias="blend.svg">icons/blend.svg</file>
+    <file alias="chevron-down.svg">icons/chevron-down.svg</file>
+    <file alias="chevron-up.svg">icons/chevron-up.svg</file>
+    <file alias="copy-plus.svg">icons/copy-plus.svg</file>
+    <file alias="crop.svg">icons/crop.svg</file>
+    <file alias="eraser.svg">icons/eraser.svg</file>
+    <file alias="eye-off.svg">icons/eye-off.svg</file>
+    <file alias="eye.svg">icons/eye.svg</file>
+    <file alias="folder-plus.svg">icons/folder-plus.svg</file>
+    <file alias="hand.svg">icons/hand.svg</file>
+    <file alias="history.svg">icons/history.svg</file>
+    <file alias="lasso.svg">icons/lasso.svg</file>
+    <file alias="layers.svg">icons/layers.svg</file>
+    <file alias="marquee.svg">icons/marquee.svg</file>
+    <file alias="move.svg">icons/move.svg</file>
+    <file alias="paint-bucket.svg">icons/paint-bucket.svg</file>
+    <file alias="paintbrush.svg">icons/paintbrush.svg</file>
+    <file alias="palette.svg">icons/palette.svg</file>
+    <file alias="pipette.svg">icons/pipette.svg</file>
+    <file alias="sliders-horizontal.svg">icons/sliders-horizontal.svg</file>
+    <file alias="trash-2.svg">icons/trash-2.svg</file>
+    <file alias="type.svg">icons/type.svg</file>
+    <file alias="wand-sparkles.svg">icons/wand-sparkles.svg</file>
+    <file alias="zoom-in.svg">icons/zoom-in.svg</file>
+</qresource>
+</RCC>

@@ -8,18 +8,28 @@
 #include "pe/core/Version.hpp"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
+#include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPixmap>
+#include <QSettings>
 #include <QStatusBar>
+#include <QSvgRenderer>
+#include <QToolBar>
 
+#include <cstddef>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pe::app {
 
@@ -29,6 +39,28 @@ constexpr const char* kOpenFilter =
     "Images (*.pedoc *.png *.jpg *.jpeg *.tif *.tiff *.webp);;All files (*)";
 constexpr const char* kSaveFilter =
     "PhotoEdit document (*.pedoc);;PNG (*.png);;JPEG (*.jpg);;TIFF (*.tif);;WebP (*.webp)";
+
+// Rasterize a bundled (re-tinted) Lucide SVG into a crisp HiDPI tool-button icon.
+[[nodiscard]] QIcon loadToolIcon(const QString& name) {
+    constexpr int kLogical = 22;
+    constexpr qreal kDpr = 2.0;
+    QPixmap pm(static_cast<int>(kLogical * kDpr), static_cast<int>(kLogical * kDpr));
+    pm.fill(Qt::transparent);
+    pm.setDevicePixelRatio(kDpr);
+    QSvgRenderer renderer(QStringLiteral(":/icons/%1.svg").arg(name));
+    QPainter p(&pm);
+    renderer.render(&p, QRectF(0, 0, kLogical, kLogical));
+    p.end();
+    return QIcon(pm);
+}
+
+// One tool-strip entry. `tool` == Inactive marks a scaffolded, not-yet-wired tool.
+struct ToolDef {
+    const char* icon;
+    const char* label;
+    CanvasView::Tool tool;
+    const char* shortcut;
+};
 }  // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -38,6 +70,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setCentralWidget(canvas_);
 
     buildMenuBar();
+    buildToolBar();
     buildDockPanels();
     buildStatusBar();
     refreshTitle();
@@ -89,8 +122,75 @@ void MainWindow::buildMenuBar() {
         viewMenu->addAction(QStringLiteral("&Actual Pixels"), canvas_, &CanvasView::actualPixels);
     actualAct->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_1));
 
+    viewMenu->addSeparator();
+    QMenu* themeMenu = viewMenu->addMenu(QStringLiteral("&Theme"));
+    auto* themeGroup = new QActionGroup(this);
+    const struct {
+        ThemeId id;
+        const char* label;
+    } themes[] = {{ThemeId::Graphite, "Graphite"}, {ThemeId::Slate, "Slate"}};
+    for (const auto& t : themes) {
+        QAction* a = themeMenu->addAction(QString::fromUtf8(t.label));
+        a->setCheckable(true);
+        a->setChecked(currentTheme() == t.id);
+        themeGroup->addAction(a);
+        const ThemeId id = t.id;
+        connect(a, &QAction::triggered, this, [this, id] { setTheme(id); });
+    }
+
     menuBar()->addMenu(QStringLiteral("&Window"));
     menuBar()->addMenu(QStringLiteral("&Help"));
+}
+
+void MainWindow::buildToolBar() {
+    auto* tb = new QToolBar(QStringLiteral("Tools"), this);
+    tb->setMovable(false);
+    tb->setFloatable(false);
+    tb->setIconSize(QSize(22, 22));
+    tb->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    addToolBar(Qt::LeftToolBarArea, tb);
+
+    // Grouped like a pro editor: select · crop/sample · paint · type · navigate.
+    // Brush/Eraser/Hand/Zoom are wired; the rest are scaffolded (Inactive) for now.
+    using Tool = CanvasView::Tool;
+    const std::vector<std::vector<ToolDef>> groups = {
+        {{"move", "Move", Tool::Inactive, "V"},
+         {"marquee", "Rectangular Marquee", Tool::Inactive, "M"},
+         {"lasso", "Lasso", Tool::Inactive, "L"},
+         {"wand-sparkles", "Magic Wand", Tool::Inactive, "W"}},
+        {{"crop", "Crop", Tool::Inactive, "C"}, {"pipette", "Eyedropper", Tool::Inactive, "I"}},
+        {{"paintbrush", "Brush", Tool::Brush, "B"},
+         {"eraser", "Eraser", Tool::Eraser, "E"},
+         {"paint-bucket", "Paint Bucket", Tool::Inactive, "G"}},
+        {{"type", "Type", Tool::Inactive, "T"}},
+        {{"hand", "Hand", Tool::Hand, "H"}, {"zoom-in", "Zoom", Tool::Zoom, "Z"}},
+    };
+
+    auto* toolGroup = new QActionGroup(this);
+    QAction* brushAction = nullptr;
+    for (std::size_t g = 0; g < groups.size(); ++g) {
+        if (g > 0) tb->addSeparator();
+        for (const ToolDef& def : groups[g]) {
+            QAction* a = tb->addAction(loadToolIcon(QString::fromUtf8(def.icon)),
+                                       QString::fromUtf8(def.label));
+            a->setCheckable(true);
+            a->setActionGroup(toolGroup);
+            const bool wired = def.tool != Tool::Inactive;
+            a->setToolTip(QStringLiteral("%1  (%2)%3")
+                              .arg(QString::fromUtf8(def.label), QString::fromUtf8(def.shortcut),
+                                   wired ? QString() : QStringLiteral("  — coming soon")));
+            a->setShortcut(QKeySequence(QString::fromUtf8(def.shortcut)));
+            const Tool tool = def.tool;
+            const QString label = QString::fromUtf8(def.label);
+            connect(a, &QAction::triggered, this, [this, tool, label, wired] {
+                canvas_->setTool(tool);
+                toolLabel_->setText(wired ? label
+                                          : QStringLiteral("%1 — not yet implemented").arg(label));
+            });
+            if (def.tool == Tool::Brush) brushAction = a;
+        }
+    }
+    if (brushAction != nullptr) brushAction->setChecked(true);  // default tool
 }
 
 void MainWindow::newDocument() {
@@ -182,7 +282,7 @@ void MainWindow::buildDockPanels() {
     } panels[] = {
         {"Layers", Qt::RightDockWidgetArea},     {"Channels", Qt::RightDockWidgetArea},
         {"Properties", Qt::RightDockWidgetArea}, {"History", Qt::RightDockWidgetArea},
-        {"Color", Qt::RightDockWidgetArea},      {"Tools", Qt::LeftDockWidgetArea},
+        {"Color", Qt::RightDockWidgetArea},  // the left tool strip replaces the old Tools dock
     };
     for (const auto& p : panels) {
         auto* dock = new QDockWidget(QString::fromUtf8(p.title), this);
@@ -193,14 +293,28 @@ void MainWindow::buildDockPanels() {
             history_ = new HistoryPanel(dock);
             dock->setWidget(history_);
         } else {
-            dock->setWidget(new QLabel(QStringLiteral("(%1 panel)").arg(p.title)));
+            auto* placeholder = new QLabel(QStringLiteral("%1").arg(p.title));
+            placeholder->setObjectName(QStringLiteral("PanelPlaceholder"));
+            placeholder->setAlignment(Qt::AlignCenter);
+            dock->setWidget(placeholder);
         }
         addDockWidget(p.area, dock);
     }
 }
 
 void MainWindow::buildStatusBar() {
-    statusBar()->showMessage(QStringLiteral("Ready"));
+    toolLabel_ = new QLabel(QStringLiteral("Brush"), this);
+    zoomLabel_ = new QLabel(QStringLiteral("—"), this);
+    statusBar()->addWidget(toolLabel_);
+    statusBar()->addPermanentWidget(zoomLabel_);
+    connect(canvas_, &CanvasView::zoomChanged, this,
+            [this](double pct) { zoomLabel_->setText(QStringLiteral("%1%").arg(pct, 0, 'f', 0)); });
+}
+
+void MainWindow::setTheme(ThemeId id) {
+    applyTheme(*qApp, id);
+    if (canvas_ != nullptr) canvas_->update();  // repaint the themed pasteboard
+    QSettings().setValue(QStringLiteral("theme"), static_cast<int>(id));
 }
 
 }  // namespace pe::app

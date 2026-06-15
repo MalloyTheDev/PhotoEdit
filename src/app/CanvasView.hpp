@@ -25,6 +25,11 @@ class CanvasView : public QWidget, public pe::DocumentObserver {
     Q_OBJECT
 
 public:
+    // How the canvas interprets a left-button gesture. Brush/Eraser paint, Hand
+    // pans, Zoom clicks to zoom; Inactive is a selected-but-unimplemented tool
+    // (clicks do nothing) — the scaffold the rest of the toolset wires into.
+    enum class Tool { Brush, Eraser, Hand, Zoom, Inactive };
+
     explicit CanvasView(QWidget* parent = nullptr);
     ~CanvasView() override;
 
@@ -35,6 +40,15 @@ public:
     // Brush/eraser settings, for future tool-options UI (size, color, mode).
     [[nodiscard]] pe::PaintToolController& tool() noexcept { return tool_; }
 
+    // Select the active tool (driven by the tool toolbar). Brush/Eraser also set
+    // the paint controller's mode.
+    void setTool(Tool t);
+    [[nodiscard]] Tool activeTool() const noexcept { return toolMode_; }
+
+signals:
+    void zoomChanged(double percent);  // for the status-bar zoom readout
+
+public:
     // View navigation (also driven by the View menu).
     void fitToWindow();   // scale so the whole document is visible, centered
     void actualPixels();  // 100% zoom, document centered
@@ -66,9 +80,10 @@ private:
     pe::PaintToolController tool_;
     pe::ViewTransform view_;  // document <-> widget (device px) mapping
     QBrush checker_;          // transparency checkerboard (device-space tile)
+    Tool toolMode_ = Tool::Brush;
 
     bool needsFit_ = true;  // fit-to-window pending until the widget has a valid size
-    bool panning_ = false;  // middle-button pan in progress
+    bool panning_ = false;  // pan in progress (middle-drag, or Hand tool + left-drag)
     QPointF lastPanPos_;    // last pan sample (widget space)
 };
 
