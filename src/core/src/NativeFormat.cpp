@@ -3,6 +3,7 @@
 #include "pe/core/BlendMode.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/GroupLayer.hpp"
+#include "pe/core/Mask.hpp"
 #include "pe/core/PixelLayer.hpp"
 
 #include <cstdint>
@@ -17,8 +18,8 @@ namespace pe {
 
 namespace {
 
-constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '3'};
-constexpr std::uint32_t kVersion = 3;
+constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '4'};
+constexpr std::uint32_t kVersion = 4;
 constexpr std::int64_t kMaxLayerPixels = 64'000'000;  // per-layer content cap
 constexpr std::uint32_t kMaxLayers = 100'000;
 constexpr std::uint32_t kMaxNameBytes = 65'536;
@@ -130,6 +131,58 @@ bool zlibInflate(std::span<const std::byte> in, std::vector<std::byte>& out) {
     return layer.kind() == LayerKind::Group || dynamic_cast<const PixelLayer*>(&layer) != nullptr;
 }
 
+// Write a length-flagged byte block: zlib-compressed when that is smaller (and zlib is
+// built in), else raw. The per-block flag keeps the surrounding record uncompressed.
+void writeBlock(Writer& w, const std::vector<std::byte>& raw) {
+#ifdef PHOTOEDIT_HAVE_ZLIB
+    const std::vector<std::byte> comp = zlibDeflate(raw);
+    if (!comp.empty() && comp.size() < raw.size()) {
+        w.u8(1);  // compressed: u32 length + deflated bytes
+        w.u32(static_cast<std::uint32_t>(comp.size()));
+        w.bytes(comp.data(), comp.size());
+        return;
+    }
+#endif
+    w.u8(0);  // raw: expectedSize bytes follow
+    w.bytes(raw.data(), raw.size());
+}
+
+// Read a byte block of exactly `expectedSize` bytes (written by writeBlock) into `out`.
+// Returns false on any inconsistency (bad flag, missing zlib, truncation, size mismatch).
+bool readBlock(Reader& r, std::size_t expectedSize, std::vector<std::byte>& out) {
+    const std::uint8_t comp = r.u8();
+    if (!r.ok() || comp > 1) return false;
+    if (comp == 1) {
+#ifdef PHOTOEDIT_HAVE_ZLIB
+        const std::uint32_t clen = r.u32();
+        const std::span<const std::byte> cspan = r.readSpan(clen);
+        if (!r.ok()) return false;
+        out.assign(expectedSize, std::byte{});
+        return expectedSize == 0 || zlibInflate(cspan, out);
+#else
+        return false;  // compressed, but this build has no zlib to read it
+#endif
+    }
+    out.assign(expectedSize, std::byte{});
+    return expectedSize == 0 || r.read(out.data(), expectedSize);
+}
+
+// Read and validate a content rect that must lie within the canvas. Returns false on an
+// out-of-canvas, overflowing, or oversized rect; on success cx/cy/cw/ch are filled. The
+// int64 math keeps cx+cw / cy+ch from overflowing the int loop bounds and confines tile
+// allocation to the canvas.
+bool readContentRect(Reader& r, int canvasW, int canvasH, std::int32_t& cx, std::int32_t& cy,
+                     std::int32_t& cw, std::int32_t& ch) {
+    cx = r.i32();
+    cy = r.i32();
+    cw = r.i32();
+    ch = r.i32();
+    return r.ok() && cw >= 0 && ch >= 0 && cx >= 0 && cy >= 0 &&
+           static_cast<std::int64_t>(cx) + cw <= canvasW &&
+           static_cast<std::int64_t>(cy) + ch <= canvasH &&
+           static_cast<std::int64_t>(cw) * ch <= kMaxLayerPixels;
+}
+
 void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active) {
     const bool isGroup = layer.kind() == LayerKind::Group;
     w.u8(isGroup ? kKindGroup : kKindPixel);
@@ -140,6 +193,31 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
     const std::string& name = layer.name();
     w.u32(static_cast<std::uint32_t>(name.size()));
     w.bytes(name.data(), name.size());
+
+    // Optional layer mask (common to pixel and group layers).
+    const Mask* mask = layer.mask();
+    if (mask == nullptr) {
+        w.u8(0);
+    } else {
+        w.u8(1);
+        w.u8(static_cast<std::uint8_t>(mask->kind()));
+        w.u8(mask->enabled() ? 1 : 0);
+        w.f32(mask->density());
+        w.u8(mask->inverted() ? 1 : 0);
+        const Rect mb = mask->buffer().contentBounds().intersected(canvasBounds);
+        w.i32(mb.x);
+        w.i32(mb.y);
+        w.i32(mb.width);
+        w.i32(mb.height);
+        std::vector<std::byte> mraw;
+        mraw.reserve(static_cast<std::size_t>(mb.width) * static_cast<std::size_t>(mb.height));
+        for (int y = mb.y; y < mb.y + mb.height; ++y) {
+            for (int x = mb.x; x < mb.x + mb.width; ++x) {
+                mraw.push_back(static_cast<std::byte>(mask->buffer().value(x, y)));
+            }
+        }
+        writeBlock(w, mraw);
+    }
 
     if (isGroup) {
         const auto& group = static_cast<const GroupLayer&>(layer);
@@ -161,9 +239,6 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
     w.i32(b.width);
     w.i32(b.height);
 
-    // Gather the content's raw RGBA bytes, then store them compressed when that is
-    // smaller (and zlib is available) — else raw. A per-block flag keeps the rest of
-    // the record (and thus the layer structure) inspectable/uncompressed.
     std::vector<std::byte> raw;
     raw.reserve(static_cast<std::size_t>(b.width) * static_cast<std::size_t>(b.height) *
                 sizeof(Rgba8));
@@ -174,17 +249,7 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
             raw.insert(raw.end(), pb, pb + sizeof(px));
         }
     }
-#ifdef PHOTOEDIT_HAVE_ZLIB
-    const std::vector<std::byte> comp = zlibDeflate(raw);
-    if (!comp.empty() && comp.size() < raw.size()) {
-        w.u8(1);  // compressed block: u32 length + deflated bytes
-        w.u32(static_cast<std::uint32_t>(comp.size()));
-        w.bytes(comp.data(), comp.size());
-        return;
-    }
-#endif
-    w.u8(0);  // raw block: width*height*4 bytes follow
-    w.bytes(raw.data(), raw.size());
+    writeBlock(w, raw);
 }
 
 // Reads one layer (recursively for groups). Returns nullptr on any inconsistency.
@@ -206,6 +271,39 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
     std::string name(nameLen, '\0');
     if (nameLen > 0 && !r.read(name.data(), nameLen)) return nullptr;
 
+    // Optional layer mask (common to pixel and group layers).
+    std::unique_ptr<Mask> mask;
+    const std::uint8_t hasMask = r.u8();
+    if (!r.ok() || hasMask > 1) return nullptr;
+    if (hasMask == 1) {
+        const std::uint8_t mkind = r.u8();
+        const bool menabled = r.u8() != 0;
+        const float mdensity = r.f32();
+        const bool minverted = r.u8() != 0;
+        std::int32_t mx = 0;
+        std::int32_t my = 0;
+        std::int32_t mw = 0;
+        std::int32_t mh = 0;
+        if (!r.ok() || mkind > static_cast<std::uint8_t>(Mask::Kind::Quick) ||
+            !readContentRect(r, canvasW, canvasH, mx, my, mw, mh)) {
+            return nullptr;
+        }
+        std::vector<std::byte> mraw;
+        if (!readBlock(r, static_cast<std::size_t>(mw) * static_cast<std::size_t>(mh), mraw)) {
+            return nullptr;
+        }
+        mask = std::make_unique<Mask>(static_cast<Mask::Kind>(mkind));
+        mask->setEnabled(menabled);
+        mask->setDensity(mdensity);
+        mask->setInverted(minverted);
+        std::size_t off = 0;
+        for (int y = my; y < my + mh; ++y) {
+            for (int x = mx; x < mx + mw; ++x) {
+                mask->buffer().setValue(x, y, static_cast<std::uint8_t>(mraw[off++]));
+            }
+        }
+    }
+
     std::unique_ptr<Layer> layer;
     if (kind == kKindGroup) {
         auto group = std::make_unique<GroupLayer>(std::move(name));
@@ -222,39 +320,16 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
         layer = std::move(group);
     } else {
         auto pl = std::make_unique<PixelLayer>(std::move(name), depth);
-        const std::int32_t cx = r.i32();
-        const std::int32_t cy = r.i32();
-        const std::int32_t cw = r.i32();
-        const std::int32_t ch = r.i32();
-        // Content must lie within the canvas (the writer clips to it); int64 math keeps
-        // cx+cw / cy+ch from overflowing and confines the loop (and tile allocation).
-        if (!r.ok() || cw < 0 || ch < 0 || cx < 0 || cy < 0 ||
-            static_cast<std::int64_t>(cx) + cw > canvasW ||
-            static_cast<std::int64_t>(cy) + ch > canvasH ||
-            static_cast<std::int64_t>(cw) * ch > kMaxLayerPixels) {
-            return nullptr;
-        }
-        // cw*ch is capped at kMaxLayerPixels above, so rawSize <= 256 MB.
+        std::int32_t cx = 0;
+        std::int32_t cy = 0;
+        std::int32_t cw = 0;
+        std::int32_t ch = 0;
+        if (!readContentRect(r, canvasW, canvasH, cx, cy, cw, ch)) return nullptr;
+        // cw*ch is capped at kMaxLayerPixels, so rawSize <= 256 MB.
         const std::size_t rawSize =
             static_cast<std::size_t>(cw) * static_cast<std::size_t>(ch) * sizeof(Rgba8);
-        const std::uint8_t pixComp = r.u8();
-        if (!r.ok() || pixComp > 1) return nullptr;
-
         std::vector<std::byte> raw;
-        if (pixComp == 1) {
-#ifdef PHOTOEDIT_HAVE_ZLIB
-            const std::uint32_t clen = r.u32();
-            const std::span<const std::byte> cspan = r.readSpan(clen);
-            if (!r.ok()) return nullptr;
-            raw.resize(rawSize);
-            if (rawSize > 0 && !zlibInflate(cspan, raw)) return nullptr;
-#else
-            return nullptr;  // compressed pixels, but this build has no zlib to read them
-#endif
-        } else {
-            raw.resize(rawSize);
-            if (rawSize > 0 && !r.read(raw.data(), rawSize)) return nullptr;
-        }
+        if (!readBlock(r, rawSize, raw)) return nullptr;
 
         TileStore& store = pl->tiles();
         std::size_t off = 0;
@@ -269,6 +344,7 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
         layer = std::move(pl);
     }
 
+    if (mask) layer->setMask(std::move(mask));
     layer->setVisible(visible);
     layer->setOpacity(opacity);
     layer->setBlendMode(static_cast<BlendMode>(blendRaw));
