@@ -50,8 +50,11 @@ DocumentChange RemoveLayerCommand::execute(Document& doc) {
     index_ = doc.topLevelIndexOf(layerId_);
     prevActive_ = doc.activeLayer();
     owned_ = doc.cmdRemoveTopLevel(layerId_);
-    // If we just removed the active layer, clear the selection (and notify).
-    if (prevActive_ == layerId_) doc.setActiveLayer(kNoLayer);
+    // Clear the active layer if it was removed — either the removed layer itself OR a
+    // descendant of a removed group (findLayer searches the whole tree). Otherwise a
+    // stale active id would dangle past the destroyed subtree.
+    clearedActive_ = prevActive_ != kNoLayer && doc.findLayer(prevActive_) == nullptr;
+    if (clearedActive_) doc.setActiveLayer(kNoLayer);
     Rect region;
     if (owned_) region = owned_->contentBounds();
     return structureChange(region, layerId_);
@@ -61,8 +64,9 @@ DocumentChange RemoveLayerCommand::undo(Document& doc) {
     Rect region;
     if (owned_) region = owned_->contentBounds();
     doc.cmdInsertTopLevel(index_, std::move(owned_));
-    // Restore the active layer if this command had cleared it.
-    if (prevActive_ == layerId_) doc.setActiveLayer(layerId_);
+    // The removed subtree (with its original ids) is back, so the prior active layer
+    // exists again; restore it if this command had cleared it.
+    if (clearedActive_) doc.setActiveLayer(prevActive_);
     return structureChange(region, layerId_);
 }
 

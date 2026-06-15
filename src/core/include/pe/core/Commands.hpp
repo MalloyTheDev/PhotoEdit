@@ -42,6 +42,7 @@ private:
     std::unique_ptr<Layer> owned_;  // holds the removed layer while undone
     std::size_t index_ = 0;
     LayerId prevActive_ = kNoLayer;  // active layer before removal, restored on undo
+    bool clearedActive_ = false;     // whether the active layer was inside the removed subtree
 };
 
 // Duplicate a top-level layer, inserting the copy directly above the original.

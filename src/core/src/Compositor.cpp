@@ -149,6 +149,17 @@ Buffer compositeToBuffer(std::span<const std::unique_ptr<Layer>> stack, Rect can
                          Convert convert) {
     if (canvas.isEmpty()) return Buffer{};
 
+    // The area cap below bounds the buffer, but huge coordinate *offsets* would still
+    // overflow the int tile/rect math (right()/bottom(), col*kTileSize). The document
+    // canvas is always at the origin; this guards the standalone API against a
+    // pathological rect. ~67M keeps right()/bottom() well within int.
+    constexpr int kCoordBound = 1 << 26;
+    if (canvas.x < -kCoordBound || canvas.y < -kCoordBound ||
+        static_cast<int64_t>(canvas.x) + canvas.width > kCoordBound ||
+        static_cast<int64_t>(canvas.y) + canvas.height > kCoordBound) {
+        return Buffer{};
+    }
+
     // Cap the eager allocation. Larger documents are rendered tile-by-tile via the
     // viewport (M2), not flattened whole. Area is computed in int64 (no overflow).
     const int64_t area = static_cast<int64_t>(canvas.width) * static_cast<int64_t>(canvas.height);

@@ -1,5 +1,6 @@
 #include "pe/core/PixelLayer.hpp"
 
+#include <algorithm>
 #include <cstddef>
 
 namespace pe {
@@ -35,7 +36,9 @@ void PixelLayer::renderInto(TileCoord coord, std::span<Rgbaf> dst) const {
     // Contract: dst covers exactly one tile (kTilePixels), tile-local row-major.
     // Read the active store at its native depth and convert to float; an absent
     // tile is transparent. (toFloat is the identity for the float store.)
-    const std::size_t n = dst.size();
+    // Clamp to the fixed tile size: the per-tile arrays are exactly kTilePixels, so a
+    // larger dst (contract violation) must never index past them.
+    const std::size_t n = std::min(dst.size(), static_cast<std::size_t>(kTilePixels));
     switch (depth_) {
         case BitDepth::U16: {
             const TileData16* t = tiles16_.find(coord);
