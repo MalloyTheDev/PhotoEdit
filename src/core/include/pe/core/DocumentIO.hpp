@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -38,5 +39,15 @@ enum class ImageFormat : std::uint8_t { Unknown, Png, Jpeg, Tiff, WebP, Native }
 // Encode a document to file bytes. Native preserves the full layer tree; raster
 // formats flatten (composite) to a single image. Empty on failure or unavailable codec.
 [[nodiscard]] std::vector<std::byte> exportDocument(const Document& doc, ImageFormat fmt);
+
+// --- filesystem convenience (the layer the app's Open/Save call) ---
+// Load a document from a file on disk; the format is inferred from the extension.
+// Returns nullptr on a missing/unreadable file, an unknown extension, a file larger
+// than the read cap, or malformed/oversized content.
+[[nodiscard]] std::unique_ptr<Document> loadDocument(const std::string& path);
+
+// Save a document to a file on disk; the format is inferred from the extension.
+// Returns false on an unknown extension, an encode failure, or a write error.
+[[nodiscard]] bool saveDocument(const Document& doc, const std::string& path);
 
 }  // namespace pe

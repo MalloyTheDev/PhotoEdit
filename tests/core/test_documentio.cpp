@@ -4,6 +4,8 @@
 #include "pe_test.hpp"
 
 #include <cstddef>
+#include <cstdio>
+#include <string>
 #include <vector>
 
 using namespace pe;
@@ -62,6 +64,30 @@ PE_TEST(documentio_unavailable_or_unknown_is_null) {
         PE_CHECK(exportDocument(*doc, ImageFormat::Png).empty());
         PE_CHECK(importDocument(junk, ImageFormat::Png) == nullptr);
     }
+}
+
+PE_TEST(documentio_file_roundtrip_native) {
+    const std::string path = std::string("/tmp/pe_docio_test_") +
+                             std::to_string(reinterpret_cast<std::uintptr_t>(&path)) + ".pedoc";
+    auto doc = Document::createBlank(Size{10, 6});
+    auto* pl = dynamic_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(Rect{0, 0, 10, 6}, Rgba8{70, 140, 210, 255});
+
+    PE_CHECK(saveDocument(*doc, path));
+    auto loaded = loadDocument(path);
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK_EQ(loaded->canvasSize().width, 10);
+    auto* lpl = dynamic_cast<PixelLayer*>(loaded->findLayer(loaded->activeLayer()));
+    PE_CHECK_EQ(lpl->tiles().pixel(5, 3), (Rgba8{70, 140, 210, 255}));
+    std::remove(path.c_str());
+}
+
+PE_TEST(documentio_load_missing_or_unknown_is_null) {
+    PE_CHECK(loadDocument("/tmp/pe_does_not_exist_98765.pedoc") == nullptr);  // missing file
+    PE_CHECK(loadDocument("/tmp/whatever.xyz") == nullptr);                   // unknown extension
+
+    auto doc = Document::createBlank(Size{4, 4});
+    PE_CHECK(!saveDocument(*doc, "/tmp/whatever.xyz"));  // unknown extension -> false
 }
 
 #ifdef PHOTOEDIT_HAVE_PNG
