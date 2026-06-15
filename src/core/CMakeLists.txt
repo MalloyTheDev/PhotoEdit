@@ -122,3 +122,28 @@ if(TURBOJPEG_INCLUDE_DIR AND TURBOJPEG_LIBRARY)
 else()
     message(STATUS "  JPEG I/O:    DISABLED (libturbojpeg not found)")
 endif()
+
+# ---------------------------------------------------------------------------
+# Optional zlib — compresses pixel blocks in the native .pedoc format. The format
+# stays readable without it (blocks written uncompressed); a compressed block can
+# only be read back when zlib is present. Same graceful pattern as above.
+# ---------------------------------------------------------------------------
+if(PkgConfig_FOUND)
+    pkg_check_modules(ZLIBPC IMPORTED_TARGET zlib)
+endif()
+if(ZLIBPC_FOUND)
+    target_compile_definitions(pe_core PUBLIC PHOTOEDIT_HAVE_ZLIB=1)
+    target_link_libraries(pe_core PUBLIC PkgConfig::ZLIBPC)
+    message(STATUS "  Compression: zlib ${ZLIBPC_VERSION}")
+else()
+    find_path(ZLIB_INCLUDE_DIR NAMES zlib.h)
+    find_library(ZLIB_LIBRARY NAMES z zlib zlibstatic)
+    if(ZLIB_INCLUDE_DIR AND ZLIB_LIBRARY)
+        target_compile_definitions(pe_core PUBLIC PHOTOEDIT_HAVE_ZLIB=1)
+        target_include_directories(pe_core PUBLIC ${ZLIB_INCLUDE_DIR})
+        target_link_libraries(pe_core PUBLIC ${ZLIB_LIBRARY})
+        message(STATUS "  Compression: zlib")
+    else()
+        message(STATUS "  Compression: DISABLED (zlib not found)")
+    endif()
+endif()
