@@ -82,11 +82,15 @@ std::unique_ptr<Document> documentFromImage(const PixelBuffer& image) {
 }
 
 namespace {
-// Decode a raster format to a single-layer document, or nullptr.
+#if defined(PHOTOEDIT_HAVE_PNG) || defined(PHOTOEDIT_HAVE_JPEG) || defined(PHOTOEDIT_HAVE_TIFF) || \
+    defined(PHOTOEDIT_HAVE_WEBP)
+// Decode a raster format to a single-layer document, or nullptr. Only needed when at
+// least one raster codec is compiled in; otherwise it would be an unused function.
 std::unique_ptr<Document> fromRaster(std::optional<PixelBuffer>&& image) {
     if (!image) return nullptr;
     return documentFromImage(*image);
 }
+#endif
 }  // namespace
 
 std::unique_ptr<Document> importDocument(std::span<const std::byte> data, ImageFormat fmt) {

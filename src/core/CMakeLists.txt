@@ -19,6 +19,7 @@ add_library(pe_core
     src/ViewTransform.cpp
     src/CanvasRenderer.cpp
     src/Brush.cpp
+    src/PaintToolController.cpp
     src/Selection.cpp
     src/Mask.cpp
     src/Adjustment.cpp

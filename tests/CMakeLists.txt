@@ -16,6 +16,7 @@ add_executable(pe_core_tests
     core/test_viewtransform.cpp
     core/test_canvasrenderer.cpp
     core/test_brush.cpp
+    core/test_painttool.cpp
     core/test_selection.cpp
     core/test_mask.cpp
     core/test_adjustment.cpp
