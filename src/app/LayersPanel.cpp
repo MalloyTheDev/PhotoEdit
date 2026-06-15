@@ -2,18 +2,26 @@
 
 #include "pe/core/BlendMode.hpp"
 #include "pe/core/Commands.hpp"
+#include "pe/core/Compositor.hpp"
 #include "pe/core/Layer.hpp"
+#include "pe/core/PixelBuffer.hpp"
 #include "pe/core/PixelLayer.hpp"
 
+#include <QColor>
 #include <QComboBox>
 #include <QHBoxLayout>
+#include <QIcon>
+#include <QImage>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QPainter>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
 #include <cmath>
+#include <cstdint>
 #include <utility>
 
 namespace pe::app {
@@ -43,6 +51,7 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     root->addLayout(topRow);
 
     list_ = new QListWidget(this);
+    list_->setIconSize(QSize(26, 26));  // per-layer preview thumbnails
     root->addWidget(list_, 1);
 
     auto* btnRow = new QHBoxLayout();
@@ -83,6 +92,7 @@ void LayersPanel::onDocumentChanged(const pe::Document&, const pe::DocumentChang
     switch (change.kind) {
         case pe::DocumentChange::Kind::LayerStructure:
         case pe::DocumentChange::Kind::LayerProps:
+        case pe::DocumentChange::Kind::Pixels:  // refresh thumbnails after an edit
             rebuild();
             break;
         case pe::DocumentChange::Kind::ActiveLayer:
@@ -105,6 +115,39 @@ pe::LayerId LayersPanel::selectedLayer() const {
     return idOf(list_->currentItem());
 }
 
+QIcon LayersPanel::layerThumbnail(std::size_t engineIndex) const {
+    constexpr int kThumb = 26;
+    if (doc_ == nullptr) return QIcon();
+    const pe::Rect bounds = doc_->canvasBounds();
+    const std::int64_t area = static_cast<std::int64_t>(bounds.width) * bounds.height;
+    if (area <= 0 || area > 4'000'000) return QIcon();  // bound preview-composite cost
+    const auto layers = doc_->topLevelLayers();
+    if (engineIndex >= layers.size()) return QIcon();
+
+    // Composite this layer alone over the canvas, then fit it onto a small checker.
+    const pe::PixelBuffer buf = pe::compositeToImage(layers.subspan(engineIndex, 1), bounds);
+    if (buf.isEmpty()) return QIcon();
+    const QImage src(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),
+                     buf.width() * 4, QImage::Format_RGBA8888);
+
+    QPixmap pm(kThumb, kThumb);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    const QColor c0(88, 94, 104);
+    const QColor c1(66, 72, 82);
+    for (int y = 0; y < kThumb; y += 6) {
+        for (int x = 0; x < kThumb; x += 6) {
+            p.fillRect(x, y, 6, 6, ((x / 6 + y / 6) & 1) ? c0 : c1);
+        }
+    }
+    const QImage scaled = src.scaled(kThumb, kThumb, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    p.drawImage((kThumb - scaled.width()) / 2, (kThumb - scaled.height()) / 2, scaled);
+    p.setPen(QColor(0, 0, 0, 110));
+    p.drawRect(0, 0, kThumb - 1, kThumb - 1);
+    p.end();
+    return QIcon(pm);
+}
+
 void LayersPanel::rebuild() {
     updating_ = true;
     list_->clear();
@@ -117,6 +160,7 @@ void LayersPanel::rebuild() {
             item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
             item->setCheckState(l->visible() ? Qt::Checked : Qt::Unchecked);
             item->setData(Qt::UserRole, static_cast<qulonglong>(l->id()));
+            item->setIcon(layerThumbnail(i));
         }
         selectActiveInList();
     }

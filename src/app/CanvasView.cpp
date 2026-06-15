@@ -1,5 +1,6 @@
 #include "CanvasView.hpp"
 
+#include "Theme.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/PixelBuffer.hpp"
 
@@ -108,6 +109,7 @@ void CanvasView::fitToWindow() {
     view_.setFocus(pe::PointD{w / 2.0, h / 2.0},
                    pe::PointD{width() / 2.0, height() / 2.0});  // doc center -> viewport center
     update();
+    emit zoomChanged(zoomPercent());
 }
 
 void CanvasView::actualPixels() {
@@ -118,6 +120,7 @@ void CanvasView::actualPixels() {
     view_.setFocus(pe::PointD{image_.width() / 2.0, image_.height() / 2.0},
                    pe::PointD{width() / 2.0, height() / 2.0});
     update();
+    emit zoomChanged(zoomPercent());
 }
 
 void CanvasView::zoomAroundCenter(double factor) {
@@ -126,6 +129,7 @@ void CanvasView::zoomAroundCenter(double factor) {
     const double target = std::clamp(view_.zoom() * factor, pe::kMinZoom, pe::kMaxZoom);
     view_.zoomAround(pe::PointD{width() / 2.0, height() / 2.0}, target);
     update();
+    emit zoomChanged(zoomPercent());
 }
 
 void CanvasView::zoomIn() {
@@ -134,6 +138,23 @@ void CanvasView::zoomIn() {
 
 void CanvasView::zoomOut() {
     zoomAroundCenter(1.0 / kZoomStep);
+}
+
+void CanvasView::setTool(Tool t) {
+    toolMode_ = t;
+    if (t == Tool::Brush) {
+        tool_.setMode(pe::PaintToolController::Mode::Brush);
+    } else if (t == Tool::Eraser) {
+        tool_.setMode(pe::PaintToolController::Mode::Eraser);
+    } else if (doc_ != nullptr && tool_.isStroking()) {
+        tool_.cancel(*doc_);  // switching away from a paint tool drops any live stroke
+        refreshImage();
+        update();
+    }
+    setCursor(t == Tool::Hand       ? Qt::OpenHandCursor
+              : t == Tool::Zoom     ? Qt::PointingHandCursor
+              : t == Tool::Inactive ? Qt::ArrowCursor
+                                    : Qt::CrossCursor);
 }
 
 void CanvasView::maybeInitialFit() {
@@ -155,7 +176,7 @@ void CanvasView::paintEvent(QPaintEvent*) {
     maybeInitialFit();
 
     QPainter painter(this);
-    painter.fillRect(rect(), QColor(48, 48, 48));  // neutral pasteboard
+    painter.fillRect(rect(), themeColors(currentTheme()).canvas);  // themed pasteboard
     if (image_.isNull()) return;
 
     // Device-space rectangle the document maps to (rotation is not exposed yet, so
@@ -174,15 +195,31 @@ void CanvasView::paintEvent(QPaintEvent*) {
 }
 
 void CanvasView::mousePressEvent(QMouseEvent* e) {
-    if (e->button() == Qt::MiddleButton) {
+    // Pan on middle-drag, or on left-drag while the Hand tool is active.
+    const bool wantPan = e->button() == Qt::MiddleButton ||
+                         (e->button() == Qt::LeftButton && toolMode_ == Tool::Hand);
+    if (wantPan) {
         panning_ = true;
         lastPanPos_ = e->position();
+        setCursor(Qt::ClosedHandCursor);
         return;
     }
     if (e->button() != Qt::LeftButton || doc_ == nullptr) {
         QWidget::mousePressEvent(e);
         return;
     }
+    if (toolMode_ == Tool::Zoom) {
+        // Click zooms in about the cursor; Alt-click zooms out.
+        const double factor = (e->modifiers() & Qt::AltModifier) ? 1.0 / kZoomStep : kZoomStep;
+        const double target = std::clamp(view_.zoom() * factor, pe::kMinZoom, pe::kMaxZoom);
+        const QPointF p = e->position();
+        view_.zoomAround(pe::PointD{p.x(), p.y()}, target);
+        needsFit_ = false;
+        update();
+        emit zoomChanged(zoomPercent());
+        return;
+    }
+    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser) return;  // Inactive: no paint
     // Recover if a prior stroke never received its release (e.g. mouse capture was
     // stolen by a modal/Alt-Tab): drop the stale preview before starting fresh.
     if (tool_.isStroking()) tool_.cancel(*doc_);
@@ -212,8 +249,11 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
 }
 
 void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
-    if (e->button() == Qt::MiddleButton && panning_) {
+    if (panning_ && (e->button() == Qt::MiddleButton || e->button() == Qt::LeftButton)) {
         panning_ = false;
+        setCursor(toolMode_ == Tool::Hand   ? Qt::OpenHandCursor
+                  : toolMode_ == Tool::Zoom ? Qt::PointingHandCursor
+                                            : Qt::CrossCursor);
         return;
     }
     if (e->button() != Qt::LeftButton || !tool_.isStroking()) {
@@ -241,6 +281,7 @@ void CanvasView::wheelEvent(QWheelEvent* e) {
     const QPointF pos = e->position();
     view_.zoomAround(pe::PointD{pos.x(), pos.y()}, target);  // keep the cursor's pixel fixed
     update();
+    emit zoomChanged(zoomPercent());
 }
 
 void CanvasView::resizeEvent(QResizeEvent* e) {

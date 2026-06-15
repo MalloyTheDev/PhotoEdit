@@ -49,10 +49,33 @@ The engine is no longer headless-only; the Qt6 app provides a real
   brush/eraser: `begin`/`extend`/`end`/`cancel` turn pointer samples into a live
   preview and commit exactly one undoable `PaintCommand` per stroke, gated by the
   active selection. `MainWindow` wires Edit ▸ Undo/Redo (Ctrl+Z / Ctrl+Shift+Z).
+- **Viewport** — `CanvasView` shows the composite through the engine
+  `ViewTransform`: wheel-zoom about the cursor, middle-drag pan, fit-to-window /
+  actual-pixels (Ctrl+0/1), and a transparency checkerboard. Painting maps the
+  pointer back through `viewToDoc`, so it tracks the cursor under any zoom/pan.
+- **Layers panel** — top-first stack with visibility / opacity / blend mode and
+  add / duplicate / delete / reorder, all as undoable commands.
+- **History panel** — a state timeline (uses `History::undoNames/redoNames`) with
+  click-to-seek; the current state is highlighted, redoable states dimmed.
 
-Next app slice: a real **viewport** — zoom/pan/fit-to-window + checkerboard
-transparency (the engine `ViewTransform`/`CanvasRenderer` already exist), then the
-Layers/History panels.
+### Visual design system (dark pro theme)
+
+The app has a committed visual identity modeled on the classic Photoshop neutral-grey
+UI: a Fusion-based dark theme applied as a `QPalette` + generated QSS, flat and
+monochrome (the accent shows only on menu highlights / input focus; the active tool
+and selected row read as a lighter-grey cell). **Two switchable variants** (View ▸
+Theme), persisted via `QSettings`: *Graphite* (medium neutral grey — the default) and
+*Charcoal* (a darker neutral grey). The chrome is the scaffold the rest of the toolset
+wires into: a left **tool strip** (Move / Marquee / Lasso / Wand / Crop / Eyedropper /
+Brush / Eraser / Bucket / Type / Hand / Zoom) with bundled Lucide SVG icons
+(`icons.qrc`, ISC, re-tinted via `IconUtil`) — Brush/Eraser/Hand/Zoom are wired, the
+rest are scaffolded; custom panel headers (`PanelHeader`: glyph + Title-Case label),
+per-layer thumbnails in the Layers panel, styled menus/lists/controls/scrollbars, and
+a status bar with the active tool + live zoom %. `CanvasView::Tool` gates input per
+the selected tool.
+
+Next app slice: the rest of the tool framework (selection tools with marching ants,
+move, eyedropper) and the adjustments/filters UI (the M5/M6 engine has no UI yet).
 
 ## M5 detail — adjustments, filters, analysis (engine complete)
 

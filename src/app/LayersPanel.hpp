@@ -7,6 +7,7 @@
 #include <memory>
 
 class QComboBox;
+class QIcon;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
@@ -45,6 +46,8 @@ private:
     void updateButtons();       // enable/disable per current selection
     void selectActiveInList();  // highlight the row matching the active layer
     [[nodiscard]] pe::LayerId selectedLayer() const;
+    // A small preview of one top-level layer (composited alone), for the row icon.
+    [[nodiscard]] QIcon layerThumbnail(std::size_t engineIndex) const;
 
     void onRowChanged();
     void onItemChanged(QListWidgetItem* item);  // visibility checkbox
