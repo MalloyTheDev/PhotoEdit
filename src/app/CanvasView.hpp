@@ -2,7 +2,9 @@
 
 #include "pe/core/Document.hpp"
 #include "pe/core/PaintToolController.hpp"
+#include "pe/core/ViewTransform.hpp"
 
+#include <QBrush>
 #include <QImage>
 #include <QPoint>
 #include <QPointF>
@@ -10,11 +12,15 @@
 
 namespace pe::app {
 
-// The central canvas: shows a document's flattened composite and routes mouse input
-// to the brush tool. It observes the document, so committed edits (paint commits,
-// undo/redo, file loads) refresh automatically; the live brush preview repaints
-// explicitly as it is drawn. The tiled/zoomable viewport
-// (docs/systems/02-canvas-rendering.md) replaces this centered-100% display later.
+// The central canvas: shows a document's flattened composite through a zoom/pan
+// view transform and routes mouse input to the brush tool. It observes the
+// document, so committed edits (paint commits, undo/redo, file loads) refresh
+// automatically; the live brush preview repaints explicitly as it is drawn.
+//
+// View navigation: mouse wheel zooms about the cursor, middle-drag pans, and the
+// document fits the viewport when first shown. The presentation transform is the
+// engine's headless pe::ViewTransform (docs/systems/02-canvas-rendering.md); the
+// document is never resampled. GPU display and dirty-region repaint arrive later.
 class CanvasView : public QWidget, public pe::DocumentObserver {
     Q_OBJECT
 
@@ -29,6 +35,13 @@ public:
     // Brush/eraser settings, for future tool-options UI (size, color, mode).
     [[nodiscard]] pe::PaintToolController& tool() noexcept { return tool_; }
 
+    // View navigation (also driven by the View menu).
+    void fitToWindow();   // scale so the whole document is visible, centered
+    void actualPixels();  // 100% zoom, document centered
+    void zoomIn();        // step zoom in about the viewport center
+    void zoomOut();       // step zoom out about the viewport center
+    [[nodiscard]] double zoomPercent() const noexcept { return view_.zoom() * 100.0; }
+
     // DocumentObserver: re-flatten and repaint after any committed change.
     void onDocumentChanged(const pe::Document&, const pe::DocumentChange&) override;
 
@@ -37,16 +50,26 @@ protected:
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
+    void wheelEvent(QWheelEvent*) override;
+    void resizeEvent(QResizeEvent*) override;
+    void showEvent(QShowEvent*) override;
     [[nodiscard]] QSize sizeHint() const override;
 
 private:
-    void refreshImage();                                // re-flatten doc_ -> image_
-    [[nodiscard]] QPoint imageOrigin() const noexcept;  // top-left of the centered image
+    void refreshImage();                   // re-flatten doc_ -> image_
+    void zoomAroundCenter(double factor);  // zoom about the viewport center
+    void maybeInitialFit();                // fit once the widget has a real size
     [[nodiscard]] pe::StrokePoint sampleAt(QPointF widgetPos) const;  // widget -> doc space
 
     pe::Document* doc_ = nullptr;  // not owned; observed while non-null
     QImage image_;                 // a private copy of the current composite (RGBA8888)
     pe::PaintToolController tool_;
+    pe::ViewTransform view_;  // document <-> widget (device px) mapping
+    QBrush checker_;          // transparency checkerboard (device-space tile)
+
+    bool needsFit_ = true;  // fit-to-window pending until the widget has a valid size
+    bool panning_ = false;  // middle-button pan in progress
+    QPointF lastPanPos_;    // last pan sample (widget space)
 };
 
 }  // namespace pe::app

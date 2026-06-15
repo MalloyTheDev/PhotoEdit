@@ -68,7 +68,22 @@ void MainWindow::buildMenuBar() {
     menuBar()->addMenu(QStringLiteral("&Layer"));
     menuBar()->addMenu(QStringLiteral("&Select"));
     menuBar()->addMenu(QStringLiteral("F&ilter"));
-    menuBar()->addMenu(QStringLiteral("&View"));
+
+    auto* viewMenu = menuBar()->addMenu(QStringLiteral("&View"));
+    QAction* zoomInAct =
+        viewMenu->addAction(QStringLiteral("Zoom &In"), canvas_, &CanvasView::zoomIn);
+    zoomInAct->setShortcut(QKeySequence::ZoomIn);
+    QAction* zoomOutAct =
+        viewMenu->addAction(QStringLiteral("Zoom &Out"), canvas_, &CanvasView::zoomOut);
+    zoomOutAct->setShortcut(QKeySequence::ZoomOut);
+    viewMenu->addSeparator();
+    QAction* fitAct =
+        viewMenu->addAction(QStringLiteral("&Fit on Screen"), canvas_, &CanvasView::fitToWindow);
+    fitAct->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_0));
+    QAction* actualAct =
+        viewMenu->addAction(QStringLiteral("&Actual Pixels"), canvas_, &CanvasView::actualPixels);
+    actualAct->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_1));
+
     menuBar()->addMenu(QStringLiteral("&Window"));
     menuBar()->addMenu(QStringLiteral("&Help"));
 }
