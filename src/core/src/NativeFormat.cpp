@@ -147,9 +147,33 @@ void writeBlock(Writer& w, const std::vector<std::byte>& raw) {
     w.bytes(raw.data(), raw.size());
 }
 
+// Resident memory a sparse 256x256-tiled store commits when `rect`'s pixels are scattered
+// into it: setPixel/setValue materializes every tile the rect touches IN FULL, so a thin
+// or elongated rect costs far more than its dense pixel count (up to ~256x). The aggregate
+// budget must charge this tiled footprint — not the packed rect bytes — or a crafted
+// thin-strip content rect bypasses the cap. `bytesPerPixel` is the store's element size.
+[[nodiscard]] std::int64_t tileFootprintBytes(Rect rect, std::int64_t bytesPerPixel) noexcept {
+    const std::int64_t tiles = tilesForRect(rect).count();  // 0 for an empty rect
+    return tiles * static_cast<std::int64_t>(kTilePixels) * bytesPerPixel;
+}
+
 // Read a byte block of exactly `expectedSize` bytes (written by writeBlock) into `out`.
 // Returns false on any inconsistency (bad flag, missing zlib, truncation, size mismatch).
-bool readBlock(Reader& r, std::size_t expectedSize, std::vector<std::byte>& out) {
+//
+// `budget` is the remaining aggregate byte allowance for the whole deserialize and
+// `chargeBytes` is what this block costs against it. The allocation guard is the security
+// chokepoint: every block this format reads — pixel data and masks alike — flows through
+// here, so checking the charge against the remaining budget BEFORE allocating bounds total
+// memory and rejects a many-layer file or decompression bomb cleanly (false) instead of
+// running into bad_alloc. Callers pass the RESIDENT tiled footprint (>= expectedSize) as
+// `chargeBytes`, because the bytes are scattered into a sparse tiled store: charging the
+// dense `expectedSize` would under-count by up to ~256x. The transient decompressed buffer
+// is <= expectedSize <= chargeBytes, so this single charge bounds both.
+bool readBlock(Reader& r, std::size_t expectedSize, std::vector<std::byte>& out,
+               std::int64_t& budget, std::int64_t chargeBytes) {
+    if (chargeBytes > budget) return false;  // aggregate cap (checked before allocating)
+    budget -= chargeBytes;
+
     const std::uint8_t comp = r.u8();
     if (!r.ok() || comp > 1) return false;
     if (comp == 1) {
@@ -165,6 +189,57 @@ bool readBlock(Reader& r, std::size_t expectedSize, std::vector<std::byte>& out)
     }
     out.assign(expectedSize, std::byte{});
     return expectedSize == 0 || r.read(out.data(), expectedSize);
+}
+
+// Serialize one layer's pixel store: content rect (clamped to the canvas) followed by a
+// writeBlock of its pixels, sizeof(Pixel) bytes each. Templated over the store's pixel
+// type so the 8/16/32-bit stores share one path (Rgba8/Rgba16/Rgbaf differ only in size).
+template <class Pixel>
+void writePixelBlock(Writer& w, const TileStoreT<Pixel>& store, Rect canvasBounds) {
+    const Rect b = store.contentBounds().intersected(canvasBounds);
+    w.i32(b.x);
+    w.i32(b.y);
+    w.i32(b.width);
+    w.i32(b.height);
+    std::vector<std::byte> raw;
+    raw.reserve(static_cast<std::size_t>(b.width) * static_cast<std::size_t>(b.height) *
+                sizeof(Pixel));
+    for (int y = b.y; y < b.y + b.height; ++y) {
+        for (int x = b.x; x < b.x + b.width; ++x) {
+            const Pixel px = store.pixel(x, y);
+            const auto* pb = reinterpret_cast<const std::byte*>(&px);
+            raw.insert(raw.end(), pb, pb + sizeof(px));
+        }
+    }
+    writeBlock(w, raw);
+}
+
+// Inverse of writePixelBlock for an already-validated content rect [cx,cy,cw,ch] (within
+// the canvas and the per-layer pixel cap). Reads the pixel block (budget-checked) and
+// scatters it into `store`. Templated over the pixel type as the write side is.
+template <class Pixel>
+bool readPixelBlock(Reader& r, TileStoreT<Pixel>& store, std::int32_t cx, std::int32_t cy,
+                    std::int32_t cw, std::int32_t ch, std::int64_t& budget) {
+    // cw*ch is capped at kMaxLayerPixels (readContentRect), so rawSize <= 64MP*sizeof(Pixel)
+    // (<=1 GB even for 32-bit-float). Charge the budget the tiled footprint the scatter
+    // below actually commits (whole tiles), not the dense rawSize, so a thin strip cannot
+    // bypass the aggregate cap.
+    const std::size_t rawSize =
+        static_cast<std::size_t>(cw) * static_cast<std::size_t>(ch) * sizeof(Pixel);
+    const std::int64_t charge =
+        tileFootprintBytes(Rect{cx, cy, cw, ch}, static_cast<std::int64_t>(sizeof(Pixel)));
+    std::vector<std::byte> raw;
+    if (!readBlock(r, rawSize, raw, budget, charge)) return false;
+    std::size_t off = 0;
+    for (int y = cy; y < cy + ch; ++y) {
+        for (int x = cx; x < cx + cw; ++x) {
+            Pixel px{};
+            std::memcpy(&px, raw.data() + off, sizeof(px));
+            off += sizeof(px);
+            store.setPixel(x, y, px);
+        }
+    }
+    return true;
 }
 
 // Read and validate a content rect that must lie within the canvas. Returns false on an
@@ -183,7 +258,7 @@ bool readContentRect(Reader& r, int canvasW, int canvasH, std::int32_t& cx, std:
            static_cast<std::int64_t>(cw) * ch <= kMaxLayerPixels;
 }
 
-void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active) {
+void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active, BitDepth depth) {
     const bool isGroup = layer.kind() == LayerKind::Group;
     w.u8(isGroup ? kKindGroup : kKindPixel);
     w.u8(layer.visible() ? 1 : 0);
@@ -227,35 +302,40 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
             if (serializable(*child)) kids.push_back(child.get());
         }
         w.u32(static_cast<std::uint32_t>(kids.size()));
-        for (const Layer* child : kids) writeLayer(w, *child, canvasBounds, active);
+        for (const Layer* child : kids) writeLayer(w, *child, canvasBounds, active, depth);
         return;
     }
 
-    // Pixel layer: content clipped to the canvas (contentBounds() is tile-aligned).
+    // Pixel layer: serialize the store matching the document's bit depth (the active
+    // store; the others are empty). `depth` is the document depth, which every pixel
+    // layer shares (createBlank/AddLayer seed layers at the document depth) — the reader
+    // reconstructs all layers at that same depth, so writer and reader stay symmetric.
+    //
+    // PRECONDITION: every PixelLayer in the document has pl.depth() == doc.bitDepth(). The
+    // format keys pixel serialization off the document depth (it stores no per-layer depth),
+    // so a layer whose own depth diverged would serialize its empty matching store and
+    // round-trip transparent. No current path can produce a mismatch; a future mixed-depth
+    // path (paste/import) must add a per-layer depth byte here and in readLayer.
     const auto& pl = static_cast<const PixelLayer&>(layer);
-    const Rect b = pl.tiles().contentBounds().intersected(canvasBounds);
-    w.i32(b.x);
-    w.i32(b.y);
-    w.i32(b.width);
-    w.i32(b.height);
-
-    std::vector<std::byte> raw;
-    raw.reserve(static_cast<std::size_t>(b.width) * static_cast<std::size_t>(b.height) *
-                sizeof(Rgba8));
-    for (int y = b.y; y < b.y + b.height; ++y) {
-        for (int x = b.x; x < b.x + b.width; ++x) {
-            const Rgba8 px = pl.tiles().pixel(x, y);
-            const auto* pb = reinterpret_cast<const std::byte*>(&px);
-            raw.insert(raw.end(), pb, pb + sizeof(px));
-        }
+    switch (depth) {
+        case BitDepth::U16:
+            writePixelBlock(w, pl.tiles16(), canvasBounds);
+            break;
+        case BitDepth::F32:
+            writePixelBlock(w, pl.tilesF(), canvasBounds);
+            break;
+        case BitDepth::U8:
+        default:
+            writePixelBlock(w, pl.tiles(), canvasBounds);
+            break;
     }
-    writeBlock(w, raw);
 }
 
 // Reads one layer (recursively for groups). Returns nullptr on any inconsistency.
 // Sets activeId/haveActive if a record carries the active flag.
 std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth depth,
-                                 LayerId& activeId, bool& haveActive, int depthGuard) {
+                                 LayerId& activeId, bool& haveActive, int depthGuard,
+                                 std::int64_t& budget) {
     if (depthGuard > kMaxGroupDepth) return nullptr;
 
     const std::uint8_t kind = r.u8();
@@ -289,7 +369,10 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
             return nullptr;
         }
         std::vector<std::byte> mraw;
-        if (!readBlock(r, static_cast<std::size_t>(mw) * static_cast<std::size_t>(mh), mraw)) {
+        // MaskBuffer is a sparse store of 1-byte tiles, so charge its tiled footprint too.
+        const std::int64_t mcharge = tileFootprintBytes(Rect{mx, my, mw, mh}, 1);
+        if (!readBlock(r, static_cast<std::size_t>(mw) * static_cast<std::size_t>(mh), mraw, budget,
+                       mcharge)) {
             return nullptr;
         }
         mask = std::make_unique<Mask>(static_cast<Mask::Kind>(mkind));
@@ -313,7 +396,7 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
         group->setIsolated(isolated != 0);
         for (std::uint32_t i = 0; i < childCount; ++i) {
             auto child =
-                readLayer(r, canvasW, canvasH, depth, activeId, haveActive, depthGuard + 1);
+                readLayer(r, canvasW, canvasH, depth, activeId, haveActive, depthGuard + 1, budget);
             if (child == nullptr) return nullptr;
             group->addChild(std::move(child));
         }
@@ -325,22 +408,22 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
         std::int32_t cw = 0;
         std::int32_t ch = 0;
         if (!readContentRect(r, canvasW, canvasH, cx, cy, cw, ch)) return nullptr;
-        // cw*ch is capped at kMaxLayerPixels, so rawSize <= 256 MB.
-        const std::size_t rawSize =
-            static_cast<std::size_t>(cw) * static_cast<std::size_t>(ch) * sizeof(Rgba8);
-        std::vector<std::byte> raw;
-        if (!readBlock(r, rawSize, raw)) return nullptr;
-
-        TileStore& store = pl->tiles();
-        std::size_t off = 0;
-        for (int y = cy; y < cy + ch; ++y) {
-            for (int x = cx; x < cx + cw; ++x) {
-                Rgba8 px{};
-                std::memcpy(&px, raw.data() + off, sizeof(px));
-                off += sizeof(px);
-                store.setPixel(x, y, px);
-            }
+        // Read into the store matching the document depth (the active one); the per-pixel
+        // size and the aggregate budget are handled inside readPixelBlock/readBlock.
+        bool okPixels = false;
+        switch (depth) {
+            case BitDepth::U16:
+                okPixels = readPixelBlock(r, pl->tiles16(), cx, cy, cw, ch, budget);
+                break;
+            case BitDepth::F32:
+                okPixels = readPixelBlock(r, pl->tilesF(), cx, cy, cw, ch, budget);
+                break;
+            case BitDepth::U8:
+            default:
+                okPixels = readPixelBlock(r, pl->tiles(), cx, cy, cw, ch, budget);
+                break;
         }
+        if (!okPixels) return nullptr;
         layer = std::move(pl);
     }
 
@@ -375,11 +458,13 @@ std::vector<std::byte> serializeDocument(const Document& doc) {
     }
     w.u32(static_cast<std::uint32_t>(tops.size()));
     const Rect canvasBounds = doc.canvasBounds();
-    for (const Layer* layer : tops) writeLayer(w, *layer, canvasBounds, doc.activeLayer());
+    const BitDepth depth = doc.bitDepth();
+    for (const Layer* layer : tops) writeLayer(w, *layer, canvasBounds, doc.activeLayer(), depth);
     return w.take();
 }
 
-std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data) {
+std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data,
+                                              std::int64_t maxTotalContentBytes) {
     Reader r(data);
 
     char magic[6] = {};
@@ -412,8 +497,12 @@ std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data) {
     LayerId activeId = 0;
     bool haveActive = false;
     const auto depth = static_cast<BitDepth>(depthRaw);
+    // Remaining aggregate allocation allowance for this whole deserialize (clamped to
+    // non-negative). Every pixel/mask block read decrements it before allocating, so a
+    // bomb or many-layer file is rejected rather than driven to bad_alloc.
+    std::int64_t budget = maxTotalContentBytes < 0 ? 0 : maxTotalContentBytes;
     for (std::uint32_t i = 0; i < topCount; ++i) {
-        auto layer = readLayer(r, canvasW, canvasH, depth, activeId, haveActive, 0);
+        auto layer = readLayer(r, canvasW, canvasH, depth, activeId, haveActive, 0, budget);
         if (layer == nullptr) return nullptr;
         doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(layer));
     }
