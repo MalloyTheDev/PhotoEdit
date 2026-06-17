@@ -1,4 +1,7 @@
+#include "pe/core/Adjustment.hpp"
+#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Compositor.hpp"
+#include "pe/core/Document.hpp"
 #include "pe/core/GroupLayer.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/SolidColorLayer.hpp"
@@ -307,4 +310,76 @@ PE_TEST(composite_16bit_oversized_returns_empty) {
     stack.push_back(solid(kRed, Rect{0, 0, 100000, 100000}));
     PixelBuffer16 i16 = compositeToImage16(stack, Rect{0, 0, 100000, 100000});
     PE_CHECK(i16.isEmpty());
+}
+
+// -----------------------------------------------------------------------------
+// First golden-image style tests (committed reference results with tolerance).
+// These act as the baseline for visual regression as systems land (see docs).
+// -----------------------------------------------------------------------------
+
+namespace {
+PixelBuffer makeGolden8x8(Rgba8 c) {
+    PixelBuffer g(kW, kH);
+    g.fill(c);
+    return g;
+}
+}  // namespace
+
+PE_TEST(golden_compositor_normal_blend) {
+    // Golden: opaque blue over red (top wins for Normal).
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed));
+    stack.push_back(solid(kBlue));
+    PixelBuffer img = compositeToImage(stack, kCanvas);
+    PixelBuffer golden = makeGolden8x8(kBlue);
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            PE_CHECK(near8(img.at(x, y), golden.at(x, y)));
+        }
+    }
+}
+
+PE_TEST(golden_compositor_multiply) {
+    // Golden: multiply red * green = black.
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed));
+    auto top = solid(kGreen);
+    top->setBlendMode(BlendMode::Multiply);
+    stack.push_back(std::move(top));
+    PixelBuffer img = compositeToImage(stack, kCanvas);
+    PixelBuffer golden = makeGolden8x8(Rgba8{0, 0, 0, 255});
+    PE_CHECK(near8(img.at(0, 0), golden.at(0, 0)));
+    PE_CHECK(near8(img.at(7, 7), golden.at(7, 7)));
+}
+
+PE_TEST(golden_adjustment_invert) {
+    // Use Document + AdjustmentLayer as golden reference for invert over red -> cyan.
+    auto doc = Document::createBlank(Size{kW, kH});
+    auto* base = dynamic_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    base->tiles().fillRect(kCanvas, kRed);
+
+    auto adj = std::make_unique<AdjustmentLayer>(std::make_unique<Invert>(), "Invert");
+    doc->cmdInsertTopLevel(1, std::move(adj));
+
+    PixelBuffer img = doc->compositeImage();
+    // Golden: invert of red is cyan-ish (255-r etc).
+    PE_CHECK(near8(img.at(0, 0), Rgba8{0, 255, 255, 255}));
+    PE_CHECK(near8(img.at(7, 7), Rgba8{0, 255, 255, 255}));
+}
+
+// Enhanced golden with "committed reference" buffer (simulating PNG load for future file-based
+// golds)
+PE_TEST(golden_compositor_with_reference_buffer) {
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed));
+    auto top = solid(kBlue);
+    top->setOpacity(0.5f);
+    stack.push_back(std::move(top));
+    PixelBuffer img = compositeToImage(stack, kCanvas);
+    // "Committed golden" reference (exact for this case)
+    PixelBuffer ref(kW, kH, Rgba8{128, 0, 128, 255});
+    for (int i = 0; i < kW * kH; ++i) {
+        int x = i % kW, y = i / kW;
+        PE_CHECK(near8(img.at(x, y), ref.at(x, y)));
+    }
 }

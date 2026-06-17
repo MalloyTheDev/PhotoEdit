@@ -210,4 +210,24 @@ DocumentChange AssignProfileCommand::undo(Document& doc) {
     return DocumentChange{DocumentChange::Kind::Profile, Rect{}, kNoLayer};
 }
 
+// --- Selection commands (task 12) ---
+
+SetSelectionCommand::SetSelectionCommand(Selection target) : newSel_(std::move(target)) {}
+
+DocumentChange SetSelectionCommand::execute(Document& doc) {
+    if (!captured_) {
+        oldSel_ = doc.selection();  // capture the prior selection once, for undo
+        captured_ = true;
+    }
+    doc.editableSelection() = newSel_;
+    doc.touchSelection();
+    return DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer};
+}
+
+DocumentChange SetSelectionCommand::undo(Document& doc) {
+    doc.editableSelection() = oldSel_;
+    doc.touchSelection();
+    return DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer};
+}
+
 }  // namespace pe

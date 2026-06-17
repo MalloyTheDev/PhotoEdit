@@ -168,12 +168,30 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
         stampDab(cov, p, radius, hardness, flow);
     };
 
+    // Optional stabilization: exponential smoothing of the path (opt-in via
+    // BrushSettings::stabilize). Only allocate when enabled, and clamp the lag below
+    // 1.0 so a value of exactly 1 can't collapse the whole stroke onto the first
+    // point (alpha == 1 would make every smoothed sample equal points[0]).
+    std::vector<StrokePoint> stabPoints;
+    std::span<const StrokePoint> usePoints = points;
+    if (in.stabilize > 0.0f && !points.empty()) {
+        const float alpha = std::min(in.stabilize, 0.95f);
+        stabPoints.assign(points.begin(), points.end());
+        Vec2 last = points[0].pos;
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            last.x = last.x * alpha + points[i].pos.x * (1.0f - alpha);
+            last.y = last.y * alpha + points[i].pos.y * (1.0f - alpha);
+            stabPoints[i].pos = last;
+        }
+        usePoints = stabPoints;
+    }
+
     // First dab at the start, then one every `step` of arc length.
-    dab(points[0].pos, points[0].pressure);
+    if (!usePoints.empty()) dab(usePoints[0].pos, usePoints[0].pressure);
     float distSinceLast = 0.0f;
-    for (std::size_t i = 1; i < points.size(); ++i) {
-        const StrokePoint& a = points[i - 1];
-        const StrokePoint& b = points[i];
+    for (std::size_t i = 1; i < usePoints.size(); ++i) {
+        const StrokePoint& a = usePoints[i - 1];
+        const StrokePoint& b = usePoints[i];
         const float dx = b.pos.x - a.pos.x;
         const float dy = b.pos.y - a.pos.y;
         const float segLen = std::sqrt(dx * dx + dy * dy);

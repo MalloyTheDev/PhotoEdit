@@ -6,9 +6,13 @@
 #include "IconUtil.hpp"
 #include "LayersPanel.hpp"
 #include "PropertiesPanel.hpp"
+#include "pe/core/Adjustment.hpp"
+#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Color.hpp"
+#include "pe/core/Commands.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
+#include "pe/core/Filter.hpp"
 #include "pe/core/Version.hpp"
 
 #include <QAction>
@@ -70,6 +74,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     bgColor_ = QColor(255, 255, 255);  // white background
 
     canvas_ = new CanvasView(this);
+    connect(canvas_, &CanvasView::colorPicked, this, &MainWindow::onColorPicked);
 
     buildMenuBar();
     buildToolBar();     // left tool strip (+ fg/bg swatches)
@@ -109,9 +114,50 @@ void MainWindow::buildMenuBar() {
     QAction* redoAct = editMenu->addAction(QStringLiteral("&Redo"), this, &MainWindow::redo);
     redoAct->setShortcut(QKeySequence::Redo);
 
-    menuBar()->addMenu(QStringLiteral("&Image"));
+    auto* imageMenu = menuBar()->addMenu(QStringLiteral("&Image"));
+    {
+        auto* adj = imageMenu->addMenu(QStringLiteral("Adjustments"));
+        adj->addAction(QStringLiteral("Invert"), this, [this]() {
+            if (!doc_) return;
+            auto a =
+                std::make_unique<pe::AdjustmentLayer>(std::make_unique<pe::Invert>(), "Invert");
+            doc_->history().push(
+                std::make_unique<pe::AddLayerCommand>(std::move(a), doc_->topLevelCount()));
+        });
+        auto* flt = imageMenu->addMenu(QStringLiteral("Filters"));
+        flt->addAction(QStringLiteral("Brightness +0.2 (demo)"), this, [this]() {
+            if (!doc_) return;
+            // Demo wiring to engine filter/adjust objects (full FilterCommand later)
+            auto a = std::make_unique<pe::AdjustmentLayer>(
+                std::make_unique<pe::BrightnessContrast>(0.2f, 0.0f), "Brightness");
+            doc_->history().push(
+                std::make_unique<pe::AddLayerCommand>(std::move(a), doc_->topLevelCount()));
+        });
+    }
     menuBar()->addMenu(QStringLiteral("&Layer"));
-    menuBar()->addMenu(QStringLiteral("&Select"));
+    auto* selMenu = menuBar()->addMenu(QStringLiteral("&Select"));
+    selMenu->addAction(QStringLiteral("Select All"), this, [this]() {
+        if (doc_) {
+            Selection target;
+            target.selectAll(doc_->canvasBounds());
+            doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+        }
+    });
+    selMenu->addAction(QStringLiteral("Deselect"), this, [this]() {
+        if (doc_) {
+            Selection target;
+            target.selectNone();
+            doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+        }
+    });
+    selMenu->addSeparator();
+    selMenu->addAction(QStringLiteral("Invert Selection"), this, [this]() {
+        if (doc_) {
+            Selection target = doc_->selection();
+            target.invert(doc_->canvasBounds());
+            doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+        }
+    });
     menuBar()->addMenu(QStringLiteral("F&ilter"));
 
     auto* viewMenu = menuBar()->addMenu(QStringLiteral("&View"));
@@ -158,16 +204,16 @@ void MainWindow::buildToolBar() {
     addToolBar(Qt::LeftToolBarArea, tb);
 
     // Grouped like a pro editor: select · crop/sample · paint · type · navigate.
-    // Brush/Eraser/Hand/Zoom are wired; the rest are scaffolded (Inactive) for now.
+    // Brush/Eraser/Hand/Zoom/Marquee/Eyedropper/Move wired; others scaffolded.
     using Tool = CanvasView::Tool;
     const std::vector<std::vector<ToolDef>> groups = {
         {{"move", "Move", Tool::Inactive, "V"},
-         {"marquee", "Rectangular Marquee", Tool::Inactive, "M"},
+         {"marquee", "Rectangular Marquee", Tool::Marquee, "M"},
          {"lasso", "Lasso", Tool::Inactive, "L"},
          {"wand-sparkles", "Object Selection / Magic Wand", Tool::Inactive, "W"}},
         {{"crop", "Crop", Tool::Inactive, "C"},
          {"frame", "Frame", Tool::Inactive, "K"},
-         {"pipette", "Eyedropper", Tool::Inactive, "I"}},
+         {"pipette", "Eyedropper", Tool::Eyedropper, "I"}},
         {{"bandage", "Spot Healing Brush", Tool::Inactive, "J"},
          {"paintbrush", "Brush", Tool::Brush, "B"},
          {"stamp", "Clone Stamp", Tool::Inactive, "S"},
@@ -262,6 +308,14 @@ void MainWindow::buildOptionsBar() {
     flowSpin->setValue(static_cast<int>(canvas_->tool().brush().flow * 100.0f));
     flowSpin->setSuffix(QStringLiteral("%"));
     bl->addWidget(flowSpin);
+
+    // Brush dynamics UI skeleton: stabilization (0-100%)
+    bl->addWidget(new QLabel(QStringLiteral("Stabilize"), brushOptions_));
+    auto* stabSpin = new QSpinBox(brushOptions_);
+    stabSpin->setRange(0, 100);
+    stabSpin->setValue(static_cast<int>(canvas_->tool().brush().stabilize * 100.0f));
+    stabSpin->setSuffix(QStringLiteral("%"));
+    bl->addWidget(stabSpin);
     brushOptAction_ = optionsBar_->addWidget(brushOptions_);
 
     connect(sizeSpin_, &QSpinBox::valueChanged, this,
@@ -270,6 +324,8 @@ void MainWindow::buildOptionsBar() {
             [this](int v) { canvas_->tool().brush().opacity = static_cast<float>(v) / 100.0f; });
     connect(flowSpin, &QSpinBox::valueChanged, this,
             [this](int v) { canvas_->tool().brush().flow = static_cast<float>(v) / 100.0f; });
+    connect(stabSpin, &QSpinBox::valueChanged, this,
+            [this](int v) { canvas_->tool().brush().stabilize = static_cast<float>(v) / 100.0f; });
 
     // Move-tool options — a decorative scaffold matching Photoshop's Move options.
     moveOptions_ = new QWidget(optionsBar_);
@@ -365,6 +421,18 @@ void MainWindow::updateSwatches() {
     if (bgSwatch_ != nullptr) bgSwatch_->setStyleSheet(style(bgColor_));
 }
 
+void MainWindow::onColorPicked(const QColor& c) {
+    if (!c.isValid()) return;
+    fgColor_ = c;
+    // Mirror chooseForegroundColor: the eyedropper sets the actual paint color and
+    // syncs the picker, not just the swatch.
+    canvas_->tool().setColor(pe::Rgbaf{static_cast<float>(c.redF()), static_cast<float>(c.greenF()),
+                                       static_cast<float>(c.blueF()), 1.0f});
+    if (colorPanel_ != nullptr) colorPanel_->setColor(fgColor_);
+    updateSwatches();
+    statusBar()->showMessage(QStringLiteral("Picked %1").arg(c.name()), 2000);
+}
+
 void MainWindow::chooseForegroundColor() {
     const QColor c = QColorDialog::getColor(fgColor_, this, QStringLiteral("Foreground Color"));
     if (!c.isValid()) return;
@@ -398,6 +466,8 @@ void MainWindow::openDocument() {
                              QStringLiteral("Could not open \"%1\".").arg(path));
         return;
     }
+    // A freshly loaded document is at a "saved" state for dirty tracking.
+    doc->history().markSaved();
     setDocument(std::move(doc), path);
     statusBar()->showMessage(QStringLiteral("Opened %1").arg(path), 3000);
 }
@@ -422,6 +492,9 @@ bool MainWindow::writeTo(const QString& path) {
                              QStringLiteral("Could not save \"%1\".").arg(path));
         return false;
     }
+    // Tell history the on-disk state now matches; this clears the dirty flag
+    // so isDirty()/title indicators and undo-to-saved work correctly.
+    doc_->history().markSaved();
     currentPath_ = path;
     refreshTitle();
     statusBar()->showMessage(QStringLiteral("Saved %1").arg(path), 3000);

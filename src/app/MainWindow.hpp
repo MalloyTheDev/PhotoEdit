@@ -63,6 +63,7 @@ private:
     bool writeTo(const QString& path);
     void setDocument(std::unique_ptr<pe::Document> doc, QString path);
     void refreshTitle();
+    void onColorPicked(const QColor& c);
 
     std::unique_ptr<pe::Document> doc_;
     CanvasView* canvas_ = nullptr;

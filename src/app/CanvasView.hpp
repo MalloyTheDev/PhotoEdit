@@ -28,7 +28,7 @@ public:
     // How the canvas interprets a left-button gesture. Brush/Eraser paint, Hand
     // pans, Zoom clicks to zoom; Inactive is a selected-but-unimplemented tool
     // (clicks do nothing) — the scaffold the rest of the toolset wires into.
-    enum class Tool { Brush, Eraser, Hand, Zoom, Inactive };
+    enum class Tool { Brush, Eraser, Hand, Zoom, Marquee, Eyedropper, Inactive };
 
     explicit CanvasView(QWidget* parent = nullptr);
     ~CanvasView() override;
@@ -46,7 +46,8 @@ public:
     [[nodiscard]] Tool activeTool() const noexcept { return toolMode_; }
 
 signals:
-    void zoomChanged(double percent);  // for the status-bar zoom readout
+    void zoomChanged(double percent);   // for the status-bar zoom readout
+    void colorPicked(const QColor& c);  // for eyedropper tool
 
 public:
     // View navigation (also driven by the View menu).
@@ -68,6 +69,7 @@ protected:
     void resizeEvent(QResizeEvent*) override;
     void showEvent(QShowEvent*) override;
     [[nodiscard]] QSize sizeHint() const override;
+    void tabletEvent(QTabletEvent*) override;
 
 private:
     void refreshImage();                   // re-flatten doc_ -> image_
@@ -85,6 +87,11 @@ private:
     bool needsFit_ = true;  // fit-to-window pending until the widget has a valid size
     bool panning_ = false;  // pan in progress (middle-drag, or Hand tool + left-drag)
     QPointF lastPanPos_;    // last pan sample (widget space)
+
+    // Marquee selection drag state (live rect in document pixels)
+    bool draggingMarquee_ = false;
+    QPointF marqueeAnchor_;  // widget space start of drag
+    Rect liveMarquee_{};     // current doc-space rect (normalized)
 };
 
 }  // namespace pe::app

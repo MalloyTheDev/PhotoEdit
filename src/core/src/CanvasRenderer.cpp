@@ -142,7 +142,8 @@ void CanvasRenderer::onDocumentChanged(const Document&, const DocumentChange& ch
             break;
         case DocumentChange::Kind::ActiveLayer:
         case DocumentChange::Kind::DirtyState:
-            break;  // no visual change
+        case DocumentChange::Kind::Selection:
+            break;  // no pixel change (selection only affects the marching-ants overlay)
     }
 }
 

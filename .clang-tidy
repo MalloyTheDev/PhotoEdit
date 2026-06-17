@@ -1,0 +1,24 @@
+# PhotoEdit clang-tidy config — advisory developer aid (not a CI gate).
+# Kept small and non-breaking: high-signal checks only, no WarningsAsErrors, and no
+# readability-identifier-naming (the codebase uses the kCamelCase constant convention,
+# which that check would flag wholesale). See docs/04-coding-standards.md.
+
+---
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-arrays
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: 'src/core/.*'
+
+CheckOptions:
+  - key:   modernize-use-auto.IgnoreMacros
+    value: 'true'
+  - key:   performance-unnecessary-value-param.AllowedTypes
+    value: 'std::function;'
+...

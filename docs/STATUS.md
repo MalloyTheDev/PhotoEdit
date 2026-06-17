@@ -8,14 +8,16 @@ describe the **intended** design; this file records the **current** reality.
 > "Engine core" means the headless `pe_core` library (no Qt); "App" means the Qt6
 > shell. The engine is built bottom-up first, so engine pieces land ahead of their UI.
 
-Last updated against `main` after the **M5–M7 engine completion** (adjustments &
-filters, the full lcms2 color-management pipeline, and the file-format suite) and
-the **start of the application pivot** (a working Open / New / Save + canvas). Test
-suite: **277 headless cases, 0 failed**, built `-Werror`, run under ASan/UBSan,
-clang-format clean, on every merge — **Linux core + Windows MSVC/Qt6** CI, with the
-optional native libraries (lcms2, libpng, libjpeg-turbo, libtiff, libwebp, zlib)
-provisioned and exercised on **both** lanes. The whole engine has had a five-part
-parallel correctness/security audit.
+Last updated after an audit-driven hardening pass on top of the Photoshop-style UI
+(#61): a document-owned selection with an undoable `SetSelectionCommand`, a Marquee
+selection tool with marching ants and Shift/Alt modifiers, a Select menu
+(All/Deselect/Invert), an eyedropper that sets the paint colour, tablet-pressure
+painting, Image-menu adjustment actions, golden compositor tests, and an enforced
+clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gcc and
+clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
+(Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
+RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
+Test suite: **294 headless cases, 0 failed** (252 in the dependency-free build).
 
 ## Milestones
 
@@ -25,7 +27,7 @@ parallel correctness/security audit.
 | **M1** Document & layers | ✅ | 🟡 | Document, layer tree (pixel/group/solid/adjustment), CoW tiled storage, compositor (all separable blend modes), commands/undo. Layers panel UI pending. |
 | **M2** Canvas & view | 🟡 | 🟡 | Engine `ViewTransform` + `CanvasRenderer` (dirty-tile cache); the app now shows the flattened composite on a `CanvasView`. Zoom/scroll viewport and the **RHI / Direct3D 12** GPU path are not started. |
 | **M3** Painting & history | 🟡 | 🟡 | Brush engine (tile-delta paint commands) and the history/undo stack are implemented and tested. The app now has a working **interactive brush/eraser** (mouse → `PaintToolController` → `PaintCommand`, live preview, one undo step per stroke, Edit ▸ Undo/Redo). The rest of the tool framework (move/selection/eyedropper/…) and brush dynamics (pressure/stabilization/presets) are pending. |
-| **M4** Selections & masks | ✅ | 🟡 | Selection (marquee/coverage, boolean ops, feather) and masks (layer/clipping, density, invert) implemented and honoured by the compositor; saved-selection ↔ alpha-channel round-trip done. Selection-tool UI / marching ants pending. |
+| **M4** Selections & masks | ✅ | 🟡 | Engine complete (rect, ops, masks, gating). Basic Marquee tool + marching ants + modifiers (Shift/Alt) wired in UI. Select All/Deselect/Invert menu added. More tools pending. |
 | **M5** Adjustments & filters | ✅ | ⬜ | **Complete in the engine** (see below). Adjustment-layer dialogs / filter-gallery UI pending. |
 | **M6** Color management | ✅ | ⬜ | **Complete in the engine** (see below): lcms2/ICC profiles, working spaces, transforms (4 intents + BPC), a thread-safe transform cache, document assign/convert, display conversion, soft-proofing + gamut warning, and the channels system, on the 8/16/32-float pixel pipeline. Color-settings UI pending. |
 | **M7** File formats | ✅ | 🟡 | **Engine complete** (see below): PNG, JPEG, TIFF, WebP, and the native layered **`.pedoc`** format, all hardened against untrusted input. The app's **Open / New / Save / Save As** are wired through `DocumentIO`. |
@@ -74,8 +76,12 @@ per-layer thumbnails in the Layers panel, styled menus/lists/controls/scrollbars
 a status bar with the active tool + live zoom %. `CanvasView::Tool` gates input per
 the selected tool.
 
-Next app slice: the rest of the tool framework (selection tools with marching ants,
-move, eyedropper) and the adjustments/filters UI (the M5/M6 engine has no UI yet).
+Next app slice: functional Move + selection tools (lasso/wand) routed through proper
+undoable commands, adjustment/filter dialogs (the M5/M6 engine is ready), then the
+GPU display path (M2) — each landed with tests, not as a stub.
+(Recent: Marquee selection + marching ants + Select menu, eyedropper sets the paint
+colour, tablet-pressure painting, Image-menu adjustment actions, golden compositor
+tests, and an enforced clang-format CI gate + real ASan/UBSan CI step.)
 
 ## M5 detail — adjustments, filters, analysis (engine complete)
 
@@ -135,6 +141,9 @@ Enforced by tests + a per-change correctness/security audit:
   tile-delta undo.
 - **DoS caps** on every whole-image / destructive / decode path (megapixel, radius,
   coordinate-magnitude, and file-size bounds) so untrusted input can't exhaust memory.
+- **Threat model.** File bytes are untrusted; see the summary in
+  [systems/20-file-io.md](systems/20-file-io.md#threat-model--untrusted-file-handling-summary).
+  Atomic saves prevent partial-file corruption on crash/disk-full.
 - **Graceful optional dependencies** — every external library is detected at
   configure time; absent libraries disable their feature, never break the build.
 - **Determinism** where it matters (seeded noise).
