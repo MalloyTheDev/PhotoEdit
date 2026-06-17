@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <span>
 #include <utility>
 
 namespace pe {
@@ -37,6 +38,10 @@ public:
     void subtractRect(Rect r);    // remove a rectangle from the selection
     void intersectRect(Rect r);   // keep only the overlap with a rectangle
     void invert(Rect canvas);     // invert selection within the canvas bounds
+    // Replace the selection with the filled interior of a closed polygon (even-odd rule),
+    // for the Lasso tool. Fewer than 3 vertices, or a bounding box past the selection caps,
+    // selects nothing.
+    void selectPolygon(std::span<const Point> vertices);
 
     // --- saved selections <-> alpha channels (systems/19) ---
     // Save the selection's coverage over `bounds` to an 8-bit grayscale mask (the
@@ -70,5 +75,12 @@ private:
     std::map<Key, GrayTile> tiles_;
     bool active_ = false;
 };
+
+// Magic Wand: select the contiguous (4-connected) region of `image` reachable from the
+// seed pixel whose color is within `tolerance` (max per-channel difference, 0..255) of the
+// seed's. Returns an inactive selection for an out-of-bounds seed, an empty image, or an
+// image past the engine's selection size cap. Sample from the composited canvas.
+[[nodiscard]] Selection magicWandSelection(const PixelBuffer& image, int seedX, int seedY,
+                                           int tolerance);
 
 }  // namespace pe

@@ -327,8 +327,8 @@ void MainWindow::buildToolBar() {
     const std::vector<std::vector<ToolDef>> groups = {
         {{"move", "Move", Tool::Move, "V"},
          {"marquee", "Rectangular Marquee", Tool::Marquee, "M"},
-         {"lasso", "Lasso", Tool::Inactive, "L"},
-         {"wand-sparkles", "Object Selection / Magic Wand", Tool::Inactive, "W"}},
+         {"lasso", "Lasso", Tool::Lasso, "L"},
+         {"wand-sparkles", "Magic Wand", Tool::Wand, "W"}},
         {{"crop", "Crop", Tool::Inactive, "C"},
          {"frame", "Frame", Tool::Inactive, "K"},
          {"pipette", "Eyedropper", Tool::Eyedropper, "I"}},

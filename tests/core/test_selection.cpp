@@ -207,3 +207,40 @@ PE_TEST(selection_tight_bounds_is_pixel_accurate) {
     s.selectNone();
     PE_CHECK(s.tightBounds().isEmpty());
 }
+
+PE_TEST(selection_polygon_fills_interior) {
+    Selection s;
+    const std::vector<Point> degenerate = {{0, 0}, {5, 5}};
+    s.selectPolygon(degenerate);
+    PE_CHECK(!s.active());  // fewer than 3 vertices selects nothing
+
+    const std::vector<Point> square = {{2, 2}, {12, 2}, {12, 12}, {2, 12}};
+    s.selectPolygon(square);
+    PE_CHECK(s.active());
+    PE_CHECK_EQ(s.value(7, 7), static_cast<uint8_t>(255));  // interior filled
+    PE_CHECK_EQ(s.value(0, 0), static_cast<uint8_t>(0));    // outside the polygon
+    PE_CHECK_EQ(s.value(20, 20), static_cast<uint8_t>(0));  // far outside
+
+    // Extreme vertex coordinates are rejected before the bbox extent is computed, so the
+    // maxX-minX subtraction can never overflow int.
+    const std::vector<Point> huge = {{-(1 << 27), 0}, {1 << 27, 0}, {0, 10}};
+    s.selectPolygon(huge);
+    PE_CHECK(!s.active());
+}
+
+PE_TEST(selection_magic_wand_contiguous_color) {
+    PixelBuffer img(10, 10);
+    for (int y = 0; y < 10; ++y) {
+        for (int x = 0; x < 10; ++x) {
+            img.set(x, y, x < 5 ? Rgba8{200, 30, 30, 255} : Rgba8{30, 30, 200, 255});
+        }
+    }
+    Selection s = magicWandSelection(img, 1, 1, 10);  // seed in the red region, tolerance 10
+    PE_CHECK(s.active());
+    PE_CHECK_EQ(s.value(1, 1), static_cast<uint8_t>(255));  // seed selected
+    PE_CHECK_EQ(s.value(2, 8), static_cast<uint8_t>(255));  // same contiguous red region
+    PE_CHECK_EQ(s.value(8, 8), static_cast<uint8_t>(0));    // blue region: outside tolerance
+
+    PE_CHECK(!magicWandSelection(img, -1, 0, 10).active());  // out-of-bounds seed -> inactive
+    PE_CHECK(!magicWandSelection(img, 0, 99, 10).active());
+}
