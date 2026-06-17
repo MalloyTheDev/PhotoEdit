@@ -2,6 +2,7 @@
 
 #include "pe/core/Brush.hpp"
 #include "pe/core/Color.hpp"
+#include "pe/core/Geometry.hpp"
 #include "pe/core/Layer.hpp"
 
 #include <memory>
@@ -51,6 +52,12 @@ public:
 
     [[nodiscard]] bool isStroking() const noexcept { return stroking_; }
 
+    // Document-space bounds touched so far by the in-progress stroke's preview
+    // (the union of every previewed dab's dirty region; tile-granular). A view can
+    // recomposite just this region per sample instead of the whole canvas. Reset by
+    // begin(); empty when no stroke is active or nothing has been painted yet.
+    [[nodiscard]] Rect strokeDirtyBounds() const noexcept { return strokeDirty_; }
+
     // --- interactive stroke lifecycle (document-space, sub-pixel) ---
     // Begin a stroke on the document's active layer, gated by `selection` if it is
     // non-null and active. Returns false (and starts nothing) when already stroking
@@ -80,6 +87,7 @@ private:
     const Selection* selection_ = nullptr;
     std::vector<StrokePoint> points_;
     std::unique_ptr<PaintCommand> preview_;  // applied-to-doc provisional stroke
+    Rect strokeDirty_{};  // cumulative dirty bounds of the live preview (see accessor)
 };
 
 }  // namespace pe

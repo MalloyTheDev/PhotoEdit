@@ -92,8 +92,12 @@ void LayersPanel::onDocumentChanged(const pe::Document&, const pe::DocumentChang
     switch (change.kind) {
         case pe::DocumentChange::Kind::LayerStructure:
         case pe::DocumentChange::Kind::LayerProps:
-        case pe::DocumentChange::Kind::Pixels:  // refresh thumbnails after an edit
             rebuild();
+            break;
+        case pe::DocumentChange::Kind::Pixels:
+            // Paint hot path: only the edited layer's thumbnail changed. Refresh just
+            // that row's icon (one composite) instead of recompositing every layer.
+            updateLayerThumbnail(change.layer);
             break;
         case pe::DocumentChange::Kind::ActiveLayer:
             updating_ = true;
@@ -146,6 +150,28 @@ QIcon LayersPanel::layerThumbnail(std::size_t engineIndex) const {
     p.drawRect(0, 0, kThumb - 1, kThumb - 1);
     p.end();
     return QIcon(pm);
+}
+
+void LayersPanel::updateLayerThumbnail(pe::LayerId id) {
+    if (doc_ == nullptr || id == pe::kNoLayer) {
+        rebuild();
+        return;
+    }
+    const std::size_t idx = doc_->topLevelIndexOf(id);
+    if (idx == pe::GroupLayer::npos) {
+        rebuild();  // not a top-level row (unknown id, or nested in a group)
+        return;
+    }
+    for (int row = 0; row < list_->count(); ++row) {
+        if (idOf(list_->item(row)) == id) {
+            // Guard: setIcon emits itemChanged, which must not be read back as an edit.
+            updating_ = true;
+            list_->item(row)->setIcon(layerThumbnail(idx));
+            updating_ = false;
+            return;
+        }
+    }
+    rebuild();  // row not found: the list is out of sync, rebuild it
 }
 
 void LayersPanel::rebuild() {

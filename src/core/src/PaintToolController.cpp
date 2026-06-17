@@ -31,7 +31,12 @@ void PaintToolController::rebuildPreview(Document& doc) {
     // Precondition: the layer's tiles are at their pre-stroke (S0) state, so the
     // command captured here records before == S0 for every touched tile.
     preview_ = buildStroke(doc);
-    if (preview_) preview_->execute(doc);
+    if (preview_) {
+        const DocumentChange ch = preview_->execute(doc);
+        // Accumulate the touched region so a view can repaint just the stroke's
+        // footprint instead of recompositing the whole canvas each sample.
+        strokeDirty_ = strokeDirty_.united(ch.dirtyRegion);
+    }
 }
 
 bool PaintToolController::begin(Document& doc, StrokePoint p, const Selection* selection) {
@@ -44,6 +49,7 @@ bool PaintToolController::begin(Document& doc, StrokePoint p, const Selection* s
     selection_ = selection;
     points_.clear();
     points_.push_back(p);
+    strokeDirty_ = Rect{};  // fresh stroke: start the dirty-bounds accumulator empty
     rebuildPreview(doc);
     return true;
 }

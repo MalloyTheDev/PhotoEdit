@@ -2,6 +2,7 @@
 
 #include "Theme.hpp"
 #include "pe/core/Commands.hpp"
+#include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/Selection.hpp"
@@ -19,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace pe::app {
 
@@ -100,6 +102,36 @@ void CanvasView::refreshImage() {
     const QImage view(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),
                       buf.width() * 4, QImage::Format_RGBA8888);
     image_ = view.copy();
+}
+
+void CanvasView::refreshRegion(const pe::Rect& region) {
+    // No live full-canvas image to patch (no document, or a canvas too large to
+    // flatten so refreshImage() left image_ null): re-run the full path, which
+    // handles those cases coherently.
+    if (doc_ == nullptr || image_.isNull()) {
+        refreshImage();
+        return;
+    }
+    // Clamp to the canvas: the stroke's dirty bounds are tile-granular and may
+    // overhang the document edge.
+    const pe::Rect canvas{0, 0, image_.width(), image_.height()};
+    const pe::Rect r = region.intersected(canvas);
+    if (r.isEmpty()) return;  // nothing on-canvas changed
+
+    const pe::PixelBuffer buf = pe::compositeToImage(doc_->topLevelLayers(), r);
+    if (buf.isEmpty() || buf.width() != r.width || buf.height() != r.height) {
+        refreshImage();  // region exceeded the composite budget, or a size mismatch
+        return;
+    }
+    // Patch image_ in place, row by row. Both image_ and buf are Format_RGBA8888
+    // straight-alpha (Rgba8 == R,G,B,A bytes), so a raw per-row copy is exact.
+    constexpr int kBpp = 4;
+    const auto* src = reinterpret_cast<const uchar*>(buf.data());
+    for (int y = 0; y < r.height; ++y) {
+        const uchar* srcRow = src + static_cast<std::size_t>(y) * buf.width() * kBpp;
+        uchar* dstRow = image_.scanLine(r.y + y) + static_cast<std::ptrdiff_t>(r.x) * kBpp;
+        std::memcpy(dstRow, srcRow, static_cast<std::size_t>(r.width) * kBpp);
+    }
 }
 
 QSize CanvasView::sizeHint() const {
@@ -253,14 +285,14 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
         case QEvent::TabletPress:
             if (tool_.isStroking()) tool_.cancel(*doc_);
             if (tool_.begin(*doc_, sp, &doc_->selection())) {
-                refreshImage();
+                refreshRegion(tool_.strokeDirtyBounds());
                 update();
             }
             break;
         case QEvent::TabletMove:
             if (tool_.isStroking()) {
                 tool_.extend(*doc_, sp);
-                refreshImage();
+                refreshRegion(tool_.strokeDirtyBounds());
                 update();
             }
             break;
@@ -324,7 +356,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
     // refresh explicitly. begin() fails when there is no paintable active layer.
     // Pass the document selection so edits are gated.
     if (tool_.begin(*doc_, sampleAt(e->position()), &doc_->selection())) {
-        refreshImage();
+        refreshRegion(tool_.strokeDirtyBounds());  // only the first dab's footprint
         update();
     }
 }
@@ -354,7 +386,7 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         return;
     }
     tool_.extend(*doc_, sampleAt(e->position()));
-    refreshImage();  // live preview repaint (bypasses the observer)
+    refreshRegion(tool_.strokeDirtyBounds());  // live preview, stroke footprint only
     update();
 }
 

@@ -48,6 +48,10 @@ private:
     [[nodiscard]] pe::LayerId selectedLayer() const;
     // A small preview of one top-level layer (composited alone), for the row icon.
     [[nodiscard]] QIcon layerThumbnail(std::size_t engineIndex) const;
+    // Refresh just one layer's row icon after a pixel edit (the paint hot path),
+    // instead of rebuilding the whole list. Falls back to rebuild() if the layer is
+    // not a top-level row (e.g. unknown id, or nested in a group).
+    void updateLayerThumbnail(pe::LayerId id);
 
     void onRowChanged();
     void onItemChanged(QListWidgetItem* item);  // visibility checkbox
