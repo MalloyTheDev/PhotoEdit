@@ -245,6 +245,12 @@ void CanvasView::paintEvent(QPaintEvent*) {
     const pe::Rect canvas{0, 0, cs.width, cs.height};
     const pe::Rect vis = view_.visibleDocRect(pe::Size{width(), height()}).intersected(canvas);
     if (!vis.isEmpty()) {
+        // Keep the cache at least as large as the visible tile span (plus a one-viewport pan
+        // margin) so no visible tile evicts another mid-frame — otherwise a zoomed-out view
+        // spanning more than the default budget would recomposite every tile every paint.
+        const std::size_t visTiles = static_cast<std::size_t>(pe::tilesForRect(vis).count());
+        renderer_->setCacheBudgetTiles(
+            std::max<std::size_t>(pe::kDefaultDisplayCacheTiles, visTiles * 2 + 16));
         const pe::PixelBuffer buf = renderer_->renderRegion(vis);  // alive through drawImage
         if (!buf.isEmpty()) {
             const QImage img(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),

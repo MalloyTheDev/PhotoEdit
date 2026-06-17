@@ -19,15 +19,17 @@ class CanvasRenderer;  // tile-cache renderer; defined in pe/core/CanvasRenderer
 
 namespace pe::app {
 
-// The central canvas: shows a document's flattened composite through a zoom/pan
-// view transform and routes mouse input to the brush tool. It observes the
-// document, so committed edits (paint commits, undo/redo, file loads) refresh
-// automatically; the live brush preview repaints explicitly as it is drawn.
+// The central canvas: composites the visible document region through the engine's
+// CanvasRenderer tile cache and presents it through a zoom/pan view transform, routing
+// mouse input to the tools. It observes the document, so committed edits (paint commits,
+// undo/redo, file loads) repaint automatically; live previews repaint explicitly and
+// invalidate the cache as they are drawn.
 //
-// View navigation: mouse wheel zooms about the cursor, middle-drag pans, and the
-// document fits the viewport when first shown. The presentation transform is the
-// engine's headless pe::ViewTransform (docs/systems/02-canvas-rendering.md); the
-// document is never resampled. GPU display and dirty-region repaint arrive later.
+// Painting only the visible tiles means even a canvas larger than the whole-image composite
+// budget renders, and pan/zoom recomposites just the newly-exposed tiles. View navigation:
+// mouse wheel zooms about the cursor, middle-drag pans, the document fits on first show. The
+// presentation transform is the headless pe::ViewTransform (docs/systems/02-canvas-rendering);
+// the document is never resampled. GPU display arrives later.
 class CanvasView : public QWidget, public pe::DocumentObserver {
     Q_OBJECT
 
