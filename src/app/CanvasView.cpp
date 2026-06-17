@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 
 namespace pe::app {
@@ -123,8 +124,9 @@ void CanvasView::refreshRegion(const pe::Rect& region) {
         refreshImage();  // region exceeded the composite budget, or a size mismatch
         return;
     }
-    // Patch image_ in place, row by row. Both image_ and buf are Format_RGBA8888
-    // straight-alpha (Rgba8 == R,G,B,A bytes), so a raw per-row copy is exact.
+    // Patch image_ in place, row by row. image_ is Format_RGBA8888 and buf is a
+    // PixelBuffer of Rgba8 (R,G,B,A bytes), the same straight-alpha byte layout, so a
+    // raw per-row copy is exact.
     constexpr int kBpp = 4;
     const auto* src = reinterpret_cast<const uchar*>(buf.data());
     for (int y = 0; y < r.height; ++y) {
