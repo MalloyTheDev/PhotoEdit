@@ -13,6 +13,10 @@
 #include <QPointF>
 #include <QWidget>
 
+namespace pe {
+class CanvasRenderer;  // tile-cache renderer; defined in pe/core/CanvasRenderer.hpp
+}
+
 namespace pe::app {
 
 // The central canvas: shows a document's flattened composite through a zoom/pan
@@ -75,9 +79,10 @@ public:
     // DocumentObserver: re-flatten and repaint after any committed change.
     void onDocumentChanged(const pe::Document&, const pe::DocumentChange&) override;
 
-    // Re-flatten the whole document and repaint now. For external edits that mutate the
-    // document outside the observer/command flow — e.g. an effect dialog's live preview,
-    // which applies a provisional command directly so it can be reverted on Cancel.
+    // Drop the renderer's cached tiles and repaint. For external edits that mutate the
+    // document outside the observer/command flow — e.g. an effect dialog's or the move
+    // tool's live preview, which applies a provisional command directly (no notification),
+    // so the tile cache would otherwise show stale pixels until the next committed change.
     void reloadImage();
 
 protected:
@@ -92,17 +97,15 @@ protected:
     void tabletEvent(QTabletEvent*) override;
 
 private:
-    void refreshImage();  // re-flatten the whole doc_ -> image_
-    // Re-flatten only `region` (document space) into image_ in place — the live-stroke
-    // hot path, so a brush dab does not recomposite the entire canvas. Clamps to the
-    // canvas and falls back to a full refresh if the region cannot be composited.
-    void refreshRegion(const pe::Rect& region);
     void zoomAroundCenter(double factor);  // zoom about the viewport center
     void maybeInitialFit();                // fit once the widget has a real size
     [[nodiscard]] pe::StrokePoint sampleAt(QPointF widgetPos) const;  // widget -> doc space
+    [[nodiscard]] pe::Size canvasSize() const;  // doc_'s canvas size, or {0,0} if no document
 
     pe::Document* doc_ = nullptr;  // not owned; observed while non-null
-    QImage image_;                 // a private copy of the current composite (RGBA8888)
+    // Tile-cache renderer bound to doc_: composites only visible/dirty tiles, so a huge
+    // canvas no longer overflows the whole-image composite budget and pan/zoom stays cheap.
+    std::unique_ptr<pe::CanvasRenderer> renderer_;
     pe::PaintToolController tool_;
     pe::ViewTransform view_;  // document <-> widget (device px) mapping
     QBrush checker_;          // transparency checkerboard (device-space tile)
