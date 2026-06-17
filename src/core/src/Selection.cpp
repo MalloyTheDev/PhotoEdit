@@ -1,8 +1,11 @@
 #include "pe/core/Selection.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <limits>
+#include <utility>
+#include <vector>
 
 namespace pe {
 
@@ -205,6 +208,50 @@ void Selection::invert(Rect canvas) {
     dropEmptyTiles();
 }
 
+void Selection::selectPolygon(std::span<const Point> verts) {
+    tiles_.clear();
+    active_ = false;
+    if (verts.size() < 3) return;  // a polygon needs at least three vertices
+
+    int minX = verts[0].x;
+    int maxX = verts[0].x;
+    int minY = verts[0].y;
+    int maxY = verts[0].y;
+    for (const Point& p : verts) {
+        minX = std::min(minX, p.x);
+        maxX = std::max(maxX, p.x);
+        minY = std::min(minY, p.y);
+        maxY = std::max(maxY, p.y);
+    }
+    const Rect bbox{minX, minY, maxX - minX + 1, maxY - minY + 1};
+    if (rejectFill(bbox)) return;  // empty / out-of-range / over the tile or pixel cap
+
+    active_ = true;
+    const std::size_t n = verts.size();
+    std::vector<float> xs;
+    for (int y = minY; y <= maxY; ++y) {
+        const float yc = static_cast<float>(y) + 0.5f;  // sample at the pixel-row center
+        xs.clear();
+        for (std::size_t i = 0; i < n; ++i) {
+            const Point& a = verts[i];
+            const Point& b = verts[(i + 1) % n];  // closing edge wraps to vertex 0
+            const float ay = static_cast<float>(a.y);
+            const float by = static_cast<float>(b.y);
+            if ((ay <= yc && by > yc) || (by <= yc && ay > yc)) {  // edge crosses this row
+                const float t = (yc - ay) / (by - ay);
+                xs.push_back(static_cast<float>(a.x) + t * static_cast<float>(b.x - a.x));
+            }
+        }
+        std::sort(xs.begin(), xs.end());
+        for (std::size_t k = 0; k + 1 < xs.size(); k += 2) {  // even-odd: fill between pairs
+            const int xStart = static_cast<int>(std::ceil(xs[k] - 0.5f));
+            const int xEnd = static_cast<int>(std::floor(xs[k + 1] - 0.5f));
+            for (int x = xStart; x <= xEnd; ++x) setValue(x, y, 255);
+        }
+    }
+    dropEmptyTiles();
+}
+
 Rect Selection::selectedBounds() const noexcept {
     // tiles_ holds only non-all-zero tiles (dropEmptyTiles keeps it tight), so the
     // union of their bounds is a correct tile-granular selected bounds.
@@ -243,6 +290,50 @@ Rect Selection::tightBounds() const noexcept {
     }
     if (!any) return Rect{};
     return Rect{minX, minY, maxX - minX + 1, maxY - minY + 1};
+}
+
+Selection magicWandSelection(const PixelBuffer& image, int seedX, int seedY, int tolerance) {
+    Selection sel;
+    const int w = image.width();
+    const int h = image.height();
+    if (image.isEmpty() || seedX < 0 || seedX >= w || seedY < 0 || seedY >= h) return sel;
+    // Bound the flood's working memory (visited + mask) the same way fills are bounded.
+    if (static_cast<int64_t>(w) * static_cast<int64_t>(h) > kMaxSelectionPixels) return sel;
+
+    const int tol = std::clamp(tolerance, 0, 255);
+    const Rgba8 seed = image.at(seedX, seedY);
+    auto chDiff = [](uint8_t a, uint8_t b) { return a > b ? int(a) - int(b) : int(b) - int(a); };
+    auto within = [&](Rgba8 c) {
+        return chDiff(c.r, seed.r) <= tol && chDiff(c.g, seed.g) <= tol &&
+               chDiff(c.b, seed.b) <= tol && chDiff(c.a, seed.a) <= tol;
+    };
+
+    std::vector<uint8_t> visited(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), 0);
+    std::vector<std::pair<int, int>> stack;
+    PixelBuffer mask(w, h);  // zero-initialized: red channel 0 == not selected
+    const auto seedIdx = static_cast<std::size_t>(seedY) * static_cast<std::size_t>(w) + seedX;
+    visited[seedIdx] = 1;
+    stack.emplace_back(seedX, seedY);
+    bool any = false;
+    while (!stack.empty()) {
+        const auto [x, y] = stack.back();
+        stack.pop_back();
+        if (!within(image.at(x, y))) continue;  // pushed but out of tolerance: skip
+        mask.set(x, y, Rgba8{255, 255, 255, 255});
+        any = true;
+        const int nbrs[4][2] = {{x - 1, y}, {x + 1, y}, {x, y - 1}, {x, y + 1}};
+        for (const auto& nb : nbrs) {
+            const int nx = nb[0];
+            const int ny = nb[1];
+            if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+            const auto i = static_cast<std::size_t>(ny) * static_cast<std::size_t>(w) + nx;
+            if (visited[i]) continue;
+            visited[i] = 1;
+            stack.emplace_back(nx, ny);
+        }
+    }
+    if (any) sel.loadMask(mask, 0, 0);  // 4-connected region as the new selection
+    return sel;
 }
 
 }  // namespace pe

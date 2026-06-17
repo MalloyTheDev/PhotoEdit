@@ -5,6 +5,7 @@
 #include "pe/core/ViewTransform.hpp"
 
 #include <memory>
+#include <vector>
 
 #include <QBrush>
 #include <QImage>
@@ -30,7 +31,7 @@ public:
     // How the canvas interprets a left-button gesture. Brush/Eraser paint, Hand
     // pans, Zoom clicks to zoom; Inactive is a selected-but-unimplemented tool
     // (clicks do nothing) — the scaffold the rest of the toolset wires into.
-    enum class Tool { Brush, Eraser, Hand, Zoom, Move, Marquee, Eyedropper, Inactive };
+    enum class Tool { Brush, Eraser, Hand, Zoom, Move, Marquee, Lasso, Wand, Eyedropper, Inactive };
 
     explicit CanvasView(QWidget* parent = nullptr);
     ~CanvasView() override;
@@ -103,6 +104,11 @@ private:
     bool draggingMarquee_ = false;
     QPointF marqueeAnchor_;  // widget space start of drag
     Rect liveMarquee_{};     // current doc-space rect (normalized)
+
+    // Lasso freehand selection: the in-progress polygon in document pixels (rasterized into
+    // a polygon selection on release).
+    bool draggingLasso_ = false;
+    std::vector<pe::Point> lassoPts_;
 
     // Pixel-tight bounds of the committed selection, for the marching-ants outline. Cached
     // on selection change (and on setDocument) so paintEvent never scans the mask per frame.

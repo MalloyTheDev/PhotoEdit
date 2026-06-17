@@ -222,12 +222,17 @@ void CanvasView::setTool(Tool t) {
         cancelMovePreview();
         reloadImage();
     }
+    if (draggingLasso_) {  // switching away mid-lasso discards the in-progress path
+        draggingLasso_ = false;
+        lassoPts_.clear();
+        update();
+    }
     setCursor(t == Tool::Hand       ? Qt::OpenHandCursor
               : t == Tool::Zoom     ? Qt::PointingHandCursor
               : t == Tool::Move     ? Qt::SizeAllCursor
-              : t == Tool::Marquee  ? Qt::CrossCursor
+              : t == Tool::Wand     ? Qt::PointingHandCursor
               : t == Tool::Inactive ? Qt::ArrowCursor
-                                    : Qt::CrossCursor);
+                                    : Qt::CrossCursor);  // Brush/Eraser/Marquee/Lasso
 }
 
 void CanvasView::maybeInitialFit() {
@@ -291,10 +296,19 @@ void CanvasView::paintEvent(QPaintEvent*) {
             }
         };
 
-        // Live drag rect (while marquee tool dragging) takes precedence visually; otherwise
-        // the committed selection's pixel-tight outline (cached on the last selection change,
-        // so the per-pixel scan does not run every repaint).
-        if (draggingMarquee_ && liveMarquee_.width > 0 && liveMarquee_.height > 0) {
+        // In-progress freehand lasso path, then live marquee rect, then the committed
+        // selection's pixel-tight outline (cached on the last selection change, so the
+        // per-pixel scan does not run every repaint).
+        if (draggingLasso_ && lassoPts_.size() >= 2) {
+            std::vector<QPointF> poly;
+            poly.reserve(lassoPts_.size() + 1);
+            for (const pe::Point& p : lassoPts_) poly.emplace_back(p.x, p.y);
+            poly.emplace_back(lassoPts_.front().x, lassoPts_.front().y);  // close the loop
+            for (const QPen* pen : pens) {
+                painter.setPen(*pen);
+                painter.drawPolyline(poly.data(), static_cast<int>(poly.size()));
+            }
+        } else if (draggingMarquee_ && liveMarquee_.width > 0 && liveMarquee_.height > 0) {
             drawAntRect(liveMarquee_);
         } else {
             drawAntRect(selectionAnts_);
@@ -387,6 +401,27 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         moveLayer_ = doc_->activeLayer();  // move the layer that is active when the drag begins
         return;
     }
+    if (toolMode_ == Tool::Lasso) {
+        draggingLasso_ = true;
+        lassoPts_.clear();
+        const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        lassoPts_.push_back(
+            pe::Point{static_cast<int>(std::lround(d.x)), static_cast<int>(std::lround(d.y))});
+        update();
+        return;
+    }
+    if (toolMode_ == Tool::Wand) {
+        const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        const pe::PixelBuffer buf = doc_->compositeImage();  // sample the composited canvas
+        if (!buf.isEmpty()) {
+            constexpr int kWandTolerance = 32;  // default per-channel tolerance (v1)
+            pe::Selection sel =
+                pe::magicWandSelection(buf, static_cast<int>(std::lround(d.x)),
+                                       static_cast<int>(std::lround(d.y)), kWandTolerance);
+            if (sel.active()) doc_->history().push(std::make_unique<SetSelectionCommand>(sel));
+        }
+        return;
+    }
     if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser) return;  // Inactive: no paint
     // Recover if a prior stroke never received its release (e.g. mouse capture was
     // stolen by a modal/Alt-Tab): drop the stale preview before starting fresh.
@@ -417,6 +452,13 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         const int x1 = static_cast<int>(std::ceil(std::max(a.x, b.x)));
         const int y1 = static_cast<int>(std::ceil(std::max(a.y, b.y)));
         liveMarquee_ = Rect{x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0)};
+        update();
+        return;
+    }
+    if (draggingLasso_ && doc_ != nullptr) {
+        const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        const pe::Point p{static_cast<int>(std::lround(d.x)), static_cast<int>(std::lround(d.y))};
+        if (lassoPts_.empty() || !(lassoPts_.back() == p)) lassoPts_.push_back(p);  // dedup
         update();
         return;
     }
@@ -470,6 +512,19 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
             // command will execute, snapshot old, notify
         }
         liveMarquee_ = Rect{};
+        update();
+        return;
+    }
+    if (draggingLasso_ && doc_ != nullptr) {
+        draggingLasso_ = false;
+        if (lassoPts_.size() >= 3) {
+            Selection target;
+            target.selectPolygon(lassoPts_);
+            if (target.active()) {
+                doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+            }
+        }
+        lassoPts_.clear();
         update();
         return;
     }
