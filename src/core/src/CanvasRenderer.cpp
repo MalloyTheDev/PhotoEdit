@@ -1,9 +1,11 @@
 #include "pe/core/CanvasRenderer.hpp"
 
 #include "pe/core/Compositor.hpp"
+#include "pe/core/Performance.hpp"
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 
 namespace pe {
 
@@ -24,6 +26,9 @@ CanvasRenderer::~CanvasRenderer() {
 
 void CanvasRenderer::setCacheBudgetTiles(std::size_t n) noexcept {
     budgetTiles_ = n;
+    // Also respect global RAM budget from Performance layer skeleton
+    auto& perf = Performance::instance();
+    perf.setRAMBudgetBytes(n * sizeof(Rgba8) * kTilePixels);  // rough
     evictToBudget();
 }
 
@@ -54,8 +59,18 @@ void CanvasRenderer::invalidateAll() noexcept {
 
 void CanvasRenderer::evictToBudget() noexcept {
     if (budgetTiles_ == 0) return;  // unbounded
-    while (lru_.size() > budgetTiles_) {
+    auto& perf = Performance::instance();
+    auto& scratch = perf.scratch();
+    while (lru_.size() > budgetTiles_ || perf.overBudget(lru_.size() * sizeof(Rgba8) * kTilePixels)) {
         const Key key = lru_.back().first;
+        auto& entry = lru_.back().second;
+        TileCoord tc{key.first, key.second};
+        if (dirty_.count(key)) {
+            // Spill dirty tile to scratch (performance skeleton)
+            std::vector<std::byte> raw(sizeof(Rgba8) * kTilePixels);
+            std::memcpy(raw.data(), entry.px.data(), raw.size());
+            scratch.spill(tc, raw);
+        }
         index_.erase(key);
         dirty_.erase(key);
         lru_.pop_back();
@@ -71,6 +86,16 @@ const CanvasRenderer::CachedTile& CanvasRenderer::ensureTile(TileCoord c) {
     if (cached && !needComposite) {
         lru_.splice(lru_.begin(), lru_, idxIt->second);  // touch (MRU)
         return idxIt->second->second;
+    }
+
+    // Performance skeleton: try fault from scratch on miss
+    auto& perf = Performance::instance();
+    auto& scratchDisk = perf.scratch();
+    std::vector<std::byte> faulted;
+    if (scratchDisk.fault(c, faulted) && faulted.size() == sizeof(Rgba8) * kTilePixels) {
+        CachedTile tile;
+        std::memcpy(tile.px.data(), faulted.data(), faulted.size());
+        // ... (simplified, skip full for skeleton)
     }
 
     std::fill(scratch_.begin(), scratch_.end(), Rgbaf{});

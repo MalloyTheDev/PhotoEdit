@@ -7,6 +7,7 @@
 #include "pe/core/Layer.hpp"
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/PixelFormat.hpp"
+#include "pe/core/Selection.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -69,6 +70,16 @@ public:
     [[nodiscard]] LayerId activeLayer() const noexcept { return activeLayer_; }
     [[nodiscard]] bool isDirty() const noexcept { return dirty_; }
 
+    // Selection (document-wide edit mask). Owned by the document. Inactive by
+    // default (whole canvas editable). Tools mutate via the editable accessor
+    // (session state, emits Selection change; undoable SelectCommands later).
+    [[nodiscard]] const Selection& selection() const noexcept { return selection_; }
+    [[nodiscard]] Selection& editableSelection() noexcept { return selection_; }
+
+    // Call after directly mutating the selection via editableSelection() (e.g. from
+    // a marquee tool gesture) so observers are notified for marching ants etc.
+    void touchSelection();
+
     // --- compositing convenience (headless preview / tests) ---
     [[nodiscard]] PixelBuffer compositeImage() const;
 
@@ -112,6 +123,7 @@ private:
     GroupLayer root_{"<root>"};
     LayerId activeLayer_ = kNoLayer;
     bool dirty_ = false;
+    Selection selection_;
     History history_;
     std::vector<DocumentObserver*> observers_;
 };

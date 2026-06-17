@@ -168,12 +168,26 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
         stampDab(cov, p, radius, hardness, flow);
     };
 
+    // Stabilization skeleton: exponential smoothing for brush dynamics UI.
+    std::vector<StrokePoint> stabPoints = std::vector<StrokePoint>(points.begin(), points.end());
+    if (in.stabilize > 0.0f && !points.empty()) {
+        Vec2 last = points[0].pos;
+        float alpha = in.stabilize; // 0=none, 1=full lag
+        for (size_t i = 0; i < points.size(); ++i) {
+            last.x = last.x * alpha + points[i].pos.x * (1-alpha);
+            last.y = last.y * alpha + points[i].pos.y * (1-alpha);
+            stabPoints[i].pos = last;
+            stabPoints[i].pressure = points[i].pressure;
+        }
+    }
+    const auto& usePoints = in.stabilize > 0.f ? stabPoints : points;
+
     // First dab at the start, then one every `step` of arc length.
-    dab(points[0].pos, points[0].pressure);
+    if (!usePoints.empty()) dab(usePoints[0].pos, usePoints[0].pressure);
     float distSinceLast = 0.0f;
-    for (std::size_t i = 1; i < points.size(); ++i) {
-        const StrokePoint& a = points[i - 1];
-        const StrokePoint& b = points[i];
+    for (std::size_t i = 1; i < usePoints.size(); ++i) {
+        const StrokePoint& a = usePoints[i - 1];
+        const StrokePoint& b = usePoints[i];
         const float dx = b.pos.x - a.pos.x;
         const float dy = b.pos.y - a.pos.y;
         const float segLen = std::sqrt(dx * dx + dy * dy);

@@ -210,4 +210,27 @@ DocumentChange AssignProfileCommand::undo(Document& doc) {
     return DocumentChange{DocumentChange::Kind::Profile, Rect{}, kNoLayer};
 }
 
+// --- Selection commands (task 12) ---
+
+SetSelectionCommand::SetSelectionCommand(const Selection& sel) {
+    newMask_ = sel.toMask(Rect{0,0,4096,4096}); // large enough sentinel for snapshot
+}
+
+DocumentChange SetSelectionCommand::execute(Document& doc) {
+    if (!captured_) {
+        oldMask_ = doc.selection().toMask(Rect{0,0,4096,4096});
+        captured_ = true;
+    }
+    // load new
+    doc.editableSelection().loadMask(newMask_, 0, 0);
+    doc.touchSelection();
+    return DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer};
+}
+
+DocumentChange SetSelectionCommand::undo(Document& doc) {
+    doc.editableSelection().loadMask(oldMask_, 0, 0);
+    doc.touchSelection();
+    return DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer};
+}
+
 }  // namespace pe

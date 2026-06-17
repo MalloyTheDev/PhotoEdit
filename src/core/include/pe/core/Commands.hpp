@@ -4,6 +4,8 @@
 #include "pe/core/ColorProfile.hpp"
 #include "pe/core/Command.hpp"
 #include "pe/core/Layer.hpp"
+#include "pe/core/PixelBuffer.hpp"
+#include "pe/core/Selection.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -145,6 +147,20 @@ private:
     ColorProfileRef newProfile_;
     ColorProfileRef oldProfile_;
     bool captured_ = false;  // oldProfile_ is filled on first execute
+};
+
+// Undoable selection change (for marquee etc). Snapshots via mask for simplicity.
+class SetSelectionCommand final : public Command {
+public:
+    explicit SetSelectionCommand(const Selection& sel);
+    [[nodiscard]] std::string name() const override { return "Change Selection"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    PixelBuffer oldMask_;
+    PixelBuffer newMask_;
+    bool captured_ = false;
 };
 
 }  // namespace pe

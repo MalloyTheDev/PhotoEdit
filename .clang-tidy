@@ -1,0 +1,35 @@
+# PhotoEdit clang-tidy config (skeleton).
+# See docs/04-coding-standards.md and docs/05-build-and-tooling.md.
+# Start advisory (many checks listed but WarningsAsErrors limited to high-confidence).
+# Expand over time; keep in sync with CI.
+
+---
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  modernize-*,
+  readability-*,
+
+WarningsAsErrors: 'bugprone-*'
+
+HeaderFilterRegex: 'src/core/.*'
+
+AnalyzeTemporaryDtors: false
+
+CheckOptions:
+  - key:   readability-identifier-naming.ClassCase
+    value: 'CamelCase'
+  - key:   readability-identifier-naming.FunctionCase
+    value: 'camelBack'
+  - key:   readability-identifier-naming.VariableCase
+    value: 'camelBack'
+  - key:   readability-identifier-naming.MemberCase
+    value: 'camelBack'
+  - key:   readability-identifier-naming.ConstantCase
+    value: 'CamelCase'
+  - key:   modernize-use-auto.IgnoreMacros
+    value: 'true'
+  - key:   performance-unnecessary-value-param.AllowedTypes
+    value: 'std::function;'
+...

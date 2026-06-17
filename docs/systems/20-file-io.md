@@ -338,6 +338,17 @@ format.
 
 ## Edge cases & failure modes
 
+### Threat model / untrusted file handling (summary)
+All import paths treat file bytes as untrusted. Hard limits (file size 512 MB,
+decoded megapixels ~64 M per raster, per-layer pixels, layer count, group nesting
+depth, name length, selection tiles) are enforced *before* large allocations.
+Decoders perform magic/header validation (e.g. TIFF), dimension checks using
+uint64 math, and prefix-truncation rejection. Native format has explicit
+bounds-checked Reader + decompression size verification; every short read in the
+fuzz test returns clean failure. No execution of embedded data; graceful
+degradation on missing optional codecs (zlib, image libs). The engine core never
+uses Qt or platform UI during decode. (See also STATUS cross-cutting audit note.)
+
 - **Corrupt / truncated file:** decoders are bounds-checked and fuzz-tested; a bad
   file yields a clean error, never a crash or partial mutation of the open
   document.

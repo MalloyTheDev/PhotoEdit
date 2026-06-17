@@ -111,4 +111,8 @@ void Document::setDirty(bool dirty) {
     notify(DocumentChange{DocumentChange::Kind::DirtyState, Rect{}, kNoLayer});
 }
 
+void Document::touchSelection() {
+    notify(DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer});
+}
+
 }  // namespace pe

@@ -17,6 +17,7 @@ struct DocumentChange {
         LayerStructure,  // add / remove / reorder / group
         LayerProps,      // opacity / blend / visibility / name / lock
         ActiveLayer,     // active-layer session change (not undoable)
+        Selection,       // selection changed (rect marquee etc); ants/UI update only
         DirtyState,      // saved/unsaved transition
         Profile,         // document color profile assigned/converted (recomposite)
     };
