@@ -15,6 +15,8 @@ qt_add_executable(photoedit
     MainWindow.hpp
     CanvasView.cpp
     CanvasView.hpp
+    EffectDialog.cpp
+    EffectDialog.hpp
     LayersPanel.cpp
     LayersPanel.hpp
     HistoryPanel.cpp
