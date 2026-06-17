@@ -26,6 +26,21 @@ class Selection;
     const std::function<void(std::span<Rgbaf>, int, int)>& transform,
     const Selection* selection = nullptr);
 
+// Like bakePixelEdit, but operates over an explicit document-space `region` instead of the
+// layer's current content bounds — for edits that grow the touched area (e.g. moving content
+// to new tiles). The transform sees the region's pixels (row-major, w==region.width); pixels
+// outside the layer's content read as transparent. Same caps/return contract as bakePixelEdit.
+[[nodiscard]] std::unique_ptr<PaintCommand> bakePixelEditRegion(
+    Document& doc, LayerId layerId, std::string name, Rect region,
+    const std::function<void(std::span<Rgbaf>, int, int)>& transform,
+    const Selection* selection = nullptr);
+
+// Translate a pixel layer's entire content by (dx, dy) as a reversible tile-delta command
+// (the Move tool). The vacated source area becomes transparent. Returns nullptr for a zero
+// move, a non-pixel/empty layer, or an offset/region beyond the engine's size caps.
+[[nodiscard]] std::unique_ptr<PaintCommand> moveLayerContent(Document& doc, LayerId layerId, int dx,
+                                                             int dy);
+
 // ---- Reference filter kernels ----
 // Operate on a contiguous w*h straight-alpha Rgbaf image (row-major). Edges clamp
 // to the border. These define correctness; tiled/SIMD/GPU paths must match.

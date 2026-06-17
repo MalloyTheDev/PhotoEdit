@@ -272,3 +272,30 @@ PE_TEST(brush_paints_16bit_layer_native_with_undo) {
     doc->history().undo();
     PE_CHECK_EQ(pl->tiles16().pixel(8, 8), (Rgba16{0, 0, 0, 0}));  // back to transparent
 }
+
+PE_TEST(move_layer_content_shifts_and_undoes) {
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().setPixel(10, 10, Rgba8{200, 50, 50, 255});  // a distinct mark
+
+    auto cmd = moveLayerContent(*doc, base, 5, 3);  // shift +5,+3
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK_EQ(pl->tiles().pixel(15, 13), (Rgba8{200, 50, 50, 255}));  // moved here
+    PE_CHECK_EQ(alphaAt(*doc, base, 10, 10), 0);                        // vacated -> transparent
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(10, 10), (Rgba8{200, 50, 50, 255}));  // restored to origin
+    PE_CHECK_EQ(alphaAt(*doc, base, 15, 13), 0);
+}
+
+PE_TEST(move_layer_content_edge_cases) {
+    auto doc = Document::createBlank(Size{32, 32});
+    const LayerId base = doc->activeLayer();
+    PE_CHECK(moveLayerContent(*doc, base, 4, 4) == nullptr);  // empty layer: nothing to move
+
+    static_cast<PixelLayer*>(doc->findLayer(base))->tiles().setPixel(5, 5, Rgba8{1, 2, 3, 255});
+    PE_CHECK(moveLayerContent(*doc, base, 0, 0) == nullptr);       // zero move: no command
+    PE_CHECK(moveLayerContent(*doc, base, 999999, 0) == nullptr);  // offset beyond the size cap
+}

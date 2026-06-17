@@ -325,7 +325,7 @@ void MainWindow::buildToolBar() {
     // Brush/Eraser/Hand/Zoom/Marquee/Eyedropper/Move wired; others scaffolded.
     using Tool = CanvasView::Tool;
     const std::vector<std::vector<ToolDef>> groups = {
-        {{"move", "Move", Tool::Inactive, "V"},
+        {{"move", "Move", Tool::Move, "V"},
          {"marquee", "Rectangular Marquee", Tool::Marquee, "M"},
          {"lasso", "Lasso", Tool::Inactive, "L"},
          {"wand-sparkles", "Object Selection / Magic Wand", Tool::Inactive, "W"}},
