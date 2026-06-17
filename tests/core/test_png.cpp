@@ -7,9 +7,35 @@
 #ifdef PHOTOEDIT_HAVE_PNG
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 using namespace pe;
+
+namespace {
+// CRC-32 (ISO 3309, the variant PNG chunks use) over a byte range — lets a test re-stamp
+// a patched IHDR so libpng still accepts the header.
+std::uint32_t crc32Png(const std::byte* p, std::size_t n) {
+    std::uint32_t crc = 0xFFFFFFFFu;
+    for (std::size_t i = 0; i < n; ++i) {
+        crc ^= static_cast<std::uint32_t>(std::to_integer<unsigned char>(p[i]));
+        for (int k = 0; k < 8; ++k) crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+std::uint32_t readBE32(const std::vector<std::byte>& v, std::size_t off) {
+    return (static_cast<std::uint32_t>(std::to_integer<unsigned char>(v[off])) << 24) |
+           (static_cast<std::uint32_t>(std::to_integer<unsigned char>(v[off + 1])) << 16) |
+           (static_cast<std::uint32_t>(std::to_integer<unsigned char>(v[off + 2])) << 8) |
+           static_cast<std::uint32_t>(std::to_integer<unsigned char>(v[off + 3]));
+}
+void writeBE32(std::vector<std::byte>& v, std::size_t off, std::uint32_t x) {
+    v[off + 0] = static_cast<std::byte>((x >> 24) & 0xFFu);
+    v[off + 1] = static_cast<std::byte>((x >> 16) & 0xFFu);
+    v[off + 2] = static_cast<std::byte>((x >> 8) & 0xFFu);
+    v[off + 3] = static_cast<std::byte>(x & 0xFFu);
+}
+}  // namespace
 
 PE_TEST(png_encode_decode_roundtrip) {
     PixelBuffer img(4, 3);
@@ -91,20 +117,25 @@ PE_TEST(png_decode_truncation_never_crashes) {
 }
 
 PE_TEST(png_decode_oversize_dimensions_rejected) {
-    // A PNG header declaring dimensions past the 64 MP decode cap must be rejected before
-    // any pixel buffer is allocated. Forge a minimal signature+IHDR with a huge width.
-    // PNG: 8-byte signature, then IHDR chunk = [len=13][\"IHDR\"][W:4][H:4][bitdepth]...
-    std::vector<std::byte> p;
-    auto put = [&](std::initializer_list<unsigned> bytes) {
-        for (unsigned b : bytes) p.push_back(static_cast<std::byte>(b));
-    };
-    put({0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A});  // PNG signature
-    put({0x00, 0x00, 0x00, 0x0D});                          // IHDR length = 13
-    put({'I', 'H', 'D', 'R'});
-    put({0x30, 0x00, 0x00, 0x00});        // width  = 0x30000000 (~805M) — far past the cap
-    put({0x30, 0x00, 0x00, 0x00});        // height = 0x30000000
-    put({0x08, 0x06, 0x00, 0x00, 0x00});  // 8-bit, RGBA, deflate, no interlace
-    PE_CHECK(!decodePng(p).has_value());  // rejected, no gigantic allocation / no crash
+    // The 64 MP decode cap (untrusted input) must reject an over-cap image at the dimension
+    // check, before allocating the output buffer. Encode a tiny VALID PNG, then patch its
+    // IHDR to claim 9000x9000 (81 MP > the 64 MP cap, yet each dimension is well under
+    // libpng's per-dimension limit so the header still parses) and re-stamp the IHDR CRC.
+    // The real IDAT/IEND remain, so begin_read succeeds and reports the patched dimensions;
+    // the engine's cap is then what rejects it (finish_read is never reached).
+    std::vector<std::byte> png = encodePng(PixelBuffer(4, 4, Rgba8{1, 2, 3, 255}));
+    PE_CHECK(png.size() > 33);
+    // PNG: 8-byte signature, then IHDR chunk — length@8, "IHDR"@12, width@16, height@20,
+    // ..., CRC@29 (computed over the 17 bytes "IHDR"+data at [12,29)).
+    // Self-check the CRC machinery against libpng's own IHDR CRC first: this proves the
+    // offsets and crc32 are correct, so the patched header below carries a VALID CRC and
+    // begin_read accepts it — otherwise begin_read would reject on a bad CRC before the cap
+    // (the exact "passes for the wrong reason" trap this test must avoid).
+    PE_CHECK_EQ(crc32Png(png.data() + 12, 17), readBE32(png, 29));
+    writeBE32(png, 16, 9000);                           // patched width
+    writeBE32(png, 20, 9000);                           // patched height
+    writeBE32(png, 29, crc32Png(png.data() + 12, 17));  // valid CRC for the patched IHDR
+    PE_CHECK(!decodePng(png).has_value());  // rejected by the 64 MP cap, no 324 MB alloc
 }
 
 PE_TEST(png_import_extreme_aspect_ratio_is_null_not_crash) {
