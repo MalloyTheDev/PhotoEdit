@@ -9,10 +9,12 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace pe {
 
 class Document;
+class PaintCommand;
 
 // --- Structural commands (operate on the top-level stack in M1) ---
 
@@ -162,6 +164,26 @@ private:
     Selection newSel_;  // the selection to apply
     Selection oldSel_;  // captured on first execute, for undo
     bool captured_ = false;
+};
+
+// Crop the document to a document-space rectangle: the canvas shrinks to the rect's size and
+// every top-level pixel layer's content is shifted by -rect.topLeft, so the cropped region's
+// top-left becomes the new origin. One undoable step (canvas size + per-layer content shifts
+// reverse together). Built on moveLayerContent; the rect is clamped to the canvas on execute.
+class CropCommand final : public Command {
+public:
+    explicit CropCommand(Rect cropRect);
+    ~CropCommand() override;  // out-of-line: the move vector holds incomplete PaintCommand
+
+    [[nodiscard]] std::string name() const override { return "Crop"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    Rect crop_;
+    Size oldSize_{};
+    bool captured_ = false;
+    std::vector<std::unique_ptr<PaintCommand>> moves_;  // per-layer content shift to the origin
 };
 
 }  // namespace pe

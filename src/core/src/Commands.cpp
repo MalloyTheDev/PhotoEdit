@@ -1,6 +1,8 @@
 #include "pe/core/Commands.hpp"
 
+#include "pe/core/Brush.hpp"  // PaintCommand (CropCommand composes per-layer moves)
 #include "pe/core/Document.hpp"
+#include "pe/core/Filter.hpp"  // moveLayerContent
 
 #include <utility>
 
@@ -228,6 +230,46 @@ DocumentChange SetSelectionCommand::undo(Document& doc) {
     doc.editableSelection() = oldSel_;
     doc.touchSelection();
     return DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer};
+}
+
+// ----------------------------------------------------------------- Crop
+
+CropCommand::CropCommand(Rect cropRect) : crop_(cropRect) {}
+CropCommand::~CropCommand() = default;
+
+DocumentChange CropCommand::execute(Document& doc) {
+    if (!captured_) {
+        captured_ = true;
+        oldSize_ = doc.canvasSize();
+        const Rect eff = crop_.intersected(doc.canvasBounds());  // clamp to the canvas once
+        if (eff.isEmpty()) {
+            crop_ = Rect{};  // degenerate crop: the command is a no-op
+        } else {
+            crop_ = eff;
+            // Build (but don't yet apply) a content shift for each top-level pixel layer, so
+            // every move snapshots the ORIGINAL pixels; a zero shift / empty layer yields null.
+            for (const auto& layer : doc.topLevelLayers()) {
+                if (auto m = moveLayerContent(doc, layer->id(), -eff.x, -eff.y)) {
+                    moves_.push_back(std::move(m));
+                }
+            }
+        }
+    }
+    if (crop_.isEmpty())
+        return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+
+    for (auto& m : moves_) m->execute(doc);
+    doc.cmdSetCanvasSize(Size{crop_.width, crop_.height});
+    return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+}
+
+DocumentChange CropCommand::undo(Document& doc) {
+    if (crop_.isEmpty())
+        return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+
+    doc.cmdSetCanvasSize(oldSize_);  // restore the canvas first
+    for (auto it = moves_.rbegin(); it != moves_.rend(); ++it) (*it)->undo(doc);  // unshift
+    return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
 }
 
 }  // namespace pe

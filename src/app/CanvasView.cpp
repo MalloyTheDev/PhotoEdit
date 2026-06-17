@@ -386,8 +386,8 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         emit zoomChanged(zoomPercent());
         return;
     }
-    if (toolMode_ == Tool::Marquee) {
-        draggingMarquee_ = true;
+    if (toolMode_ == Tool::Marquee || toolMode_ == Tool::Crop) {
+        draggingMarquee_ = true;  // shared rubber-band drag; commit differs by tool (see release)
         marqueeAnchor_ = e->position();
         liveMarquee_ = Rect{};
         update();
@@ -505,17 +505,24 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
     if (draggingMarquee_ && doc_ != nullptr) {
         draggingMarquee_ = false;
         if (liveMarquee_.width > 0 && liveMarquee_.height > 0) {
-            Selection target = doc_->selection();
-            Qt::KeyboardModifiers mods = QApplication::keyboardModifiers();
-            if (mods & Qt::ShiftModifier) {
-                target.addRect(liveMarquee_);
-            } else if (mods & (Qt::AltModifier | Qt::ControlModifier)) {
-                target.subtractRect(liveMarquee_);
+            if (toolMode_ == Tool::Crop) {
+                // Crop commits a CropCommand (resize + content shift) and re-fits the view to
+                // the new, smaller canvas. The command clamps the rect to the canvas itself.
+                doc_->history().push(std::make_unique<CropCommand>(liveMarquee_));
+                fitToWindow();
             } else {
-                target.selectRect(liveMarquee_);
+                Selection target = doc_->selection();
+                Qt::KeyboardModifiers mods = QApplication::keyboardModifiers();
+                if (mods & Qt::ShiftModifier) {
+                    target.addRect(liveMarquee_);
+                } else if (mods & (Qt::AltModifier | Qt::ControlModifier)) {
+                    target.subtractRect(liveMarquee_);
+                } else {
+                    target.selectRect(liveMarquee_);
+                }
+                doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+                // command will execute, snapshot old, notify
             }
-            doc_->history().push(std::make_unique<SetSelectionCommand>(target));
-            // command will execute, snapshot old, notify
         }
         liveMarquee_ = Rect{};
         update();
