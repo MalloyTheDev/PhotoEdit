@@ -2,8 +2,8 @@
 
 #include "Theme.hpp"
 #include "pe/core/Brush.hpp"  // pe::PaintCommand (move-tool preview command)
+#include "pe/core/CanvasRenderer.hpp"
 #include "pe/core/Commands.hpp"
-#include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/Filter.hpp"  // pe::moveLayerContent
 #include "pe/core/PixelBuffer.hpp"
@@ -23,7 +23,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <cstring>
 
 namespace pe::app {
 
@@ -58,6 +57,7 @@ CanvasView::CanvasView(QWidget* parent) : QWidget(parent), checker_(makeCheckerB
 }
 
 CanvasView::~CanvasView() {
+    renderer_.reset();  // unregister the renderer's observer before doc_ goes away
     if (doc_ != nullptr) doc_->removeObserver(this);
 }
 
@@ -68,6 +68,7 @@ void CanvasView::setDocument(pe::Document* doc) {
         // live preview, so a tool never carries provisional state across documents.
         if (tool_.isStroking()) tool_.cancel(*doc_);
         cancelMovePreview();
+        renderer_.reset();  // unregister the old renderer before detaching this view
         doc_->removeObserver(this);
     }
     // Drop any in-progress selection drag so a release after the swap can't commit a
@@ -77,9 +78,11 @@ void CanvasView::setDocument(pe::Document* doc) {
     draggingLasso_ = false;
     lassoPts_.clear();
     doc_ = doc;
-    if (doc_ != nullptr) doc_->addObserver(this);
+    if (doc_ != nullptr) {
+        doc_->addObserver(this);
+        renderer_ = std::make_unique<pe::CanvasRenderer>(*doc_);  // observes doc_ itself
+    }
     selectionAnts_ = doc_ != nullptr ? doc_->selection().tightBounds() : pe::Rect{};
-    refreshImage();
     needsFit_ = true;  // fit the new document once we have a valid widget size
     maybeInitialFit();
     updateGeometry();
@@ -95,32 +98,21 @@ void CanvasView::onDocumentChanged(const pe::Document&, const pe::DocumentChange
         update();
         return;
     }
-    // A committed mutation (paint commit, undo/redo, file load). The live brush
-    // preview drives its own repaint and deliberately does not route through here.
-    refreshImage();
+    // A committed mutation (paint commit, undo/redo, file load). The renderer is also an
+    // observer and has already marked the changed tiles dirty, so we only need to repaint;
+    // paintEvent recomposites just those tiles. The live brush preview repaints separately.
     update();
-}
-
-void CanvasView::refreshImage() {
-    if (doc_ == nullptr) {
-        image_ = QImage();
-        return;
-    }
-    const pe::PixelBuffer buf = doc_->compositeImage();
-    if (buf.isEmpty()) {
-        image_ = QImage();
-        return;
-    }
-    // Rgba8 is R,G,B,A bytes == QImage::Format_RGBA8888. The wrapping QImage
-    // references the temporary buffer, so copy() to own the pixels.
-    const QImage view(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),
-                      buf.width() * 4, QImage::Format_RGBA8888);
-    image_ = view.copy();
 }
 
 void CanvasView::reloadImage() {
-    refreshImage();
+    // A live preview applied a provisional command straight to the document (no
+    // notification), so the renderer's cache is stale — drop it and repaint.
+    if (renderer_ != nullptr) renderer_->invalidateAll();
     update();
+}
+
+pe::Size CanvasView::canvasSize() const {
+    return doc_ != nullptr ? doc_->canvasSize() : pe::Size{0, 0};
 }
 
 void CanvasView::cancelMovePreview() {
@@ -130,45 +122,15 @@ void CanvasView::cancelMovePreview() {
     moveLayer_ = pe::kNoLayer;
 }
 
-void CanvasView::refreshRegion(const pe::Rect& region) {
-    // No live full-canvas image to patch (no document, or a canvas too large to
-    // flatten so refreshImage() left image_ null): re-run the full path, which
-    // handles those cases coherently.
-    if (doc_ == nullptr || image_.isNull()) {
-        refreshImage();
-        return;
-    }
-    // Clamp to the canvas: the stroke's dirty bounds are tile-granular and may
-    // overhang the document edge.
-    const pe::Rect canvas{0, 0, image_.width(), image_.height()};
-    const pe::Rect r = region.intersected(canvas);
-    if (r.isEmpty()) return;  // nothing on-canvas changed
-
-    const pe::PixelBuffer buf = pe::compositeToImage(doc_->topLevelLayers(), r);
-    if (buf.isEmpty() || buf.width() != r.width || buf.height() != r.height) {
-        refreshImage();  // region exceeded the composite budget, or a size mismatch
-        return;
-    }
-    // Patch image_ in place, row by row. image_ is Format_RGBA8888 and buf is a
-    // PixelBuffer of Rgba8 (R,G,B,A bytes), the same straight-alpha byte layout, so a
-    // raw per-row copy is exact.
-    constexpr int kBpp = 4;
-    const auto* src = reinterpret_cast<const uchar*>(buf.data());
-    for (int y = 0; y < r.height; ++y) {
-        const uchar* srcRow = src + static_cast<std::size_t>(y) * buf.width() * kBpp;
-        uchar* dstRow = image_.scanLine(r.y + y) + static_cast<std::ptrdiff_t>(r.x) * kBpp;
-        std::memcpy(dstRow, srcRow, static_cast<std::size_t>(r.width) * kBpp);
-    }
-}
-
 QSize CanvasView::sizeHint() const {
-    return image_.isNull() ? QSize(640, 480) : image_.size();
+    const pe::Size cs = canvasSize();
+    return cs.isEmpty() ? QSize(640, 480) : QSize(cs.width, cs.height);
 }
 
 void CanvasView::fitToWindow() {
-    if (doc_ == nullptr || image_.isNull()) return;
-    const double w = image_.width();
-    const double h = image_.height();
+    if (canvasSize().isEmpty()) return;
+    const double w = canvasSize().width;
+    const double h = canvasSize().height;
     if (w <= 0.0 || h <= 0.0) return;
     const double margin = 0.96;  // a little breathing room around the image
     const double z = std::min(static_cast<double>(width()) / w, static_cast<double>(height()) / h);
@@ -181,11 +143,11 @@ void CanvasView::fitToWindow() {
 }
 
 void CanvasView::actualPixels() {
-    if (doc_ == nullptr || image_.isNull()) return;
+    if (canvasSize().isEmpty()) return;
     needsFit_ = false;
     view_.setRotation(0.0);
     view_.setZoom(1.0);
-    view_.setFocus(pe::PointD{image_.width() / 2.0, image_.height() / 2.0},
+    view_.setFocus(pe::PointD{canvasSize().width / 2.0, canvasSize().height / 2.0},
                    pe::PointD{width() / 2.0, height() / 2.0});
     update();
     emit zoomChanged(zoomPercent());
@@ -216,8 +178,7 @@ void CanvasView::setTool(Tool t) {
         tool_.setMode(pe::PaintToolController::Mode::Eraser);
     } else if (doc_ != nullptr && tool_.isStroking()) {
         tool_.cancel(*doc_);  // switching away from a paint tool drops any live stroke
-        refreshImage();
-        update();
+        reloadImage();        // the cancel reverted tiles without notifying the renderer
     }
     if (draggingMarquee_ && doc_ != nullptr) {
         draggingMarquee_ = false;
@@ -242,7 +203,7 @@ void CanvasView::setTool(Tool t) {
 }
 
 void CanvasView::maybeInitialFit() {
-    if (needsFit_ && doc_ != nullptr && !image_.isNull() && width() > 0 && height() > 0) {
+    if (needsFit_ && !canvasSize().isEmpty() && width() > 0 && height() > 0) {
         fitToWindow();
         needsFit_ = false;
     }
@@ -261,21 +222,42 @@ void CanvasView::paintEvent(QPaintEvent*) {
 
     QPainter painter(this);
     painter.fillRect(rect(), themeColors(currentTheme()).canvas);  // themed pasteboard
-    if (image_.isNull()) return;
+    const pe::Size cs = canvasSize();
+    if (cs.isEmpty() || renderer_ == nullptr) return;
 
-    // Device-space rectangle the document maps to (rotation is not exposed yet, so
-    // doc->view is scale + translate and the image stays axis-aligned).
+    // Device-space rectangle the whole canvas maps to (rotation is not exposed yet, so
+    // doc->view is scale + translate and the canvas stays axis-aligned).
     const pe::PointD tl = view_.docToView(pe::PointD{0.0, 0.0});
-    const pe::PointD br = view_.docToView(
-        pe::PointD{static_cast<double>(image_.width()), static_cast<double>(image_.height())});
+    const pe::PointD br =
+        view_.docToView(pe::PointD{static_cast<double>(cs.width), static_cast<double>(cs.height)});
     const QRectF devRect(QPointF(tl.x, tl.y), QPointF(br.x, br.y));
-
     painter.fillRect(devRect, checker_);  // transparency shows through as a checkerboard
 
     // Crisp pixels when magnifying, smooth when minifying.
     painter.setRenderHint(QPainter::SmoothPixmapTransform, view_.zoom() < 1.0);
     painter.setTransform(toQTransform(view_.docToView()));
-    painter.drawImage(QPointF(0.0, 0.0), image_);
+
+    // Composite ONLY the visible canvas region through the tile cache: a huge canvas never
+    // overflows the whole-image composite budget, and panning recomposites just the
+    // newly-exposed tiles. (At extreme zoom-out, a >64 MP visible region exceeds the
+    // renderer's per-call budget and renderRegion returns empty — a known limitation pending
+    // mipmapped display; the canvas simply shows the pasteboard until zoomed back in.)
+    const pe::Rect canvas{0, 0, cs.width, cs.height};
+    const pe::Rect vis = view_.visibleDocRect(pe::Size{width(), height()}).intersected(canvas);
+    if (!vis.isEmpty()) {
+        // Keep the cache at least as large as the visible tile span (plus a one-viewport pan
+        // margin) so no visible tile evicts another mid-frame — otherwise a zoomed-out view
+        // spanning more than the default budget would recomposite every tile every paint.
+        const std::size_t visTiles = static_cast<std::size_t>(pe::tilesForRect(vis).count());
+        renderer_->setCacheBudgetTiles(
+            std::max<std::size_t>(pe::kDefaultDisplayCacheTiles, visTiles * 2 + 16));
+        const pe::PixelBuffer buf = renderer_->renderRegion(vis);  // alive through drawImage
+        if (!buf.isEmpty()) {
+            const QImage img(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),
+                             buf.width() * 4, QImage::Format_RGBA8888);
+            painter.drawImage(QPointF(vis.x, vis.y), img);
+        }
+    }
 
     // --- basic marching ants + live marquee overlay (device space) ---
     // For real marching, a timer would offset the dash; here we draw a visible
@@ -337,21 +319,22 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
         case QEvent::TabletPress:
             if (tool_.isStroking()) tool_.cancel(*doc_);
             if (tool_.begin(*doc_, sp, &doc_->selection())) {
-                refreshRegion(tool_.strokeDirtyBounds());
+                if (renderer_ != nullptr) renderer_->invalidate(tool_.strokeDirtyBounds());
                 update();
             }
             break;
         case QEvent::TabletMove:
             if (tool_.isStroking()) {
                 tool_.extend(*doc_, sp);
-                refreshRegion(tool_.strokeDirtyBounds());
+                if (renderer_ != nullptr) renderer_->invalidate(tool_.strokeDirtyBounds());
                 update();
             }
             break;
         case QEvent::TabletRelease:
             if (tool_.isStroking()) {
+                const pe::Rect dirty = tool_.strokeDirtyBounds();  // capture before end() clears it
                 tool_.end(*doc_);
-                refreshImage();
+                if (renderer_ != nullptr) renderer_->invalidate(dirty);  // covers no-deposit too
                 update();
             }
             break;
@@ -393,11 +376,16 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         update();
         return;
     }
-    if (toolMode_ == Tool::Eyedropper && doc_ != nullptr && !image_.isNull()) {
+    if (toolMode_ == Tool::Eyedropper && renderer_ != nullptr && !canvasSize().isEmpty()) {
         const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
-        const int ix = std::clamp(static_cast<int>(std::lround(d.x)), 0, image_.width() - 1);
-        const int iy = std::clamp(static_cast<int>(std::lround(d.y)), 0, image_.height() - 1);
-        emit colorPicked(image_.pixelColor(ix, iy));
+        const int ix = std::clamp(static_cast<int>(std::lround(d.x)), 0, canvasSize().width - 1);
+        const int iy = std::clamp(static_cast<int>(std::lround(d.y)), 0, canvasSize().height - 1);
+        const pe::PixelBuffer px =
+            renderer_->renderRegion(pe::Rect{ix, iy, 1, 1});  // composite 1px
+        if (!px.isEmpty()) {
+            const pe::Rgba8 c = px.at(0, 0);
+            emit colorPicked(QColor(c.r, c.g, c.b, c.a));
+        }
         return;
     }
     if (toolMode_ == Tool::Move) {
@@ -436,7 +424,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
     // refresh explicitly. begin() fails when there is no paintable active layer.
     // Pass the document selection so edits are gated.
     if (tool_.begin(*doc_, sampleAt(e->position()), &doc_->selection())) {
-        refreshRegion(tool_.strokeDirtyBounds());  // only the first dab's footprint
+        if (renderer_ != nullptr) renderer_->invalidate(tool_.strokeDirtyBounds());  // first dab
         update();
     }
 }
@@ -482,7 +470,7 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         }
         movePreview_ = pe::moveLayerContent(*doc_, moveLayer_, dx, dy);
         if (movePreview_) movePreview_->execute(*doc_);
-        reloadImage();  // a move can touch a large region; re-flatten the whole canvas
+        reloadImage();  // preview applied without notifying: drop the cache + repaint
         return;
     }
     if (!tool_.isStroking() || doc_ == nullptr) {
@@ -490,7 +478,7 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         return;
     }
     tool_.extend(*doc_, sampleAt(e->position()));
-    refreshRegion(tool_.strokeDirtyBounds());  // live preview, stroke footprint only
+    if (renderer_ != nullptr) renderer_->invalidate(tool_.strokeDirtyBounds());  // stroke footprint
     update();
 }
 
@@ -557,8 +545,9 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
         QWidget::mouseReleaseEvent(e);
         return;
     }
-    tool_.end(*doc_);  // commits one undoable command; the observer refreshes us
-    refreshImage();    // also covers a stroke that deposited nothing (no notify)
+    const pe::Rect dirty = tool_.strokeDirtyBounds();  // capture before end() clears it
+    tool_.end(*doc_);  // commits one undoable command; the renderer-observer marks it dirty
+    if (renderer_ != nullptr) renderer_->invalidate(dirty);  // also covers a no-deposit stroke
     update();
 }
 

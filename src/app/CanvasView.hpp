@@ -13,17 +13,23 @@
 #include <QPointF>
 #include <QWidget>
 
+namespace pe {
+class CanvasRenderer;  // tile-cache renderer; defined in pe/core/CanvasRenderer.hpp
+}
+
 namespace pe::app {
 
-// The central canvas: shows a document's flattened composite through a zoom/pan
-// view transform and routes mouse input to the brush tool. It observes the
-// document, so committed edits (paint commits, undo/redo, file loads) refresh
-// automatically; the live brush preview repaints explicitly as it is drawn.
+// The central canvas: composites the visible document region through the engine's
+// CanvasRenderer tile cache and presents it through a zoom/pan view transform, routing
+// mouse input to the tools. It observes the document, so committed edits (paint commits,
+// undo/redo, file loads) repaint automatically; live previews repaint explicitly and
+// invalidate the cache as they are drawn.
 //
-// View navigation: mouse wheel zooms about the cursor, middle-drag pans, and the
-// document fits the viewport when first shown. The presentation transform is the
-// engine's headless pe::ViewTransform (docs/systems/02-canvas-rendering.md); the
-// document is never resampled. GPU display and dirty-region repaint arrive later.
+// Painting only the visible tiles means even a canvas larger than the whole-image composite
+// budget renders, and pan/zoom recomposites just the newly-exposed tiles. View navigation:
+// mouse wheel zooms about the cursor, middle-drag pans, the document fits on first show. The
+// presentation transform is the headless pe::ViewTransform (docs/systems/02-canvas-rendering);
+// the document is never resampled. GPU display arrives later.
 class CanvasView : public QWidget, public pe::DocumentObserver {
     Q_OBJECT
 
@@ -75,9 +81,10 @@ public:
     // DocumentObserver: re-flatten and repaint after any committed change.
     void onDocumentChanged(const pe::Document&, const pe::DocumentChange&) override;
 
-    // Re-flatten the whole document and repaint now. For external edits that mutate the
-    // document outside the observer/command flow — e.g. an effect dialog's live preview,
-    // which applies a provisional command directly so it can be reverted on Cancel.
+    // Drop the renderer's cached tiles and repaint. For external edits that mutate the
+    // document outside the observer/command flow — e.g. an effect dialog's or the move
+    // tool's live preview, which applies a provisional command directly (no notification),
+    // so the tile cache would otherwise show stale pixels until the next committed change.
     void reloadImage();
 
 protected:
@@ -92,17 +99,15 @@ protected:
     void tabletEvent(QTabletEvent*) override;
 
 private:
-    void refreshImage();  // re-flatten the whole doc_ -> image_
-    // Re-flatten only `region` (document space) into image_ in place — the live-stroke
-    // hot path, so a brush dab does not recomposite the entire canvas. Clamps to the
-    // canvas and falls back to a full refresh if the region cannot be composited.
-    void refreshRegion(const pe::Rect& region);
     void zoomAroundCenter(double factor);  // zoom about the viewport center
     void maybeInitialFit();                // fit once the widget has a real size
     [[nodiscard]] pe::StrokePoint sampleAt(QPointF widgetPos) const;  // widget -> doc space
+    [[nodiscard]] pe::Size canvasSize() const;  // doc_'s canvas size, or {0,0} if no document
 
     pe::Document* doc_ = nullptr;  // not owned; observed while non-null
-    QImage image_;                 // a private copy of the current composite (RGBA8888)
+    // Tile-cache renderer bound to doc_: composites only visible/dirty tiles, so a huge
+    // canvas no longer overflows the whole-image composite budget and pan/zoom stays cheap.
+    std::unique_ptr<pe::CanvasRenderer> renderer_;
     pe::PaintToolController tool_;
     pe::ViewTransform view_;  // document <-> widget (device px) mapping
     QBrush checker_;          // transparency checkerboard (device-space tile)
