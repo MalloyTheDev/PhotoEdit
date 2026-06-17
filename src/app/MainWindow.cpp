@@ -2,12 +2,14 @@
 
 #include "CanvasView.hpp"
 #include "ColorPanel.hpp"
+#include "EffectDialog.hpp"
 #include "HistoryPanel.hpp"
 #include "IconUtil.hpp"
 #include "LayersPanel.hpp"
 #include "PropertiesPanel.hpp"
 #include "pe/core/Adjustment.hpp"
 #include "pe/core/AdjustmentLayer.hpp"
+#include "pe/core/Brush.hpp"  // pe::PaintCommand (effect-dialog command factories)
 #include "pe/core/Color.hpp"
 #include "pe/core/Commands.hpp"
 #include "pe/core/Document.hpp"
@@ -114,24 +116,94 @@ void MainWindow::buildMenuBar() {
     QAction* redoAct = editMenu->addAction(QStringLiteral("&Redo"), this, &MainWindow::redo);
     redoAct->setShortcut(QKeySequence::Redo);
 
+    // Open a parameterized effect dialog (live preview + one-undo-step commit). Captured by
+    // value into the action lambdas below, so it must hold only `this` (a stable pointer).
+    auto runEffect = [this](const QString& title, std::vector<EffectDialog::Param> params,
+                            EffectDialog::CommandFactory factory) {
+        if (!doc_) return;
+        EffectDialog dlg(this, title, std::move(params), std::move(factory), doc_.get(),
+                         [this] { canvas_->reloadImage(); });
+        dlg.exec();
+    };
+    // Apply a no-parameter effect destructively and undoably to the active layer.
+    auto applyInstant = [this](std::unique_ptr<pe::PaintCommand> cmd) {
+        if (doc_ && cmd) doc_->history().push(std::move(cmd));
+    };
+    const auto sel = [this] { return &doc_->selection(); };  // active selection (gates edits)
+
     auto* imageMenu = menuBar()->addMenu(QStringLiteral("&Image"));
     {
         auto* adj = imageMenu->addMenu(QStringLiteral("Adjustments"));
-        adj->addAction(QStringLiteral("Invert"), this, [this]() {
-            if (!doc_) return;
-            auto a =
-                std::make_unique<pe::AdjustmentLayer>(std::make_unique<pe::Invert>(), "Invert");
-            doc_->history().push(
-                std::make_unique<pe::AddLayerCommand>(std::move(a), doc_->topLevelCount()));
+        adj->addAction(QStringLiteral("Brightness/Contrast..."), this, [this, runEffect] {
+            runEffect(
+                QStringLiteral("Brightness/Contrast"),
+                {{QStringLiteral("Brightness"), -1.0, 1.0, 0.0, 2},
+                 {QStringLiteral("Contrast"), -1.0, 1.0, 0.0, 2}},
+                [this](const std::vector<double>& v) {
+                    return pe::applyAdjustment(
+                        *doc_, doc_->activeLayer(),
+                        pe::BrightnessContrast(static_cast<float>(v[0]), static_cast<float>(v[1])),
+                        &doc_->selection());
+                });
         });
-        auto* flt = imageMenu->addMenu(QStringLiteral("Filters"));
-        flt->addAction(QStringLiteral("Brightness +0.2 (demo)"), this, [this]() {
-            if (!doc_) return;
-            // Demo wiring to engine filter/adjust objects (full FilterCommand later)
-            auto a = std::make_unique<pe::AdjustmentLayer>(
-                std::make_unique<pe::BrightnessContrast>(0.2f, 0.0f), "Brightness");
-            doc_->history().push(
-                std::make_unique<pe::AddLayerCommand>(std::move(a), doc_->topLevelCount()));
+        adj->addAction(QStringLiteral("Hue/Saturation..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Hue/Saturation"),
+                      {{QStringLiteral("Hue"), -180.0, 180.0, 0.0, 0},
+                       {QStringLiteral("Saturation"), 0.0, 2.0, 1.0, 2},
+                       {QStringLiteral("Lightness"), -1.0, 1.0, 0.0, 2}},
+                      [this](const std::vector<double>& v) {
+                          pe::HueSaturation hs;
+                          hs.setHueShiftDegrees(static_cast<float>(v[0]));
+                          hs.setSaturationScale(static_cast<float>(v[1]));
+                          hs.setLightness(static_cast<float>(v[2]));
+                          return pe::applyAdjustment(*doc_, doc_->activeLayer(), hs,
+                                                     &doc_->selection());
+                      });
+        });
+        adj->addAction(QStringLiteral("Exposure..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Exposure"),
+                      {{QStringLiteral("Exposure (stops)"), -5.0, 5.0, 0.0, 2},
+                       {QStringLiteral("Offset"), -0.5, 0.5, 0.0, 3},
+                       {QStringLiteral("Gamma"), 0.1, 5.0, 1.0, 2}},
+                      [this](const std::vector<double>& v) {
+                          return pe::applyAdjustment(
+                              *doc_, doc_->activeLayer(),
+                              pe::Exposure(static_cast<float>(v[0]), static_cast<float>(v[1]),
+                                           static_cast<float>(v[2])),
+                              &doc_->selection());
+                      });
+        });
+        adj->addAction(QStringLiteral("Vibrance..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Vibrance"),
+                      {{QStringLiteral("Vibrance"), -1.0, 1.0, 0.0, 2},
+                       {QStringLiteral("Saturation"), -1.0, 1.0, 0.0, 2}},
+                      [this](const std::vector<double>& v) {
+                          return pe::applyAdjustment(
+                              *doc_, doc_->activeLayer(),
+                              pe::Vibrance(static_cast<float>(v[0]), static_cast<float>(v[1])),
+                              &doc_->selection());
+                      });
+        });
+        adj->addAction(QStringLiteral("Posterize..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Posterize"), {{QStringLiteral("Levels"), 2.0, 255.0, 4.0, 0}},
+                      [this](const std::vector<double>& v) {
+                          return pe::applyAdjustment(*doc_, doc_->activeLayer(),
+                                                     pe::Posterize(static_cast<int>(v[0])),
+                                                     &doc_->selection());
+                      });
+        });
+        adj->addAction(QStringLiteral("Threshold..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Threshold"), {{QStringLiteral("Level"), 0.0, 1.0, 0.5, 2}},
+                      [this](const std::vector<double>& v) {
+                          return pe::applyAdjustment(*doc_, doc_->activeLayer(),
+                                                     pe::Threshold(static_cast<float>(v[0])),
+                                                     &doc_->selection());
+                      });
+        });
+        adj->addSeparator();
+        adj->addAction(QStringLiteral("Invert"), this, [this, applyInstant, sel] {
+            if (doc_)
+                applyInstant(pe::applyAdjustment(*doc_, doc_->activeLayer(), pe::Invert{}, sel()));
         });
     }
     menuBar()->addMenu(QStringLiteral("&Layer"));
@@ -158,7 +230,53 @@ void MainWindow::buildMenuBar() {
             doc_->history().push(std::make_unique<SetSelectionCommand>(target));
         }
     });
-    menuBar()->addMenu(QStringLiteral("F&ilter"));
+    auto* filterMenu = menuBar()->addMenu(QStringLiteral("F&ilter"));
+    {
+        filterMenu->addAction(QStringLiteral("Gaussian Blur..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Gaussian Blur"),
+                      {{QStringLiteral("Radius (sigma)"), 0.0, 20.0, 2.0, 1}},
+                      [this](const std::vector<double>& v) {
+                          return pe::applyFilter(*doc_, doc_->activeLayer(),
+                                                 pe::GaussianBlurFilter(static_cast<float>(v[0])),
+                                                 &doc_->selection());
+                      });
+        });
+        filterMenu->addAction(QStringLiteral("Box Blur..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Box Blur"), {{QStringLiteral("Radius"), 0.0, 50.0, 3.0, 0}},
+                      [this](const std::vector<double>& v) {
+                          return pe::applyFilter(*doc_, doc_->activeLayer(),
+                                                 pe::BoxBlurFilter(static_cast<int>(v[0])),
+                                                 &doc_->selection());
+                      });
+        });
+        filterMenu->addAction(QStringLiteral("Sharpen..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Sharpen (Unsharp Mask)"),
+                      {{QStringLiteral("Radius"), 0.0, 20.0, 1.0, 1},
+                       {QStringLiteral("Amount"), 0.0, 5.0, 1.0, 2},
+                       {QStringLiteral("Threshold"), 0.0, 1.0, 0.0, 2}},
+                      [this](const std::vector<double>& v) {
+                          return pe::applyFilter(
+                              *doc_, doc_->activeLayer(),
+                              pe::SharpenFilter(static_cast<float>(v[0]), static_cast<float>(v[1]),
+                                                static_cast<float>(v[2])),
+                              &doc_->selection());
+                      });
+        });
+        filterMenu->addAction(QStringLiteral("Mosaic..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Mosaic"), {{QStringLiteral("Cell Size"), 1.0, 100.0, 8.0, 0}},
+                      [this](const std::vector<double>& v) {
+                          return pe::applyFilter(*doc_, doc_->activeLayer(),
+                                                 pe::MosaicFilter(static_cast<int>(v[0])),
+                                                 &doc_->selection());
+                      });
+        });
+        filterMenu->addSeparator();
+        filterMenu->addAction(QStringLiteral("Find Edges"), this, [this, applyInstant, sel] {
+            if (doc_)
+                applyInstant(
+                    pe::applyFilter(*doc_, doc_->activeLayer(), pe::FindEdgesFilter{}, sel()));
+        });
+    }
 
     auto* viewMenu = menuBar()->addMenu(QStringLiteral("&View"));
     QAction* zoomInAct =

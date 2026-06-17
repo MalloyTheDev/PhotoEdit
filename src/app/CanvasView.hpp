@@ -60,6 +60,11 @@ public:
     // DocumentObserver: re-flatten and repaint after any committed change.
     void onDocumentChanged(const pe::Document&, const pe::DocumentChange&) override;
 
+    // Re-flatten the whole document and repaint now. For external edits that mutate the
+    // document outside the observer/command flow — e.g. an effect dialog's live preview,
+    // which applies a provisional command directly so it can be reverted on Cancel.
+    void reloadImage();
+
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;

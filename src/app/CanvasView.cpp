@@ -105,6 +105,11 @@ void CanvasView::refreshImage() {
     image_ = view.copy();
 }
 
+void CanvasView::reloadImage() {
+    refreshImage();
+    update();
+}
+
 void CanvasView::refreshRegion(const pe::Rect& region) {
     // No live full-canvas image to patch (no document, or a canvas too large to
     // flatten so refreshImage() left image_ null): re-run the full path, which
