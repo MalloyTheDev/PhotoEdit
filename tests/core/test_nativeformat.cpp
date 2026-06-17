@@ -254,18 +254,19 @@ PE_TEST(native_format_roundtrip_32bit) {
 
 PE_TEST(native_format_budget_rejects_excess_allocation) {
     // A crafted/large file must not be able to drive unbounded allocation. The aggregate
-    // memory budget is checked before each block is allocated: a tiny budget rejects the
+    // memory budget is checked before each block is allocated: a tight budget rejects the
     // file (nullptr) instead of materializing the pixels; the default budget accepts it.
+    // Each 8x8 layer touches one 256x256 tile => 65536*4 = 262144 B resident footprint.
     auto doc = Document::createBlank(Size{8, 8});
-    asPixel(*doc, 0)->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{10, 20, 30, 255});  // 256 raw B
+    asPixel(*doc, 0)->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{10, 20, 30, 255});
     auto second = std::make_unique<PixelLayer>("Two");
-    second->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{40, 50, 60, 255});  // another 256 raw B
+    second->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{40, 50, 60, 255});
     doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(second));
 
     const std::vector<std::byte> blob = serializeDocument(*doc);
 
-    // Budget that fits the first layer's 256 bytes but not both: rejected, no over-alloc.
-    PE_CHECK(deserializeDocument(blob, 300) == nullptr);
+    // Fits one layer's 262144 B footprint but not both (aggregate across siblings): reject.
+    PE_CHECK(deserializeDocument(blob, 400'000) == nullptr);
     // Zero budget rejects even the first non-empty block.
     PE_CHECK(deserializeDocument(blob, 0) == nullptr);
     // The default (generous) budget loads it fine — the cap only bites pathological input.
@@ -273,4 +274,56 @@ PE_TEST(native_format_budget_rejects_excess_allocation) {
     PE_CHECK(loaded != nullptr);
     PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(2));
     PE_CHECK_EQ(asPixel(*loaded, 1)->tiles().pixel(0, 0), (Rgba8{40, 50, 60, 255}));
+}
+
+PE_TEST(native_format_budget_charges_tiled_footprint_not_dense) {
+    // Regression: the budget must charge the RESIDENT tiled footprint, not the dense rect
+    // byte count. Pixels scatter into a sparse 256x256-tiled store, so a thin/wide rect
+    // materializes whole tiles far exceeding its packed size — charging dense bytes would
+    // let such a strip bypass the cap ~256x. A 2560x2 fill packs to ~20 KB but spans 10
+    // tiles => 10*65536*4 = ~2.62 MB resident.
+    auto doc = Document::createBlank(Size{2560, 2});
+    asPixel(*doc, 0)->tiles().fillRect(Rect{0, 0, 2560, 2}, Rgba8{1, 2, 3, 255});
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+
+    // 1 MB sits ABOVE the dense bytes (~20 KB) but BELOW the tiled footprint (~2.62 MB):
+    // it must reject. (With the old dense accounting this strip would have loaded.)
+    PE_CHECK(deserializeDocument(blob, 1'000'000) == nullptr);
+    // The default budget comfortably covers ~2.62 MB, so the file still round-trips.
+    auto loaded = deserializeDocument(blob);
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK_EQ(asPixel(*loaded, 0)->tiles().pixel(1000, 0), (Rgba8{1, 2, 3, 255}));
+}
+
+PE_TEST(native_format_budget_charged_for_mask_block) {
+    // The mask block flows through the same budgeted chokepoint. An 8x8 mask spans one
+    // 1-byte tile => 65536 B footprint; a budget below that must reject even though the
+    // (empty) pixel layer itself costs nothing.
+    auto doc = Document::createBlank(Size{8, 8});  // base layer left empty (0 pixel bytes)
+    auto mask = std::make_unique<Mask>(Mask::Kind::Layer);
+    mask->buffer().fillRect(Rect{0, 0, 8, 8}, MaskBuffer::kClear);  // materialize a mask tile
+    asPixel(*doc, 0)->setMask(std::move(mask));
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+
+    PE_CHECK(deserializeDocument(blob, 1'000) == nullptr);  // 65536 B mask > 1000 -> reject
+    PE_CHECK(deserializeDocument(blob) != nullptr);         // default budget loads it
+}
+
+PE_TEST(native_format_budget_shared_across_group_children) {
+    // The budget is shared by reference through group recursion, so a group whose children
+    // collectively exceed it is rejected even if each child fits alone. Two filled 8x8
+    // children => 262144 B footprint each; a budget between one and two must reject.
+    auto doc = Document::createBlank(Size{8, 8});  // base layer empty
+    auto group = std::make_unique<GroupLayer>("Grp");
+    for (int i = 0; i < 2; ++i) {
+        auto child = std::make_unique<PixelLayer>("Child");
+        child->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{static_cast<std::uint8_t>(i), 0, 0, 255});
+        group->addChild(std::move(child));
+    }
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+
+    // Fits one child (262144) but not both: reject — proving the budget is not reset per child.
+    PE_CHECK(deserializeDocument(blob, 400'000) == nullptr);
+    PE_CHECK(deserializeDocument(blob) != nullptr);  // default budget loads it
 }

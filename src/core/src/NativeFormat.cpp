@@ -147,18 +147,32 @@ void writeBlock(Writer& w, const std::vector<std::byte>& raw) {
     w.bytes(raw.data(), raw.size());
 }
 
+// Resident memory a sparse 256x256-tiled store commits when `rect`'s pixels are scattered
+// into it: setPixel/setValue materializes every tile the rect touches IN FULL, so a thin
+// or elongated rect costs far more than its dense pixel count (up to ~256x). The aggregate
+// budget must charge this tiled footprint — not the packed rect bytes — or a crafted
+// thin-strip content rect bypasses the cap. `bytesPerPixel` is the store's element size.
+[[nodiscard]] std::int64_t tileFootprintBytes(Rect rect, std::int64_t bytesPerPixel) noexcept {
+    const std::int64_t tiles = tilesForRect(rect).count();  // 0 for an empty rect
+    return tiles * static_cast<std::int64_t>(kTilePixels) * bytesPerPixel;
+}
+
 // Read a byte block of exactly `expectedSize` bytes (written by writeBlock) into `out`.
 // Returns false on any inconsistency (bad flag, missing zlib, truncation, size mismatch).
 //
-// `budget` is the remaining aggregate byte allowance for the whole deserialize. The
-// allocation guard is the security chokepoint: every block this format reads — pixel
-// data and masks alike — flows through here, so checking expectedSize against the
-// remaining budget BEFORE allocating bounds total memory and rejects a many-layer file
-// or decompression bomb cleanly (false) instead of running into bad_alloc.
+// `budget` is the remaining aggregate byte allowance for the whole deserialize and
+// `chargeBytes` is what this block costs against it. The allocation guard is the security
+// chokepoint: every block this format reads — pixel data and masks alike — flows through
+// here, so checking the charge against the remaining budget BEFORE allocating bounds total
+// memory and rejects a many-layer file or decompression bomb cleanly (false) instead of
+// running into bad_alloc. Callers pass the RESIDENT tiled footprint (>= expectedSize) as
+// `chargeBytes`, because the bytes are scattered into a sparse tiled store: charging the
+// dense `expectedSize` would under-count by up to ~256x. The transient decompressed buffer
+// is <= expectedSize <= chargeBytes, so this single charge bounds both.
 bool readBlock(Reader& r, std::size_t expectedSize, std::vector<std::byte>& out,
-               std::int64_t& budget) {
-    if (static_cast<std::int64_t>(expectedSize) > budget) return false;  // aggregate cap
-    budget -= static_cast<std::int64_t>(expectedSize);
+               std::int64_t& budget, std::int64_t chargeBytes) {
+    if (chargeBytes > budget) return false;  // aggregate cap (checked before allocating)
+    budget -= chargeBytes;
 
     const std::uint8_t comp = r.u8();
     if (!r.ok() || comp > 1) return false;
@@ -207,11 +221,15 @@ template <class Pixel>
 bool readPixelBlock(Reader& r, TileStoreT<Pixel>& store, std::int32_t cx, std::int32_t cy,
                     std::int32_t cw, std::int32_t ch, std::int64_t& budget) {
     // cw*ch is capped at kMaxLayerPixels (readContentRect), so rawSize <= 64MP*sizeof(Pixel)
-    // (<=1 GB even for 32-bit-float); the budget check in readBlock bounds the aggregate.
+    // (<=1 GB even for 32-bit-float). Charge the budget the tiled footprint the scatter
+    // below actually commits (whole tiles), not the dense rawSize, so a thin strip cannot
+    // bypass the aggregate cap.
     const std::size_t rawSize =
         static_cast<std::size_t>(cw) * static_cast<std::size_t>(ch) * sizeof(Pixel);
+    const std::int64_t charge =
+        tileFootprintBytes(Rect{cx, cy, cw, ch}, static_cast<std::int64_t>(sizeof(Pixel)));
     std::vector<std::byte> raw;
-    if (!readBlock(r, rawSize, raw, budget)) return false;
+    if (!readBlock(r, rawSize, raw, budget, charge)) return false;
     std::size_t off = 0;
     for (int y = cy; y < cy + ch; ++y) {
         for (int x = cx; x < cx + cw; ++x) {
@@ -292,6 +310,12 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
     // store; the others are empty). `depth` is the document depth, which every pixel
     // layer shares (createBlank/AddLayer seed layers at the document depth) — the reader
     // reconstructs all layers at that same depth, so writer and reader stay symmetric.
+    //
+    // PRECONDITION: every PixelLayer in the document has pl.depth() == doc.bitDepth(). The
+    // format keys pixel serialization off the document depth (it stores no per-layer depth),
+    // so a layer whose own depth diverged would serialize its empty matching store and
+    // round-trip transparent. No current path can produce a mismatch; a future mixed-depth
+    // path (paste/import) must add a per-layer depth byte here and in readLayer.
     const auto& pl = static_cast<const PixelLayer&>(layer);
     switch (depth) {
         case BitDepth::U16:
@@ -345,8 +369,10 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
             return nullptr;
         }
         std::vector<std::byte> mraw;
-        if (!readBlock(r, static_cast<std::size_t>(mw) * static_cast<std::size_t>(mh), mraw,
-                       budget)) {
+        // MaskBuffer is a sparse store of 1-byte tiles, so charge its tiled footprint too.
+        const std::int64_t mcharge = tileFootprintBytes(Rect{mx, my, mw, mh}, 1);
+        if (!readBlock(r, static_cast<std::size_t>(mw) * static_cast<std::size_t>(mh), mraw, budget,
+                       mcharge)) {
             return nullptr;
         }
         mask = std::make_unique<Mask>(static_cast<Mask::Kind>(mkind));
