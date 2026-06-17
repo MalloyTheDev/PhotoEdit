@@ -207,3 +207,70 @@ PE_TEST(native_format_no_mask_when_absent) {
     PE_CHECK(loaded != nullptr);
     PE_CHECK(asPixel(*loaded, 0)->mask() == nullptr);
 }
+
+PE_TEST(native_format_roundtrip_16bit) {
+    // A 16-bit document must round-trip its 16-bit store exactly. Before the bit-depth
+    // fix the writer only serialized the (empty) 8-bit store, so a 16-bit doc loaded back
+    // fully transparent — silent data loss.
+    auto doc = Document::createBlank(Size{16, 16}, ColorMode::RGB, BitDepth::U16);
+    PE_CHECK(doc->bitDepth() == BitDepth::U16);
+    auto* base = asPixel(*doc, 0);
+    PE_CHECK(base->depth() == BitDepth::U16);
+    base->tiles16().setPixel(4, 5, Rgba16{1000, 40000, 65535, 65535});
+
+    auto loaded = deserializeDocument(serializeDocument(*doc));
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK(loaded->bitDepth() == BitDepth::U16);
+    auto* lbase = asPixel(*loaded, 0);
+    PE_CHECK(lbase != nullptr && lbase->depth() == BitDepth::U16);
+    PE_CHECK_EQ(lbase->tiles16().pixel(4, 5), (Rgba16{1000, 40000, 65535, 65535}));
+    PE_CHECK_EQ(lbase->tiles16().pixel(0, 0), (Rgba16{0, 0, 0, 0}));  // empty elsewhere
+    // The 8-bit store stays empty for a 16-bit layer.
+    PE_CHECK_EQ(lbase->tiles().pixel(4, 5), (Rgba8{0, 0, 0, 0}));
+}
+
+PE_TEST(native_format_roundtrip_32bit) {
+    // A 32-bit-float document round-trips its float store bit-exactly (values written and
+    // read via raw bytes). Exactly-representable values let us compare without tolerance.
+    auto doc = Document::createBlank(Size{16, 16}, ColorMode::RGB, BitDepth::F32);
+    PE_CHECK(doc->bitDepth() == BitDepth::F32);
+    auto* base = asPixel(*doc, 0);
+    PE_CHECK(base->depth() == BitDepth::F32);
+    base->tilesF().setPixel(7, 2, Rgbaf{0.25f, 0.5f, 0.75f, 1.0f});
+
+    auto loaded = deserializeDocument(serializeDocument(*doc));
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK(loaded->bitDepth() == BitDepth::F32);
+    auto* lbase = asPixel(*loaded, 0);
+    PE_CHECK(lbase != nullptr && lbase->depth() == BitDepth::F32);
+    const Rgbaf px = lbase->tilesF().pixel(7, 2);
+    PE_CHECK_NEAR(px.r, 0.25f);
+    PE_CHECK_NEAR(px.g, 0.5f);
+    PE_CHECK_NEAR(px.b, 0.75f);
+    PE_CHECK_NEAR(px.a, 1.0f);
+    const Rgbaf empty = lbase->tilesF().pixel(0, 0);
+    PE_CHECK_NEAR(empty.a, 0.0f);  // transparent elsewhere
+}
+
+PE_TEST(native_format_budget_rejects_excess_allocation) {
+    // A crafted/large file must not be able to drive unbounded allocation. The aggregate
+    // memory budget is checked before each block is allocated: a tiny budget rejects the
+    // file (nullptr) instead of materializing the pixels; the default budget accepts it.
+    auto doc = Document::createBlank(Size{8, 8});
+    asPixel(*doc, 0)->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{10, 20, 30, 255});  // 256 raw B
+    auto second = std::make_unique<PixelLayer>("Two");
+    second->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{40, 50, 60, 255});  // another 256 raw B
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(second));
+
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+
+    // Budget that fits the first layer's 256 bytes but not both: rejected, no over-alloc.
+    PE_CHECK(deserializeDocument(blob, 300) == nullptr);
+    // Zero budget rejects even the first non-empty block.
+    PE_CHECK(deserializeDocument(blob, 0) == nullptr);
+    // The default (generous) budget loads it fine — the cap only bites pathological input.
+    auto loaded = deserializeDocument(blob);
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(2));
+    PE_CHECK_EQ(asPixel(*loaded, 1)->tiles().pixel(0, 0), (Rgba8{40, 50, 60, 255}));
+}
