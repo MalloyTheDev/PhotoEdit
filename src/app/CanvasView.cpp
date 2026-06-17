@@ -69,6 +69,7 @@ void CanvasView::setDocument(pe::Document* doc) {
     }
     doc_ = doc;
     if (doc_ != nullptr) doc_->addObserver(this);
+    selectionAnts_ = doc_ != nullptr ? doc_->selection().tightBounds() : pe::Rect{};
     refreshImage();
     needsFit_ = true;  // fit the new document once we have a valid widget size
     maybeInitialFit();
@@ -78,7 +79,10 @@ void CanvasView::setDocument(pe::Document* doc) {
 
 void CanvasView::onDocumentChanged(const pe::Document&, const pe::DocumentChange& ch) {
     if (ch.kind == pe::DocumentChange::Kind::Selection) {
-        // Selection change only affects marching ants overlay, not pixel content.
+        // Selection change only affects the marching-ants overlay, not pixel content.
+        // Recompute the pixel-tight ants bounds here (once per change) so paintEvent never
+        // scans the selection mask per frame.
+        selectionAnts_ = doc_ != nullptr ? doc_->selection().tightBounds() : pe::Rect{};
         update();
         return;
     }
@@ -251,10 +255,14 @@ void CanvasView::paintEvent(QPaintEvent*) {
     // For real marching, a timer would offset the dash; here we draw a visible
     // dashed outline of the active selection bounds (and any in-progress drag).
     if (doc_ != nullptr) {
-        const auto& sel = doc_->selection();
+        // Cosmetic pens stay 1 device pixel wide (and keep a fixed dash length) regardless
+        // of zoom — without this the dashes are drawn in document units through the
+        // docToView transform and visibly thicken as you zoom in.
         QPen antPen(QColor(0, 0, 0), 1, Qt::DashLine);
+        antPen.setCosmetic(true);
         antPen.setDashOffset(0);
         QPen antPen2(QColor(255, 255, 255), 1, Qt::DashLine);
+        antPen2.setCosmetic(true);
         antPen2.setDashOffset(2);  // offset gives the classic alternating look
         const QPen* pens[2] = {&antPen, &antPen2};
 
@@ -268,11 +276,13 @@ void CanvasView::paintEvent(QPaintEvent*) {
             }
         };
 
-        // Live drag rect (while marquee tool dragging) takes precedence visually.
+        // Live drag rect (while marquee tool dragging) takes precedence visually; otherwise
+        // the committed selection's pixel-tight outline (cached on the last selection change,
+        // so the per-pixel scan does not run every repaint).
         if (draggingMarquee_ && liveMarquee_.width > 0 && liveMarquee_.height > 0) {
             drawAntRect(liveMarquee_);
-        } else if (sel.active()) {
-            drawAntRect(sel.selectedBounds());
+        } else {
+            drawAntRect(selectionAnts_);
         }
     }
 }

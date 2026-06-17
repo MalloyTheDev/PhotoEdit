@@ -187,3 +187,23 @@ PE_TEST(selection_tomask_rejects_out_of_range_bounds) {
     s.selectRect(Rect{0, 0, 4, 4});
     PE_CHECK(s.toMask(Rect{1 << 28, 0, 4, 4}).isEmpty());  // out-of-range origin -> empty
 }
+
+PE_TEST(selection_tight_bounds_is_pixel_accurate) {
+    // tightBounds returns the exact pixel extent, unlike the tile-granular selectedBounds.
+    Selection s;
+    PE_CHECK(s.tightBounds().isEmpty());  // inactive -> empty
+
+    s.selectRect(Rect{8, 8, 16, 16});  // wholly inside tile (0,0)
+    PE_CHECK_EQ(s.tightBounds(), (Rect{8, 8, 16, 16}));
+    // selectedBounds snaps to the 256px tile, which is exactly why the ants need tightBounds.
+    PE_CHECK_EQ(s.selectedBounds(), (Rect{0, 0, 256, 256}));
+
+    // A selection straddling a tile boundary: the tight box still hugs the pixels, while the
+    // tile-granular box spans both whole tiles.
+    s.selectRect(Rect{250, 250, 20, 20});  // crosses into tiles (0,0),(1,0),(0,1),(1,1)
+    PE_CHECK_EQ(s.tightBounds(), (Rect{250, 250, 20, 20}));
+    PE_CHECK_EQ(s.selectedBounds(), (Rect{0, 0, 512, 512}));
+
+    s.selectNone();
+    PE_CHECK(s.tightBounds().isEmpty());
+}

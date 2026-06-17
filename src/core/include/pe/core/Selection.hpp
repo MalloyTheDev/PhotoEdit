@@ -48,8 +48,13 @@ public:
     // channel is the coverage value. Becomes active; an empty mask deselects.
     void loadMask(const PixelBuffer& mask, int originX, int originY);
 
-    // Bounding box of selected tiles (empty if inactive / nothing selected).
+    // Bounding box of selected tiles (empty if inactive / nothing selected). Tile-granular
+    // (snaps to 256px); cheap (iterates tiles, not pixels).
     [[nodiscard]] Rect selectedBounds() const noexcept;
+    // Tight pixel bounding box of the actually-selected pixels (empty if inactive / nothing
+    // selected). Pixel-accurate, unlike selectedBounds — for the marching-ants outline. Scans
+    // the selected tiles' pixels, so compute it on selection change, not every repaint.
+    [[nodiscard]] Rect tightBounds() const noexcept;
     [[nodiscard]] std::size_t tileCount() const noexcept { return tiles_.size(); }
 
 private:

@@ -101,6 +101,10 @@ private:
     bool draggingMarquee_ = false;
     QPointF marqueeAnchor_;  // widget space start of drag
     Rect liveMarquee_{};     // current doc-space rect (normalized)
+
+    // Pixel-tight bounds of the committed selection, for the marching-ants outline. Cached
+    // on selection change (and on setDocument) so paintEvent never scans the mask per frame.
+    Rect selectionAnts_{};
 };
 
 }  // namespace pe::app

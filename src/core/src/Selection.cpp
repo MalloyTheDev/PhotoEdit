@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 
 namespace pe {
 
@@ -213,6 +214,35 @@ Rect Selection::selectedBounds() const noexcept {
         bounds = bounds.united(tileBounds(TileCoord{key.first, key.second}));
     }
     return bounds;
+}
+
+Rect Selection::tightBounds() const noexcept {
+    // Exact pixel extent of the non-zero coverage. Bounded by kMaxSelectionTiles tiles, so
+    // the worst-case scan is one-time work a caller does on selection change.
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    int maxX = std::numeric_limits<int>::min();
+    int maxY = std::numeric_limits<int>::min();
+    bool any = false;
+    for (const auto& [key, tile] : tiles_) {
+        const int baseX = key.first * kTileSize;
+        const int baseY = key.second * kTileSize;
+        for (int ly = 0; ly < kTileSize; ++ly) {
+            const std::size_t row = static_cast<std::size_t>(ly) * kTileSize;
+            for (int lx = 0; lx < kTileSize; ++lx) {
+                if (tile[row + static_cast<std::size_t>(lx)] == 0) continue;
+                any = true;
+                const int gx = baseX + lx;
+                const int gy = baseY + ly;
+                minX = std::min(minX, gx);
+                minY = std::min(minY, gy);
+                maxX = std::max(maxX, gx);
+                maxY = std::max(maxY, gy);
+            }
+        }
+    }
+    if (!any) return Rect{};
+    return Rect{minX, minY, maxX - minX + 1, maxY - minY + 1};
 }
 
 }  // namespace pe
