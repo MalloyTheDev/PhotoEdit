@@ -363,14 +363,14 @@ std::unique_ptr<PaintCommand> bakePixelEditImpl(
 }
 }  // namespace
 
-std::unique_ptr<PaintCommand> bakePixelEdit(
-    Document& doc, LayerId layerId, std::string name,
+std::unique_ptr<PaintCommand> bakePixelEditRegion(
+    Document& doc, LayerId layerId, std::string name, Rect region,
     const std::function<void(std::span<Rgbaf>, int, int)>& transform, const Selection* selection) {
     Layer* layer = doc.findLayer(layerId);
     if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
     auto* pl = static_cast<PixelLayer*>(layer);
 
-    const Rect bb = pl->contentBounds();
+    const Rect bb = region;
     if (bb.isEmpty()) return nullptr;
     if (bb.width > kMaxCanvasDimension || bb.height > kMaxCanvasDimension) return nullptr;
     const int64_t area = static_cast<int64_t>(bb.width) * static_cast<int64_t>(bb.height);
@@ -390,6 +390,50 @@ std::unique_ptr<PaintCommand> bakePixelEdit(
             return bakePixelEditImpl<Rgba8>(layerId, pl->tiles(), bb, std::move(name), transform,
                                             selection);
     }
+}
+
+std::unique_ptr<PaintCommand> bakePixelEdit(
+    Document& doc, LayerId layerId, std::string name,
+    const std::function<void(std::span<Rgbaf>, int, int)>& transform, const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    // Filters/adjustments act on the layer's existing content (the region never grows).
+    return bakePixelEditRegion(doc, layerId, std::move(name),
+                               static_cast<PixelLayer*>(layer)->contentBounds(), transform,
+                               selection);
+}
+
+std::unique_ptr<PaintCommand> moveLayerContent(Document& doc, LayerId layerId, int dx, int dy) {
+    if (dx == 0 && dy == 0) return nullptr;  // no movement, nothing to commit
+    // Bound the offset so src+offset cannot overflow int and a pathological drag is rejected
+    // (you cannot shift content farther than a canvas dimension in one command).
+    if (dx > kMaxCanvasDimension || dx < -kMaxCanvasDimension || dy > kMaxCanvasDimension ||
+        dy < -kMaxCanvasDimension) {
+        return nullptr;
+    }
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    const Rect src = static_cast<PixelLayer*>(layer)->contentBounds();
+    if (src.isEmpty()) return nullptr;  // empty layer: nothing to move
+    const Rect dst{src.x + dx, src.y + dy, src.width, src.height};
+    // The edit region spans both the vacated source and the destination, so clearing the old
+    // pixels and writing the shifted ones is one self-contained in-region transform.
+    const Rect region = src.united(dst);
+    return bakePixelEditRegion(
+        doc, layerId, "Move", region,
+        [dx, dy](std::span<Rgbaf> img, int w, int h) {
+            const std::vector<Rgbaf> in(img.begin(), img.end());
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const int sx = x - dx;  // region-local source of the pixel now at (x,y)
+                    const int sy = y - dy;
+                    img[idx(x, y, w)] = (sx >= 0 && sx < w && sy >= 0 && sy < h)
+                                            ? in[idx(sx, sy, w)]
+                                            : Rgbaf{};  // vacated area becomes transparent
+                }
+            }
+        },
+        /*selection=*/nullptr);  // the Move tool shifts the whole layer, not a gated region
 }
 
 std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const Filter& filter,

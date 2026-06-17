@@ -1,9 +1,11 @@
 #include "CanvasView.hpp"
 
 #include "Theme.hpp"
+#include "pe/core/Brush.hpp"  // pe::PaintCommand (move-tool preview command)
 #include "pe/core/Commands.hpp"
 #include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/Filter.hpp"  // pe::moveLayerContent
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/Selection.hpp"
 
@@ -62,9 +64,10 @@ CanvasView::~CanvasView() {
 void CanvasView::setDocument(pe::Document* doc) {
     if (doc_ == doc) return;
     if (doc_ != nullptr) {
-        // Abandon any in-progress stroke on the outgoing document, reverting its
-        // live preview, so the tool never carries stroke state across documents.
+        // Abandon any in-progress stroke or move on the outgoing document, reverting its
+        // live preview, so a tool never carries provisional state across documents.
         if (tool_.isStroking()) tool_.cancel(*doc_);
+        cancelMovePreview();
         doc_->removeObserver(this);
     }
     doc_ = doc;
@@ -112,6 +115,13 @@ void CanvasView::refreshImage() {
 void CanvasView::reloadImage() {
     refreshImage();
     update();
+}
+
+void CanvasView::cancelMovePreview() {
+    if (movePreview_ && doc_ != nullptr) movePreview_->undo(*doc_);  // restore the layer
+    movePreview_.reset();
+    movingContent_ = false;
+    moveLayer_ = pe::kNoLayer;
 }
 
 void CanvasView::refreshRegion(const pe::Rect& region) {
@@ -208,8 +218,13 @@ void CanvasView::setTool(Tool t) {
         liveMarquee_ = Rect{};
         update();
     }
+    if (movingContent_) {  // switching away from Move drops any live move preview
+        cancelMovePreview();
+        reloadImage();
+    }
     setCursor(t == Tool::Hand       ? Qt::OpenHandCursor
               : t == Tool::Zoom     ? Qt::PointingHandCursor
+              : t == Tool::Move     ? Qt::SizeAllCursor
               : t == Tool::Marquee  ? Qt::CrossCursor
               : t == Tool::Inactive ? Qt::ArrowCursor
                                     : Qt::CrossCursor);
@@ -365,6 +380,13 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         emit colorPicked(image_.pixelColor(ix, iy));
         return;
     }
+    if (toolMode_ == Tool::Move) {
+        cancelMovePreview();  // recover from any stale (capture-lost) preview
+        movingContent_ = true;
+        moveStartWidget_ = e->position();
+        moveLayer_ = doc_->activeLayer();  // move the layer that is active when the drag begins
+        return;
+    }
     if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser) return;  // Inactive: no paint
     // Recover if a prior stroke never received its release (e.g. mouse capture was
     // stolen by a modal/Alt-Tab): drop the stale preview before starting fresh.
@@ -396,6 +418,23 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         const int y1 = static_cast<int>(std::ceil(std::max(a.y, b.y)));
         liveMarquee_ = Rect{x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0)};
         update();
+        return;
+    }
+    if (movingContent_ && doc_ != nullptr) {
+        // Cumulative drag delta in document pixels, applied to the ORIGINAL content each move
+        // (the prior preview is reverted first), so the result equals one move by the total.
+        const pe::PointD a =
+            view_.viewToDoc(pe::PointD{moveStartWidget_.x(), moveStartWidget_.y()});
+        const pe::PointD b = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        const int dx = static_cast<int>(std::lround(b.x - a.x));
+        const int dy = static_cast<int>(std::lround(b.y - a.y));
+        if (movePreview_) {
+            movePreview_->undo(*doc_);
+            movePreview_.reset();
+        }
+        movePreview_ = pe::moveLayerContent(*doc_, moveLayer_, dx, dy);
+        if (movePreview_) movePreview_->execute(*doc_);
+        reloadImage();  // a move can touch a large region; re-flatten the whole canvas
         return;
     }
     if (!tool_.isStroking() || doc_ == nullptr) {
@@ -432,6 +471,18 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
         }
         liveMarquee_ = Rect{};
         update();
+        return;
+    }
+    if (movingContent_) {
+        movingContent_ = false;
+        moveLayer_ = pe::kNoLayer;
+        if (movePreview_ && doc_ != nullptr) {
+            movePreview_->undo(*doc_);  // back to the pre-move state
+            doc_->history().push(
+                std::move(movePreview_));  // commit one undo step; observer refreshes
+        } else {
+            reloadImage();  // dragged back to origin / nothing movable: ensure a clean canvas
+        }
         return;
     }
     if (e->button() != Qt::LeftButton || !tool_.isStroking()) {

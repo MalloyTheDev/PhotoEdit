@@ -4,6 +4,8 @@
 #include "pe/core/PaintToolController.hpp"
 #include "pe/core/ViewTransform.hpp"
 
+#include <memory>
+
 #include <QBrush>
 #include <QImage>
 #include <QPoint>
@@ -28,7 +30,7 @@ public:
     // How the canvas interprets a left-button gesture. Brush/Eraser paint, Hand
     // pans, Zoom clicks to zoom; Inactive is a selected-but-unimplemented tool
     // (clicks do nothing) — the scaffold the rest of the toolset wires into.
-    enum class Tool { Brush, Eraser, Hand, Zoom, Marquee, Eyedropper, Inactive };
+    enum class Tool { Brush, Eraser, Hand, Zoom, Move, Marquee, Eyedropper, Inactive };
 
     explicit CanvasView(QWidget* parent = nullptr);
     ~CanvasView() override;
@@ -105,6 +107,14 @@ private:
     // Pixel-tight bounds of the committed selection, for the marching-ants outline. Cached
     // on selection change (and on setDocument) so paintEvent never scans the mask per frame.
     Rect selectionAnts_{};
+
+    // Move-tool drag state: a live preview shifts the active layer's content by the drag
+    // delta (a provisional command reverted on each move and committed on release).
+    void cancelMovePreview();  // revert + drop any in-progress move preview
+    bool movingContent_ = false;
+    QPointF moveStartWidget_;               // drag start (widget space)
+    pe::LayerId moveLayer_ = pe::kNoLayer;  // the layer captured at drag start
+    std::unique_ptr<pe::PaintCommand> movePreview_;
 };
 
 }  // namespace pe::app
