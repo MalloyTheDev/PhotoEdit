@@ -220,6 +220,12 @@ PE_TEST(selection_polygon_fills_interior) {
     PE_CHECK_EQ(s.value(7, 7), static_cast<uint8_t>(255));  // interior filled
     PE_CHECK_EQ(s.value(0, 0), static_cast<uint8_t>(0));    // outside the polygon
     PE_CHECK_EQ(s.value(20, 20), static_cast<uint8_t>(0));  // far outside
+
+    // Extreme vertex coordinates are rejected before the bbox extent is computed, so the
+    // maxX-minX subtraction can never overflow int.
+    const std::vector<Point> huge = {{-(1 << 27), 0}, {1 << 27, 0}, {0, 10}};
+    s.selectPolygon(huge);
+    PE_CHECK(!s.active());
 }
 
 PE_TEST(selection_magic_wand_contiguous_color) {

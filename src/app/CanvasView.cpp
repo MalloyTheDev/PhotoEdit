@@ -70,6 +70,12 @@ void CanvasView::setDocument(pe::Document* doc) {
         cancelMovePreview();
         doc_->removeObserver(this);
     }
+    // Drop any in-progress selection drag so a release after the swap can't commit a
+    // stale gesture (old-document coordinates) against the new document.
+    draggingMarquee_ = false;
+    liveMarquee_ = Rect{};
+    draggingLasso_ = false;
+    lassoPts_.clear();
     doc_ = doc;
     if (doc_ != nullptr) doc_->addObserver(this);
     selectionAnts_ = doc_ != nullptr ? doc_->selection().tightBounds() : pe::Rect{};

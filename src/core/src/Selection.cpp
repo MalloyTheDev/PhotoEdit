@@ -223,6 +223,11 @@ void Selection::selectPolygon(std::span<const Point> verts) {
         minY = std::min(minY, p.y);
         maxY = std::max(maxY, p.y);
     }
+    // Reject extreme coordinates BEFORE computing the extent, so maxX-minX cannot overflow
+    // int (and the edge interpolation stays in range). Matches coordsOutOfRange's bound.
+    if (minX < -kCoordBound || maxX > kCoordBound || minY < -kCoordBound || maxY > kCoordBound) {
+        return;
+    }
     const Rect bbox{minX, minY, maxX - minX + 1, maxY - minY + 1};
     if (rejectFill(bbox)) return;  // empty / out-of-range / over the tile or pixel cap
 
