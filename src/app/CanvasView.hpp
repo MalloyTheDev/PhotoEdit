@@ -72,7 +72,11 @@ protected:
     void tabletEvent(QTabletEvent*) override;
 
 private:
-    void refreshImage();                   // re-flatten doc_ -> image_
+    void refreshImage();  // re-flatten the whole doc_ -> image_
+    // Re-flatten only `region` (document space) into image_ in place — the live-stroke
+    // hot path, so a brush dab does not recomposite the entire canvas. Clamps to the
+    // canvas and falls back to a full refresh if the region cannot be composited.
+    void refreshRegion(const pe::Rect& region);
     void zoomAroundCenter(double factor);  // zoom about the viewport center
     void maybeInitialFit();                // fit once the widget has a real size
     [[nodiscard]] pe::StrokePoint sampleAt(QPointF widgetPos) const;  // widget -> doc space

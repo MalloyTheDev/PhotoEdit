@@ -162,6 +162,35 @@ PE_TEST(composite_fill_opacity_applies) {
     PE_CHECK(near8(img.at(0, 0), Rgba8{128, 0, 128, 255}));
 }
 
+PE_TEST(composite_subrect_matches_full_restricted) {
+    // Partial repaint relies on this: compositing an offset sub-rect must yield
+    // pixels byte-identical to the full composite cropped to that rect. The canvas
+    // region repaint (CanvasView::refreshRegion), the tile cache (CanvasRenderer),
+    // and per-layer thumbnails all composite sub-rects and assume this holds.
+    const Rect canvas{0, 0, 40, 30};
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kRed, canvas));                // full background
+    stack.push_back(solid(kGreen, Rect{5, 5, 20, 10}));  // overlapping patch
+    stack.push_back(solid(kBlue, Rect{18, 8, 15, 18}));  // another patch
+
+    const PixelBuffer full = compositeToImage(stack, canvas);
+    const Rect sub{12, 7, 16, 14};  // offset origin straddling all three layers
+    const PixelBuffer part = compositeToImage(stack, sub);
+    PE_CHECK_EQ(part.width(), sub.width);
+    PE_CHECK_EQ(part.height(), sub.height);
+
+    bool identical = true;
+    for (int y = 0; y < sub.height && identical; ++y) {
+        for (int x = 0; x < sub.width; ++x) {
+            if (!(part.at(x, y) == full.at(sub.x + x, sub.y + y))) {
+                identical = false;
+                break;
+            }
+        }
+    }
+    PE_CHECK(identical);
+}
+
 PE_TEST(composite_oversized_canvas_returns_empty) {
     // The whole-image path refuses canvases above the megapixel budget rather
     // than eagerly allocating gigabytes (tile viewport handles large docs).

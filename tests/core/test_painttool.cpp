@@ -215,6 +215,38 @@ PE_TEST(painttool_begin_while_stroking_is_rejected) {
     tool.end(*doc);
 }
 
+PE_TEST(painttool_tracks_stroke_dirty_bounds) {
+    // The controller accumulates the document-space footprint of the live stroke so
+    // a view can recomposite only that region (not the whole canvas) per sample.
+    auto doc = Document::createBlank(Size{1024, 1024});
+
+    PaintToolController tool;
+    tool.setBrush(hardBrush(16));
+    tool.setColor(kRedF);
+
+    PE_CHECK(tool.strokeDirtyBounds().isEmpty());  // no stroke yet
+
+    PE_CHECK(tool.begin(*doc, pt(40, 40)));
+    const Rect afterBegin = tool.strokeDirtyBounds();
+    PE_CHECK(!afterBegin.isEmpty());
+    PE_CHECK(afterBegin.contains(Point{40, 40}));     // covers the first dab
+    PE_CHECK(!afterBegin.contains(Point{300, 300}));  // but only the first dab
+
+    tool.extend(*doc, pt(300, 300));
+    const Rect afterExtend = tool.strokeDirtyBounds();
+    PE_CHECK(afterExtend.contains(Point{40, 40}));  // grew to cover both ends
+    PE_CHECK(afterExtend.contains(Point{300, 300}));
+    // It is a sub-region of the canvas, not the whole thing — the point of the change.
+    PE_CHECK(afterExtend.width < 1024 || afterExtend.height < 1024);
+
+    tool.end(*doc);
+
+    // A fresh stroke resets the accumulator: it must not carry the prior footprint.
+    PE_CHECK(tool.begin(*doc, pt(40, 40)));
+    PE_CHECK(!tool.strokeDirtyBounds().contains(Point{300, 300}));
+    tool.cancel(*doc);
+}
+
 PE_TEST(painttool_begin_after_cancel_recovers) {
     // The UI recovers a stuck stroke (lost mouse capture / document swap) by
     // cancelling before starting the next one; a cancelled stroke must leave the
