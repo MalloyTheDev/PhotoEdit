@@ -212,23 +212,20 @@ DocumentChange AssignProfileCommand::undo(Document& doc) {
 
 // --- Selection commands (task 12) ---
 
-SetSelectionCommand::SetSelectionCommand(const Selection& sel) {
-    newMask_ = sel.toMask(Rect{0,0,4096,4096}); // large enough sentinel for snapshot
-}
+SetSelectionCommand::SetSelectionCommand(Selection target) : newSel_(std::move(target)) {}
 
 DocumentChange SetSelectionCommand::execute(Document& doc) {
     if (!captured_) {
-        oldMask_ = doc.selection().toMask(Rect{0,0,4096,4096});
+        oldSel_ = doc.selection();  // capture the prior selection once, for undo
         captured_ = true;
     }
-    // load new
-    doc.editableSelection().loadMask(newMask_, 0, 0);
+    doc.editableSelection() = newSel_;
     doc.touchSelection();
     return DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer};
 }
 
 DocumentChange SetSelectionCommand::undo(Document& doc) {
-    doc.editableSelection().loadMask(oldMask_, 0, 0);
+    doc.editableSelection() = oldSel_;
     doc.touchSelection();
     return DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer};
 }

@@ -150,3 +150,30 @@ PE_TEST(erase_empty_space_is_null) {
     std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
     PE_CHECK(eraseStroke(*doc, base, hardBrush(16, 1.0f), pts) == nullptr);  // nothing to erase
 }
+
+PE_TEST(paint_stabilize_smooths_without_collapsing) {
+    // Stabilization (BrushSettings::stabilize) low-pass-filters the path. With many
+    // samples and a moderate factor the stroke must still reach the end of the path
+    // (it must NOT collapse onto the first point — the bug when the lag factor is 1).
+    auto doc = Document::createBlank(Size{96, 96});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts;
+    for (int i = 0; i <= 40; ++i) {
+        pts.push_back(StrokePoint{{8.0f + static_cast<float>(i) * 2.0f, 48.0f}, 1.0f});
+    }
+    BrushSettings b = hardBrush(10, 1.0f);
+    b.stabilize = 0.5f;
+    auto cmd = paintStroke(*doc, base, b, kRedF, pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(alphaAt(*doc, base, 8, 48) > 0);   // painted near the start
+    PE_CHECK(alphaAt(*doc, base, 80, 48) > 0);  // and the lag catches up to the end
+
+    // An extreme factor of 1.0 must be clamped internally so it still paints a
+    // span, not a single dab at the origin.
+    auto doc2 = Document::createBlank(Size{96, 96});
+    BrushSettings b2 = hardBrush(10, 1.0f);
+    b2.stabilize = 1.0f;
+    auto cmd2 = paintStroke(*doc2, doc2->activeLayer(), b2, kRedF, pts);
+    PE_CHECK(cmd2 != nullptr);  // does not collapse to nothing / crash
+}

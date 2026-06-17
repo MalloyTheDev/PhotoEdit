@@ -16,7 +16,7 @@ class Document;
 
 // Path/format-level document I/O: the layer the application's Open/Save use, sitting
 // on top of the byte-level codecs. See docs/systems/16-file-formats.md.
-enum class ImageFormat : std::uint8_t { Unknown, Png, Jpeg, Tiff, WebP, Native, Psd, Psb };
+enum class ImageFormat : std::uint8_t { Unknown, Png, Jpeg, Tiff, WebP, Native };
 
 // Map a file path (or bare extension) to a format, case-insensitively. ".png"->Png,
 // ".jpg"/".jpeg"->Jpeg, ".tif"/".tiff"->Tiff, ".webp"->WebP, ".pedoc"->Native; else
@@ -46,11 +46,8 @@ enum class ImageFormat : std::uint8_t { Unknown, Png, Jpeg, Tiff, WebP, Native, 
 // than the read cap, or malformed/oversized content.
 [[nodiscard]] std::unique_ptr<Document> loadDocument(const std::string& path);
 
-// Save a document to a file on disk atomically (write to sibling .tmp then
-// atomic rename/replace); the format is inferred from the extension.
-// The original file is left untouched on any failure (including disk full
-// or crash during write). Returns false on an unknown extension, an encode
-// failure, or a write/rename error.
+// Save a document to a file on disk; the format is inferred from the extension.
+// Returns false on an unknown extension, an encode failure, or a write error.
 [[nodiscard]] bool saveDocument(const Document& doc, const std::string& path);
 
 }  // namespace pe

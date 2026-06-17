@@ -8,7 +8,16 @@ describe the **intended** design; this file records the **current** reality.
 > "Engine core" means the headless `pe_core` library (no Qt); "App" means the Qt6
 > shell. The engine is built bottom-up first, so engine pieces land ahead of their UI.
 
-Last updated after atomic save, clang gates + .clang-tidy, basic selection+marquee+ants wiring, threat model docs, CanvasRenderer integration in view, first golden tests, vcpkg updates, tool wiring (eyedropper/move), PSD stub, tablet pressure, basic adj/filter UI actions, and quick wins (select menu, modifiers). Test suite expanded. See prioritized list in conversation history.
+Last updated after an audit-driven hardening pass on top of the Photoshop-style UI
+(#61): a document-owned selection with an undoable `SetSelectionCommand`, a Marquee
+selection tool with marching ants and Shift/Alt modifiers, a Select menu
+(All/Deselect/Invert), an eyedropper that sets the paint colour, tablet-pressure
+painting, Image-menu adjustment actions, golden compositor tests, and an enforced
+clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gcc and
+clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
+(Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
+RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
+Test suite: **294 headless cases, 0 failed** (252 in the dependency-free build).
 
 ## Milestones
 
@@ -67,8 +76,12 @@ per-layer thumbnails in the Layers panel, styled menus/lists/controls/scrollbars
 a status bar with the active tool + live zoom %. `CanvasView::Tool` gates input per
 the selected tool.
 
-Next app slice: full tool set, adjustments/filters UI dialogs, performance/GPU, PSD reader, more.
-(Recent: CanvasRenderer integration, golden tests started, eyedropper/move wired, tablet, basic UI actions, PSD stub.)
+Next app slice: functional Move + selection tools (lasso/wand) routed through proper
+undoable commands, adjustment/filter dialogs (the M5/M6 engine is ready), then the
+GPU display path (M2) — each landed with tests, not as a stub.
+(Recent: Marquee selection + marching ants + Select menu, eyedropper sets the paint
+colour, tablet-pressure painting, Image-menu adjustment actions, golden compositor
+tests, and an enforced clang-format CI gate + real ASan/UBSan CI step.)
 
 ## M5 detail — adjustments, filters, analysis (engine complete)
 

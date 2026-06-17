@@ -168,19 +168,23 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
         stampDab(cov, p, radius, hardness, flow);
     };
 
-    // Stabilization skeleton: exponential smoothing for brush dynamics UI.
-    std::vector<StrokePoint> stabPoints = std::vector<StrokePoint>(points.begin(), points.end());
+    // Optional stabilization: exponential smoothing of the path (opt-in via
+    // BrushSettings::stabilize). Only allocate when enabled, and clamp the lag below
+    // 1.0 so a value of exactly 1 can't collapse the whole stroke onto the first
+    // point (alpha == 1 would make every smoothed sample equal points[0]).
+    std::vector<StrokePoint> stabPoints;
+    std::span<const StrokePoint> usePoints = points;
     if (in.stabilize > 0.0f && !points.empty()) {
+        const float alpha = std::min(in.stabilize, 0.95f);
+        stabPoints.assign(points.begin(), points.end());
         Vec2 last = points[0].pos;
-        float alpha = in.stabilize; // 0=none, 1=full lag
-        for (size_t i = 0; i < points.size(); ++i) {
-            last.x = last.x * alpha + points[i].pos.x * (1-alpha);
-            last.y = last.y * alpha + points[i].pos.y * (1-alpha);
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            last.x = last.x * alpha + points[i].pos.x * (1.0f - alpha);
+            last.y = last.y * alpha + points[i].pos.y * (1.0f - alpha);
             stabPoints[i].pos = last;
-            stabPoints[i].pressure = points[i].pressure;
         }
+        usePoints = stabPoints;
     }
-    const auto& usePoints = in.stabilize > 0.f ? stabPoints : points;
 
     // First dab at the start, then one every `step` of arc length.
     if (!usePoints.empty()) dab(usePoints[0].pos, usePoints[0].pressure);

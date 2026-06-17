@@ -6,8 +6,8 @@
 #include "IconUtil.hpp"
 #include "LayersPanel.hpp"
 #include "PropertiesPanel.hpp"
-#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Adjustment.hpp"
+#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Color.hpp"
 #include "pe/core/Commands.hpp"
 #include "pe/core/Document.hpp"
@@ -119,8 +119,10 @@ void MainWindow::buildMenuBar() {
         auto* adj = imageMenu->addMenu(QStringLiteral("Adjustments"));
         adj->addAction(QStringLiteral("Invert"), this, [this]() {
             if (!doc_) return;
-            auto a = std::make_unique<pe::AdjustmentLayer>(std::make_unique<pe::Invert>(), "Invert");
-            doc_->history().push(std::make_unique<pe::AddLayerCommand>(std::move(a), doc_->topLevelCount()));
+            auto a =
+                std::make_unique<pe::AdjustmentLayer>(std::make_unique<pe::Invert>(), "Invert");
+            doc_->history().push(
+                std::make_unique<pe::AddLayerCommand>(std::move(a), doc_->topLevelCount()));
         });
         auto* flt = imageMenu->addMenu(QStringLiteral("Filters"));
         flt->addAction(QStringLiteral("Brightness +0.2 (demo)"), this, [this]() {
@@ -128,27 +130,31 @@ void MainWindow::buildMenuBar() {
             // Demo wiring to engine filter/adjust objects (full FilterCommand later)
             auto a = std::make_unique<pe::AdjustmentLayer>(
                 std::make_unique<pe::BrightnessContrast>(0.2f, 0.0f), "Brightness");
-            doc_->history().push(std::make_unique<pe::AddLayerCommand>(std::move(a), doc_->topLevelCount()));
+            doc_->history().push(
+                std::make_unique<pe::AddLayerCommand>(std::move(a), doc_->topLevelCount()));
         });
     }
     menuBar()->addMenu(QStringLiteral("&Layer"));
     auto* selMenu = menuBar()->addMenu(QStringLiteral("&Select"));
     selMenu->addAction(QStringLiteral("Select All"), this, [this]() {
         if (doc_) {
-            Selection target; target.selectAll(doc_->canvasBounds());
+            Selection target;
+            target.selectAll(doc_->canvasBounds());
             doc_->history().push(std::make_unique<SetSelectionCommand>(target));
         }
     });
     selMenu->addAction(QStringLiteral("Deselect"), this, [this]() {
         if (doc_) {
-            Selection target; target.selectNone();
+            Selection target;
+            target.selectNone();
             doc_->history().push(std::make_unique<SetSelectionCommand>(target));
         }
     });
     selMenu->addSeparator();
     selMenu->addAction(QStringLiteral("Invert Selection"), this, [this]() {
         if (doc_) {
-            Selection target = doc_->selection(); target.invert(doc_->canvasBounds());
+            Selection target = doc_->selection();
+            target.invert(doc_->canvasBounds());
             doc_->history().push(std::make_unique<SetSelectionCommand>(target));
         }
     });
@@ -201,9 +207,9 @@ void MainWindow::buildToolBar() {
     // Brush/Eraser/Hand/Zoom/Marquee/Eyedropper/Move wired; others scaffolded.
     using Tool = CanvasView::Tool;
     const std::vector<std::vector<ToolDef>> groups = {
-        {{"move", "Move", Tool::Move, "V"},
+        {{"move", "Move", Tool::Inactive, "V"},
          {"marquee", "Rectangular Marquee", Tool::Marquee, "M"},
-         {"lasso", "Lasso", Tool::Lasso, "L"},
+         {"lasso", "Lasso", Tool::Inactive, "L"},
          {"wand-sparkles", "Object Selection / Magic Wand", Tool::Inactive, "W"}},
         {{"crop", "Crop", Tool::Inactive, "C"},
          {"frame", "Frame", Tool::Inactive, "K"},
@@ -416,7 +422,13 @@ void MainWindow::updateSwatches() {
 }
 
 void MainWindow::onColorPicked(const QColor& c) {
+    if (!c.isValid()) return;
     fgColor_ = c;
+    // Mirror chooseForegroundColor: the eyedropper sets the actual paint color and
+    // syncs the picker, not just the swatch.
+    canvas_->tool().setColor(pe::Rgbaf{static_cast<float>(c.redF()), static_cast<float>(c.greenF()),
+                                       static_cast<float>(c.blueF()), 1.0f});
+    if (colorPanel_ != nullptr) colorPanel_->setColor(fgColor_);
     updateSwatches();
     statusBar()->showMessage(QStringLiteral("Picked %1").arg(c.name()), 2000);
 }

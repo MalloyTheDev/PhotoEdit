@@ -4,7 +4,6 @@
 #include "pe/core/ColorProfile.hpp"
 #include "pe/core/Command.hpp"
 #include "pe/core/Layer.hpp"
-#include "pe/core/PixelBuffer.hpp"
 #include "pe/core/Selection.hpp"
 
 #include <cstddef>
@@ -149,17 +148,19 @@ private:
     bool captured_ = false;  // oldProfile_ is filled on first execute
 };
 
-// Undoable selection change (for marquee etc). Snapshots via mask for simplicity.
+// Undoable selection change (marquee, Select All/Deselect/Invert, …). Snapshots the
+// whole Selection by value on both sides, so it is exact at any canvas size (no
+// fixed-bounds mask) and round-trips precisely through undo/redo.
 class SetSelectionCommand final : public Command {
 public:
-    explicit SetSelectionCommand(const Selection& sel);
+    explicit SetSelectionCommand(Selection target);
     [[nodiscard]] std::string name() const override { return "Change Selection"; }
     DocumentChange execute(Document&) override;
     DocumentChange undo(Document&) override;
 
 private:
-    PixelBuffer oldMask_;
-    PixelBuffer newMask_;
+    Selection newSel_;  // the selection to apply
+    Selection oldSel_;  // captured on first execute, for undo
     bool captured_ = false;
 };
 

@@ -31,7 +31,6 @@ add_library(pe_core
     src/DocumentIO.cpp
     src/AutoTone.cpp
     src/ColorSpace.cpp
-    src/Performance.cpp
 )
 
 add_library(PhotoEdit::Core ALIAS pe_core)
@@ -178,54 +177,6 @@ if(WEBP_FOUND)
     message(STATUS "  WebP I/O:    libwebp ${WEBP_VERSION}")
 else()
     message(STATUS "  WebP I/O:    DISABLED (libwebp not found)")
-endif()
-
-# Optional LibRaw (camera raw). Stub detection for now (M8+).
-if(PkgConfig_FOUND)
-    pkg_check_modules(LIBRAW IMPORTED_TARGET libraw)
-endif()
-if(NOT LIBRAW_FOUND)
-    find_path(LIBRAW_INCLUDE_DIR NAMES libraw/libraw.h)
-    find_library(LIBRAW_LIBRARY NAMES raw libraw)
-    if(LIBRAW_INCLUDE_DIR AND LIBRAW_LIBRARY)
-        set(LIBRAW_FOUND TRUE)
-    endif()
-endif()
-if(LIBRAW_FOUND)
-    target_compile_definitions(pe_core PUBLIC PHOTOEDIT_HAVE_LIBRAW=1)
-    if(TARGET PkgConfig::LIBRAW)
-        target_link_libraries(pe_core PUBLIC PkgConfig::LIBRAW)
-    else()
-        target_include_directories(pe_core PUBLIC ${LIBRAW_INCLUDE_DIR})
-        target_link_libraries(pe_core PUBLIC ${LIBRAW_LIBRARY})
-    endif()
-    message(STATUS "  RAW I/O:     libraw (stub, M8+)")
-else()
-    message(STATUS "  RAW I/O:     DISABLED (libraw not found)")
-endif()
-
-# Optional OpenEXR (HDR). Stub for M8+.
-if(PkgConfig_FOUND)
-    pkg_check_modules(OPENEXR IMPORTED_TARGET OpenEXR)
-endif()
-if(NOT OPENEXR_FOUND)
-    find_path(OPENEXR_INCLUDE_DIR NAMES OpenEXR/ImfRgbaFile.h)
-    find_library(OPENEXR_LIBRARY NAMES OpenEXR IlmImf)
-    if(OPENEXR_INCLUDE_DIR AND OPENEXR_LIBRARY)
-        set(OPENEXR_FOUND TRUE)
-    endif()
-endif()
-if(OPENEXR_FOUND)
-    target_compile_definitions(pe_core PUBLIC PHOTOEDIT_HAVE_OPENEXR=1)
-    if(TARGET PkgConfig::OPENEXR)
-        target_link_libraries(pe_core PUBLIC PkgConfig::OPENEXR)
-    else()
-        target_include_directories(pe_core PUBLIC ${OPENEXR_INCLUDE_DIR})
-        target_link_libraries(pe_core PUBLIC ${OPENEXR_LIBRARY})
-    endif()
-    message(STATUS "  EXR I/O:     OpenEXR (stub, M8+)")
-else()
-    message(STATUS "  EXR I/O:     DISABLED (openexr not found)")
 endif()
 
 # ---------------------------------------------------------------------------

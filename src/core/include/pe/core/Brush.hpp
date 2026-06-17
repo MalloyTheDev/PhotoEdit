@@ -44,7 +44,7 @@ struct BrushSettings {
     float spacing = 0.25f;   // dab spacing as a fraction of diameter
     BlendMode blendMode = BlendMode::Normal;
     bool pressureControlsSize = false;  // scale diameter by pressure if true
-    float stabilize = 0.0f;  // [0,1] low-pass filter strength for stabilization
+    float stabilize = 0.0f;             // [0,1] low-pass filter strength for stabilization
 };
 
 // Radial dab coverage in [0,1]: 1 at/under the hardness radius, a smoothstep

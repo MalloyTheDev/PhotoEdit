@@ -1,9 +1,7 @@
 #pragma once
 
-#include "pe/core/CanvasRenderer.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/PaintToolController.hpp"
-#include "pe/core/RHI.hpp"
 #include "pe/core/ViewTransform.hpp"
 
 #include <QBrush>
@@ -11,8 +9,6 @@
 #include <QPoint>
 #include <QPointF>
 #include <QWidget>
-
-#include <memory>
 
 namespace pe::app {
 
@@ -32,7 +28,7 @@ public:
     // How the canvas interprets a left-button gesture. Brush/Eraser paint, Hand
     // pans, Zoom clicks to zoom; Inactive is a selected-but-unimplemented tool
     // (clicks do nothing) — the scaffold the rest of the toolset wires into.
-    enum class Tool { Brush, Eraser, Hand, Zoom, Marquee, Eyedropper, Move, Lasso, Inactive };
+    enum class Tool { Brush, Eraser, Hand, Zoom, Marquee, Eyedropper, Inactive };
 
     explicit CanvasView(QWidget* parent = nullptr);
     ~CanvasView() override;
@@ -50,8 +46,8 @@ public:
     [[nodiscard]] Tool activeTool() const noexcept { return toolMode_; }
 
 signals:
-    void zoomChanged(double percent);  // for the status-bar zoom readout
-    void colorPicked(const QColor& c); // for eyedropper tool
+    void zoomChanged(double percent);   // for the status-bar zoom readout
+    void colorPicked(const QColor& c);  // for eyedropper tool
 
 public:
     // View navigation (also driven by the View menu).
@@ -82,8 +78,6 @@ private:
     [[nodiscard]] pe::StrokePoint sampleAt(QPointF widgetPos) const;  // widget -> doc space
 
     pe::Document* doc_ = nullptr;  // not owned; observed while non-null
-    std::unique_ptr<pe::CanvasRenderer> renderer_;  // owns dirty-tile cache for efficient updates
-    std::unique_ptr<pe::RHIDevice> rhi_;  // software RHI for display (task next)
     QImage image_;                 // a private copy of the current composite (RGBA8888)
     pe::PaintToolController tool_;
     pe::ViewTransform view_;  // document <-> widget (device px) mapping
@@ -96,13 +90,8 @@ private:
 
     // Marquee selection drag state (live rect in document pixels)
     bool draggingMarquee_ = false;
-    QPointF marqueeAnchor_;   // widget space start of drag
-    Rect liveMarquee_{};      // current doc-space rect (normalized)
-
-    // Move tool drag state
-    bool draggingMove_ = false;
-    QPointF moveAnchor_;
-    pe::PointD moveStartDoc_{};
+    QPointF marqueeAnchor_;  // widget space start of drag
+    Rect liveMarquee_{};     // current doc-space rect (normalized)
 };
 
 }  // namespace pe::app

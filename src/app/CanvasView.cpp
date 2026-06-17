@@ -4,23 +4,21 @@
 #include "pe/core/Commands.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/PixelBuffer.hpp"
-#include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
 
-#include <QColor>
 #include <QApplication>
+#include <QColor>
 #include <QMouseEvent>
-#include <QTabletEvent>
 #include <QPainter>
 #include <QPixmap>
 #include <QResizeEvent>
 #include <QShowEvent>
+#include <QTabletEvent>
 #include <QTransform>
 #include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
-#include <tuple>
 
 namespace pe::app {
 
@@ -55,7 +53,6 @@ CanvasView::CanvasView(QWidget* parent) : QWidget(parent), checker_(makeCheckerB
 }
 
 CanvasView::~CanvasView() {
-    renderer_.reset();  // unregisters its observer first
     if (doc_ != nullptr) doc_->removeObserver(this);
 }
 
@@ -66,15 +63,9 @@ void CanvasView::setDocument(pe::Document* doc) {
         // live preview, so the tool never carries stroke state across documents.
         if (tool_.isStroking()) tool_.cancel(*doc_);
         doc_->removeObserver(this);
-        renderer_.reset();
     }
     doc_ = doc;
-    if (doc_ != nullptr) {
-        doc_->addObserver(this);
-        renderer_ = std::make_unique<pe::CanvasRenderer>(*doc_);
-        renderer_->setCacheBudgetTiles(pe::kDefaultDisplayCacheTiles);
-        rhi_ = pe::createSoftwareRHI();
-    }
+    if (doc_ != nullptr) doc_->addObserver(this);
     refreshImage();
     needsFit_ = true;  // fit the new document once we have a valid widget size
     maybeInitialFit();
@@ -99,14 +90,7 @@ void CanvasView::refreshImage() {
         image_ = QImage();
         return;
     }
-    // Use CanvasRenderer for dirty-tile aware compositing (recomputes only what changed).
-    // Falls back to full compositeImage only if renderer not present.
-    pe::PixelBuffer buf;
-    if (renderer_) {
-        buf = renderer_->renderRegion(doc_->canvasBounds());
-    } else {
-        buf = doc_->compositeImage();
-    }
+    const pe::PixelBuffer buf = doc_->compositeImage();
     if (buf.isEmpty()) {
         image_ = QImage();
         return;
@@ -179,10 +163,6 @@ void CanvasView::setTool(Tool t) {
     if (draggingMarquee_ && doc_ != nullptr) {
         draggingMarquee_ = false;
         liveMarquee_ = Rect{};
-        update();
-    }
-    if (draggingMove_ && doc_ != nullptr) {
-        draggingMove_ = false;
         update();
     }
     setCursor(t == Tool::Hand       ? Qt::OpenHandCursor
@@ -322,25 +302,18 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         emit zoomChanged(zoomPercent());
         return;
     }
-    if (toolMode_ == Tool::Marquee || toolMode_ == Tool::Lasso) {
+    if (toolMode_ == Tool::Marquee) {
         draggingMarquee_ = true;
         marqueeAnchor_ = e->position();
         liveMarquee_ = Rect{};
         update();
         return;
     }
-    if (toolMode_ == Tool::Eyedropper && doc_ && !image_.isNull()) {
-        pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
-        int ix = std::max(0, std::min((int)std::round(d.x), image_.width() - 1));
-        int iy = std::max(0, std::min((int)std::round(d.y), image_.height() - 1));
-        QColor c = image_.pixelColor(ix, iy);
-        emit colorPicked(c);
-        return;
-    }
-    if (toolMode_ == Tool::Move) {
-        draggingMove_ = true;
-        moveAnchor_ = e->position();
-        moveStartDoc_ = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+    if (toolMode_ == Tool::Eyedropper && doc_ != nullptr && !image_.isNull()) {
+        const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        const int ix = std::clamp(static_cast<int>(std::lround(d.x)), 0, image_.width() - 1);
+        const int iy = std::clamp(static_cast<int>(std::lround(d.y)), 0, image_.height() - 1);
+        emit colorPicked(image_.pixelColor(ix, iy));
         return;
     }
     if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser) return;  // Inactive: no paint
@@ -373,11 +346,6 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         const int x1 = static_cast<int>(std::ceil(std::max(a.x, b.x)));
         const int y1 = static_cast<int>(std::ceil(std::max(a.y, b.y)));
         liveMarquee_ = Rect{x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0)};
-        update();
-        return;
-    }
-    if (draggingMove_ && doc_ != nullptr) {
-        // Live visual feedback (we apply actual shift on release)
         update();
         return;
     }
@@ -414,34 +382,6 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
             // command will execute, snapshot old, notify
         }
         liveMarquee_ = Rect{};
-        update();
-        return;
-    }
-    if (draggingMove_ && doc_ != nullptr) {
-        draggingMove_ = false;
-        pe::PointD endD = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
-        int dx = static_cast<int>(endD.x - moveStartDoc_.x);
-        int dy = static_cast<int>(endD.y - moveStartDoc_.y);
-        if (auto* pl = dynamic_cast<pe::PixelLayer*>(doc_->findLayer(doc_->activeLayer()))) {
-            // Basic wiring: shift layer content by delta (destructive demo; real = undoable command)
-            if (dx || dy) {
-                pe::TileStore& store = pl->tiles();
-                // Simple shift by re-placing pixels (for small docs / demo)
-                std::vector<std::tuple<int,int,pe::Rgba8>> pixels;
-                Rect b = store.contentBounds();
-                if (!b.isEmpty()) {
-                    for (int y = b.top(); y < b.bottom(); ++y) {
-                        for (int x = b.left(); x < b.right(); ++x) {
-                            pe::Rgba8 p = store.pixel(x, y);
-                            if (p.a != 0) pixels.emplace_back(x, y, p);
-                        }
-                    }
-                    for (auto& [x,y,p] : pixels) store.setPixel(x, y, pe::Rgba8{});
-                    for (auto& [x,y,p] : pixels) store.setPixel(x + dx, y + dy, p);
-                    refreshImage();
-                }
-            }
-        }
         update();
         return;
     }

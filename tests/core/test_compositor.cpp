@@ -1,5 +1,5 @@
-#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Adjustment.hpp"
+#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/GroupLayer.hpp"
@@ -367,7 +367,8 @@ PE_TEST(golden_adjustment_invert) {
     PE_CHECK(near8(img.at(7, 7), Rgba8{0, 255, 255, 255}));
 }
 
-// Enhanced golden with "committed reference" buffer (simulating PNG load for future file-based golds)
+// Enhanced golden with "committed reference" buffer (simulating PNG load for future file-based
+// golds)
 PE_TEST(golden_compositor_with_reference_buffer) {
     std::vector<std::unique_ptr<Layer>> stack;
     stack.push_back(solid(kRed));
