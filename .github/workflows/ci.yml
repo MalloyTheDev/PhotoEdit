@@ -81,3 +81,54 @@ jobs:
         run: |
           $env:PATH = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin;$env:PATH"
           ctest --test-dir build/win --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Dependency-free lane: build the engine + tests with NONE of the optional
+  # libraries installed, so every codec / color / zlib path compiles out via its
+  # PHOTOEDIT_HAVE_* guard. This is what a fresh machine (or a minimal container)
+  # sees; it stops the headless core from silently growing a hard dependency.
+  # Warnings are errors here too.
+  # ---------------------------------------------------------------------------
+  core-linux-nodeps:
+    name: Engine core (Linux, no optional deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools only (no image/color/zlib libs)
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure (force optional deps off, then verify none slipped in)
+        run: |
+          set -eo pipefail
+          # PHOTOEDIT_NO_OPTIONAL_DEPS makes this deterministic: the runner ships ubiquitous
+          # base libs (zlib, etc.) that auto-detection would otherwise pick up, so without
+          # the switch the build is not actually dependency-free.
+          cmake --preset linux-core-dev -DPHOTOEDIT_NO_OPTIONAL_DEPS=ON 2>&1 | tee cfg.log
+          # Belt and braces: assert every optional library reported DISABLED, so a future
+          # regression in the force-off switch fails here instead of silently linking a dep.
+          for lib in "Color mgmt" "PNG I/O" "JPEG I/O" "TIFF I/O" "WebP I/O" "Compression"; do
+            grep -q "$lib:.*DISABLED" cfg.log \
+              || { echo "::error::optional dependency '$lib' is enabled; this lane must be dependency-free"; exit 1; }
+          done
+      - name: Build
+        run: cmake --build build/linux-core-dev
+      - name: Test
+        run: ctest --preset linux-core-dev
+
+  # ---------------------------------------------------------------------------
+  # clang-tidy (advisory): runs the committed .clang-tidy over the engine core and
+  # surfaces findings in the log. Non-blocking by design (continue-on-error) — the
+  # config carries no WarningsAsErrors and the codebase has not been triaged to zero
+  # findings, so this informs rather than gates. Promote to a gate after triage.
+  # ---------------------------------------------------------------------------
+  tidy-linux:
+    name: clang-tidy (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools + libs (so codec/color headers resolve)
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-tidy pkg-config liblcms2-dev libpng-dev libturbojpeg0-dev zlib1g-dev libtiff-dev libwebp-dev
+      - name: Configure (exports compile_commands.json)
+        run: cmake --preset linux-core-dev
+      - name: Run clang-tidy on the engine core
+        run: clang-tidy -p build/linux-core-dev $(git ls-files 'src/core/src/*.cpp')

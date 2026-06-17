@@ -48,4 +48,17 @@ PE_TEST(webp_encode_empty_is_empty) {
     PE_CHECK(encodeWebp(PixelBuffer{}).empty());
 }
 
+PE_TEST(webp_decode_truncation_never_crashes) {
+    // Every truncated prefix of a valid WebP must decode to nullopt without crashing —
+    // untrusted-input path (truncation can land inside the RIFF/VP8L headers).
+    PixelBuffer img(32, 24, Rgba8{40, 80, 120, 255});
+    img.set(5, 6, Rgba8{200, 10, 20, 255});
+    const std::vector<std::byte> webp = encodeWebp(img);
+    PE_CHECK(!webp.empty());
+    for (std::size_t n = 0; n < webp.size(); ++n) {
+        (void)decodeWebp(std::span<const std::byte>(webp.data(), n));
+    }
+    PE_CHECK(decodeWebp(webp).has_value());  // the complete stream still decodes
+}
+
 #endif  // PHOTOEDIT_HAVE_WEBP
