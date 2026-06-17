@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <QBrush>
+#include <QColor>
 #include <QImage>
 #include <QPoint>
 #include <QPointF>
@@ -47,6 +48,8 @@ public:
         Lasso,
         Wand,
         Crop,
+        Bucket,
+        Gradient,
         Eyedropper,
         Inactive
     };
@@ -65,6 +68,9 @@ public:
     // the paint controller's mode.
     void setTool(Tool t);
     [[nodiscard]] Tool activeTool() const noexcept { return toolMode_; }
+
+    // Background color (the Gradient tool's far stop; the foreground is the paint color).
+    void setBackgroundColor(const QColor& c) { bgColor_ = c; }
 
 signals:
     void zoomChanged(double percent);   // for the status-bar zoom readout
@@ -126,6 +132,13 @@ private:
     // a polygon selection on release).
     bool draggingLasso_ = false;
     std::vector<pe::Point> lassoPts_;
+
+    // Gradient tool drag: a guide line (widget space) drawn while dragging; on release the
+    // foreground->background gradient is applied along start->end.
+    bool draggingGradient_ = false;
+    QPointF gradStartWidget_;
+    QPointF gradEndWidget_;
+    QColor bgColor_{255, 255, 255};  // gradient far stop (kept in sync by MainWindow)
 
     // Pixel-tight bounds of the committed selection, for the marching-ants outline. Cached
     // on selection change (and on setDocument) so paintEvent never scans the mask per frame.

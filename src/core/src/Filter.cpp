@@ -1,8 +1,12 @@
 #include "pe/core/Filter.hpp"
 
-#include "pe/core/Document.hpp"  // kMaxCanvasDimension
+#include "pe/core/BlendMode.hpp"  // compositeOver (bucket fill)
+#include "pe/core/Document.hpp"   // kMaxCanvasDimension
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
+
+#include <utility>
+#include <vector>
 
 #include <algorithm>
 #include <cmath>
@@ -443,6 +447,82 @@ std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const 
         [&](std::span<Rgbaf> img, int w, int h) {
             std::vector<Rgbaf> in(img.begin(), img.end());  // filters are out-of-place
             filter.apply(in, img, w, h);
+        },
+        selection);
+}
+
+std::unique_ptr<PaintCommand> bucketFill(Document& doc, LayerId layerId, int seedX, int seedY,
+                                         Rgbaf fillColor, int tolerance,
+                                         const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    // Fill over the canvas region so transparent areas fill too; the flood is bounded by it.
+    const Rect region = doc.canvasBounds();
+    if (region.isEmpty() || !region.contains(Point{seedX, seedY})) return nullptr;
+    const float tolF = static_cast<float>(std::clamp(tolerance, 0, 255)) / 255.0f;
+    return bakePixelEditRegion(
+        doc, layerId, "Fill", region,
+        [seedX, seedY, fillColor, tolF, region](std::span<Rgbaf> img, int w, int h) {
+            const std::vector<Rgbaf> orig(img.begin(), img.end());  // match against the original
+            const int sx = seedX - region.x;
+            const int sy = seedY - region.y;
+            const Rgbaf seed = orig[idx(sx, sy, w)];
+            auto chDiff = [](float a, float b) { return a > b ? a - b : b - a; };
+            auto within = [&](const Rgbaf& c) {
+                return chDiff(c.r, seed.r) <= tolF && chDiff(c.g, seed.g) <= tolF &&
+                       chDiff(c.b, seed.b) <= tolF && chDiff(c.a, seed.a) <= tolF;
+            };
+            std::vector<uint8_t> visited(static_cast<std::size_t>(w) * static_cast<std::size_t>(h),
+                                         0);
+            std::vector<std::pair<int, int>> stack;
+            visited[static_cast<std::size_t>(sy) * static_cast<std::size_t>(w) + sx] = 1;
+            stack.emplace_back(sx, sy);
+            while (!stack.empty()) {
+                const auto [x, y] = stack.back();
+                stack.pop_back();
+                if (!within(orig[idx(x, y, w)])) continue;  // pushed but out of tolerance
+                img[idx(x, y, w)] =
+                    compositeOver(BlendMode::Normal, orig[idx(x, y, w)], fillColor, 1.0f);
+                const int nbrs[4][2] = {{x - 1, y}, {x + 1, y}, {x, y - 1}, {x, y + 1}};
+                for (const auto& nb : nbrs) {
+                    const int nx = nb[0];
+                    const int ny = nb[1];
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    const auto i = static_cast<std::size_t>(ny) * static_cast<std::size_t>(w) + nx;
+                    if (visited[i]) continue;
+                    visited[i] = 1;
+                    stack.emplace_back(nx, ny);
+                }
+            }
+        },
+        selection);
+}
+
+std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId, Point start, Point end,
+                                           Rgbaf c0, Rgbaf c1, const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    const double dx = static_cast<double>(end.x) - start.x;
+    const double dy = static_cast<double>(end.y) - start.y;
+    const double len2 = dx * dx + dy * dy;
+    if (len2 < 1.0) return nullptr;  // zero-/sub-pixel-length drag: no gradient
+    const Rect region = doc.canvasBounds();
+    if (region.isEmpty()) return nullptr;
+    return bakePixelEditRegion(
+        doc, layerId, "Gradient", region,
+        [start, dx, dy, len2, c0, c1, region](std::span<Rgbaf> img, int w, int h) {
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    // Project the pixel center onto the start->end axis, clamped to [0,1].
+                    const double px = region.x + x + 0.5 - start.x;
+                    const double py = region.y + y + 0.5 - start.y;
+                    double t = (px * dx + py * dy) / len2;
+                    t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+                    const float tf = static_cast<float>(t);
+                    img[idx(x, y, w)] = Rgbaf{c0.r + (c1.r - c0.r) * tf, c0.g + (c1.g - c0.g) * tf,
+                                              c0.b + (c1.b - c0.b) * tf, c0.a + (c1.a - c0.a) * tf};
+                }
+            }
         },
         selection);
 }
