@@ -2,9 +2,14 @@
 
 #include "pe/core/Brush.hpp"  // PaintCommand (CropCommand composes per-layer moves)
 #include "pe/core/Document.hpp"
-#include "pe/core/Filter.hpp"  // moveLayerContent
+#include "pe/core/Filter.hpp"      // moveLayerContent
+#include "pe/core/GroupLayer.hpp"  // recurse into groups for crop
+#include "pe/core/PixelLayer.hpp"  // contentBounds() on the concrete pixel layer
 
+#include <memory>
+#include <span>
 #include <utility>
+#include <vector>
 
 namespace pe {
 
@@ -19,6 +24,19 @@ DocumentChange propsChange(const Layer* layer, LayerId id) {
 
 DocumentChange structureChange(Rect region, LayerId id) {
     return DocumentChange{DocumentChange::Kind::LayerStructure, region, id};
+}
+
+// Collect every PIXEL layer id in the tree (descending into groups), for the crop content
+// shift — a group's pixel children live in document space and must move with everything else.
+void collectPixelLayers(std::span<const std::unique_ptr<Layer>> layers, std::vector<LayerId>& out) {
+    for (const auto& l : layers) {
+        if (l == nullptr) continue;
+        if (l->kind() == LayerKind::Group) {
+            collectPixelLayers(static_cast<const GroupLayer*>(l.get())->children(), out);
+        } else if (l->kind() == LayerKind::Pixel) {
+            out.push_back(l->id());
+        }
+    }
 }
 
 }  // namespace
@@ -246,12 +264,30 @@ DocumentChange CropCommand::execute(Document& doc) {
             crop_ = Rect{};  // degenerate crop: the command is a no-op
         } else {
             crop_ = eff;
-            // Build (but don't yet apply) a content shift for each top-level pixel layer, so
-            // every move snapshots the ORIGINAL pixels; a zero shift / empty layer yields null.
-            for (const auto& layer : doc.topLevelLayers()) {
-                if (auto m = moveLayerContent(doc, layer->id(), -eff.x, -eff.y)) {
+            const bool needShift = eff.x != 0 || eff.y != 0;
+            std::vector<LayerId> pixelLayers;
+            collectPixelLayers(doc.topLevelLayers(), pixelLayers);  // incl. nested-in-group
+            // Build (but don't yet apply) a content shift for every pixel layer, so each move
+            // snapshots the ORIGINAL pixels. A zero shift / empty layer yields null.
+            bool shiftable = true;
+            for (LayerId id : pixelLayers) {
+                if (auto m = moveLayerContent(doc, id, -eff.x, -eff.y)) {
                     moves_.push_back(std::move(m));
+                } else if (needShift) {
+                    // A null with a real shift means either an empty layer (fine to skip) or a
+                    // layer whose content exceeds the move budget. The latter would leave the
+                    // doc half-cropped (resized but content not moved), so refuse the crop.
+                    const Layer* l = doc.findLayer(id);
+                    if (l != nullptr &&
+                        !static_cast<const PixelLayer*>(l)->contentBounds().isEmpty()) {
+                        shiftable = false;
+                        break;
+                    }
                 }
+            }
+            if (!shiftable) {
+                moves_.clear();  // none executed yet; abort to a no-op rather than half-crop
+                crop_ = Rect{};
             }
         }
     }
