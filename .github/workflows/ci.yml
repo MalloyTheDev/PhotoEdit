@@ -96,17 +96,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install build tools only (no image/color/zlib libs)
         run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - name: Configure (and enforce that zero optional deps were detected)
+      - name: Configure (force optional deps off, then verify none slipped in)
         run: |
           set -eo pipefail
-          cmake --preset linux-core-dev 2>&1 | tee cfg.log
-          # pkg-config is preinstalled on the runner, so detection actually runs; assert
-          # every optional library reported DISABLED. This makes the "no deps" premise
-          # self-verifying — a transitively-installed -dev package would flip a line to a
-          # version string and fail here instead of silently becoming a partial-deps build.
+          # PHOTOEDIT_NO_OPTIONAL_DEPS makes this deterministic: the runner ships ubiquitous
+          # base libs (zlib, etc.) that auto-detection would otherwise pick up, so without
+          # the switch the build is not actually dependency-free.
+          cmake --preset linux-core-dev -DPHOTOEDIT_NO_OPTIONAL_DEPS=ON 2>&1 | tee cfg.log
+          # Belt and braces: assert every optional library reported DISABLED, so a future
+          # regression in the force-off switch fails here instead of silently linking a dep.
           for lib in "Color mgmt" "PNG I/O" "JPEG I/O" "TIFF I/O" "WebP I/O" "Compression"; do
             grep -q "$lib:.*DISABLED" cfg.log \
-              || { echo "::error::optional dependency '$lib' was detected; this lane must be dependency-free"; exit 1; }
+              || { echo "::error::optional dependency '$lib' is enabled; this lane must be dependency-free"; exit 1; }
           done
       - name: Build
         run: cmake --build build/linux-core-dev
