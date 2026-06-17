@@ -329,7 +329,7 @@ void MainWindow::buildToolBar() {
          {"marquee", "Rectangular Marquee", Tool::Marquee, "M"},
          {"lasso", "Lasso", Tool::Lasso, "L"},
          {"wand-sparkles", "Magic Wand", Tool::Wand, "W"}},
-        {{"crop", "Crop", Tool::Inactive, "C"},
+        {{"crop", "Crop", Tool::Crop, "C"},
          {"frame", "Frame", Tool::Inactive, "K"},
          {"pipette", "Eyedropper", Tool::Eyedropper, "I"}},
         {{"bandage", "Spot Healing Brush", Tool::Inactive, "J"},

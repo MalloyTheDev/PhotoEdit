@@ -107,6 +107,10 @@ public:
     // Replace the document's color profile (assign reinterprets; convert pairs this
     // with a pixel transform). Emits a Profile change; the command pairs forward/inverse.
     void cmdSetColorProfile(ColorProfileRef profile);
+    // Resize the canvas (the document's pixel extent). Clamped to [1, kMaxCanvasDimension]
+    // per dimension. Layer content is not moved here — CropCommand pairs this with per-layer
+    // content shifts; resolution/profile are unchanged. Not undoable on its own.
+    void cmdSetCanvasSize(Size newSize) noexcept;
 
 private:
     friend class History;  // History calls notify()/setDirty() after a command.

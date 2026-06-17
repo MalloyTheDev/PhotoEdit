@@ -31,7 +31,19 @@ public:
     // How the canvas interprets a left-button gesture. Brush/Eraser paint, Hand
     // pans, Zoom clicks to zoom; Inactive is a selected-but-unimplemented tool
     // (clicks do nothing) — the scaffold the rest of the toolset wires into.
-    enum class Tool { Brush, Eraser, Hand, Zoom, Move, Marquee, Lasso, Wand, Eyedropper, Inactive };
+    enum class Tool {
+        Brush,
+        Eraser,
+        Hand,
+        Zoom,
+        Move,
+        Marquee,
+        Lasso,
+        Wand,
+        Crop,
+        Eyedropper,
+        Inactive
+    };
 
     explicit CanvasView(QWidget* parent = nullptr);
     ~CanvasView() override;

@@ -97,6 +97,13 @@ void Document::cmdSetColorProfile(ColorProfileRef profile) {
     notify(DocumentChange{DocumentChange::Kind::Profile, Rect{}, kNoLayer});
 }
 
+void Document::cmdSetCanvasSize(Size newSize) noexcept {
+    // Clamp to the valid canvas range; the pairing CropCommand returns the DocumentChange
+    // so History notifies observers once (no self-notify, matching cmdInsertTopLevel).
+    canvasSize_ = Size{std::clamp(newSize.width, 1, kMaxCanvasDimension),
+                       std::clamp(newSize.height, 1, kMaxCanvasDimension)};
+}
+
 void Document::notify(const DocumentChange& change) {
     // Iterate a snapshot so an observer may add/remove observers during dispatch.
     const std::vector<DocumentObserver*> snapshot = observers_;
