@@ -75,6 +75,38 @@ PE_TEST(png_import_garbage_is_null) {
     PE_CHECK(importDocumentPng(junk) == nullptr);
 }
 
+PE_TEST(png_decode_truncation_never_crashes) {
+    // Every truncated prefix of a valid PNG must decode to nullopt without crashing or
+    // over-reading — the decoder is on the untrusted-input path. (A larger image gives a
+    // multi-chunk stream so truncation lands inside IHDR/IDAT/IEND, not just the trailer.)
+    PixelBuffer img(40, 30, Rgba8{12, 34, 56, 200});
+    img.set(7, 9, Rgba8{255, 0, 0, 255});
+    const std::vector<std::byte> png = encodePng(img);
+    PE_CHECK(!png.empty());
+    for (std::size_t n = 0; n < png.size(); ++n) {
+        // Just must not crash; almost all prefixes are invalid, the full blob round-trips.
+        (void)decodePng(std::span<const std::byte>(png.data(), n));
+    }
+    PE_CHECK(decodePng(png).has_value());  // the complete stream still decodes
+}
+
+PE_TEST(png_decode_oversize_dimensions_rejected) {
+    // A PNG header declaring dimensions past the 64 MP decode cap must be rejected before
+    // any pixel buffer is allocated. Forge a minimal signature+IHDR with a huge width.
+    // PNG: 8-byte signature, then IHDR chunk = [len=13][\"IHDR\"][W:4][H:4][bitdepth]...
+    std::vector<std::byte> p;
+    auto put = [&](std::initializer_list<unsigned> bytes) {
+        for (unsigned b : bytes) p.push_back(static_cast<std::byte>(b));
+    };
+    put({0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A});  // PNG signature
+    put({0x00, 0x00, 0x00, 0x0D});                          // IHDR length = 13
+    put({'I', 'H', 'D', 'R'});
+    put({0x30, 0x00, 0x00, 0x00});        // width  = 0x30000000 (~805M) — far past the cap
+    put({0x30, 0x00, 0x00, 0x00});        // height = 0x30000000
+    put({0x08, 0x06, 0x00, 0x00, 0x00});  // 8-bit, RGBA, deflate, no interlace
+    PE_CHECK(!decodePng(p).has_value());  // rejected, no gigantic allocation / no crash
+}
+
 PE_TEST(png_import_extreme_aspect_ratio_is_null_not_crash) {
     // A 1 x 400000 image is under the 64 MP decode cap but exceeds the document's
     // per-dimension canvas cap (300000); import must reject it, not dereference null.

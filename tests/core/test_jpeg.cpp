@@ -57,4 +57,16 @@ PE_TEST(jpeg_quality_is_clamped) {
     PE_CHECK(!encodeJpeg(img, 999).empty());  // clamps to 100
 }
 
+PE_TEST(jpeg_decode_truncation_never_crashes) {
+    // Every truncated prefix of a valid JPEG must decode to nullopt without crashing —
+    // untrusted-input path (truncation lands inside the JFIF/SOF/scan segments).
+    PixelBuffer img(32, 24, Rgba8{40, 120, 200, 255});
+    const std::vector<std::byte> jpeg = encodeJpeg(img, 90);
+    PE_CHECK(!jpeg.empty());
+    for (std::size_t n = 0; n < jpeg.size(); ++n) {
+        (void)decodeJpeg(std::span<const std::byte>(jpeg.data(), n));
+    }
+    PE_CHECK(decodeJpeg(jpeg).has_value());  // the complete stream still decodes
+}
+
 #endif  // PHOTOEDIT_HAVE_JPEG

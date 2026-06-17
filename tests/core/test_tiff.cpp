@@ -48,4 +48,17 @@ PE_TEST(tiff_encode_empty_is_empty) {
     PE_CHECK(encodeTiff(PixelBuffer{}).empty());
 }
 
+PE_TEST(tiff_decode_truncation_never_crashes) {
+    // Every truncated prefix of a valid TIFF must decode to nullopt without crashing —
+    // untrusted-input path (truncation lands inside the IFD / strip offsets).
+    PixelBuffer img(32, 24, Rgba8{40, 80, 120, 255});
+    img.set(5, 6, Rgba8{200, 10, 20, 255});
+    const std::vector<std::byte> tiff = encodeTiff(img);
+    PE_CHECK(!tiff.empty());
+    for (std::size_t n = 0; n < tiff.size(); ++n) {
+        (void)decodeTiff(std::span<const std::byte>(tiff.data(), n));
+    }
+    PE_CHECK(decodeTiff(tiff).has_value());  // the complete stream still decodes
+}
+
 #endif  // PHOTOEDIT_HAVE_TIFF
