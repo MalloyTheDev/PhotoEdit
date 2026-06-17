@@ -76,7 +76,6 @@ EffectDialog::EffectDialog(QWidget* parent, const QString& title, std::vector<Pa
 
         spins_.push_back(spin);
         sliders_.push_back(slider);
-        decimals_.push_back(p.decimals);
     }
     root->addLayout(form);
 

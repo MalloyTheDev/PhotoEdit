@@ -66,7 +66,6 @@ private:
 
     std::vector<QDoubleSpinBox*> spins_;
     std::vector<QSlider*> sliders_;
-    std::vector<int> decimals_;
     QCheckBox* previewChk_ = nullptr;
     bool syncing_ = false;  // guard: programmatic slider<->spin sync must not re-enter
 };
