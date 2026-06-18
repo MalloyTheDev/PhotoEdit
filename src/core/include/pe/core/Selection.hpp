@@ -44,15 +44,21 @@ public:
     void selectPolygon(std::span<const Point> vertices);
 
     // --- edge refinements (Select menu) ---
-    // Each operates on the current selection, clamped to `canvas`, and is a no-op when the
-    // selection is inactive/empty, when `radius` is non-positive, or when the working region
-    // would exceed the selection size caps (so a pathological input never over-allocates).
-    // grow/shrink treat the mask as binary (coverage >= 50% is "in") and move the boundary by
-    // ~`radius` px using a chamfer distance transform (round, not boxy). feather softens the
-    // edge with a Gaussian of standard deviation `radius` px, producing partial coverage.
-    void grow(int radius, Rect canvas);
-    void shrink(int radius, Rect canvas);
+    // Each is a no-op when the selection is inactive/empty, when `radius` is non-positive, or when
+    // the working region would exceed the selection size caps (so a pathological input never
+    // over-allocates). grow/shrink treat the mask as binary (coverage >= 50% is "in") and move the
+    // boundary by ~`radius` px using a chamfer distance transform (round, not boxy); they operate
+    // relative to the selection itself (the exterior, on- or off-canvas, counts as unselected), so
+    // they preserve any off-canvas coverage and shrink contracts inward from a canvas edge too.
+    // feather softens the edge with a Gaussian of standard deviation `radius` px (partial
+    // coverage), confined to `canvas`: the canvas border is treated as "the selection continues",
+    // so a selection touching/filling the canvas is not faded there.
+    void grow(int radius);
+    void shrink(int radius);
     void feather(float radius, Rect canvas);
+
+    // Value equality (active flag + coverage tiles). Lets callers skip a no-op undo step.
+    [[nodiscard]] bool operator==(const Selection&) const = default;
 
     // --- saved selections <-> alpha channels (systems/19) ---
     // Save the selection's coverage over `bounds` to an 8-bit grayscale mask (the

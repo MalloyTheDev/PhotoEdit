@@ -246,10 +246,9 @@ PE_TEST(selection_magic_wand_contiguous_color) {
 }
 
 PE_TEST(selection_grow_expands_boundary) {
-    const Rect canvas{0, 0, 32, 32};
     Selection s;
     s.selectRect(Rect{10, 10, 4, 4});  // x in [10,13], y in [10,13]
-    s.grow(2, canvas);
+    s.grow(2);
     PE_CHECK(s.active());
     PE_CHECK_EQ(static_cast<int>(s.value(8, 11)), 255);   // 2px left of the edge -> now selected
     PE_CHECK_EQ(static_cast<int>(s.value(7, 11)), 0);     // 3px out -> still unselected
@@ -257,21 +256,43 @@ PE_TEST(selection_grow_expands_boundary) {
 }
 
 PE_TEST(selection_shrink_contracts_boundary) {
-    const Rect canvas{0, 0, 32, 32};
     Selection s;
     s.selectRect(Rect{8, 8, 16, 16});  // x,y in [8,23]
-    s.shrink(2, canvas);
+    s.shrink(2);
     PE_CHECK(s.active());
     PE_CHECK_EQ(static_cast<int>(s.value(8, 15)), 0);     // original edge -> eroded away
     PE_CHECK_EQ(static_cast<int>(s.value(11, 15)), 255);  // 3px in -> kept
 }
 
 PE_TEST(selection_shrink_to_nothing_deselects) {
-    const Rect canvas{0, 0, 32, 32};
     Selection s;
     s.selectRect(Rect{10, 10, 2, 2});
-    s.shrink(5, canvas);  // erodes the whole 2x2 away
+    s.shrink(5);  // erodes the whole 2x2 away
     PE_CHECK(!s.active());
+}
+
+// Regression for the audit H1: shrink must contract inward from a canvas-coincident edge, so
+// Select All then shrink yields an inset (it previously was a complete no-op there).
+PE_TEST(selection_shrink_insets_a_canvas_filling_selection) {
+    Selection s;
+    s.selectAll(Rect{0, 0, 32, 32});
+    s.shrink(4);
+    PE_CHECK(s.active());
+    PE_CHECK_EQ(static_cast<int>(s.value(0, 16)), 0);     // canvas-edge column eroded
+    PE_CHECK_EQ(static_cast<int>(s.value(2, 16)), 0);     // within 4px of the edge eroded
+    PE_CHECK_EQ(static_cast<int>(s.value(16, 16)), 255);  // interior kept
+}
+
+// Regression for the audit H2: a refinement must not silently delete off-canvas coverage. A
+// selection extending past the canvas, grown, keeps its off-canvas part.
+PE_TEST(selection_grow_preserves_off_canvas_coverage) {
+    Selection s;
+    s.selectRect(Rect{-10, -10, 40, 40});                 // straddles the (implicit) canvas origin
+    PE_CHECK_EQ(static_cast<int>(s.value(-5, -5)), 255);  // off-origin coverage exists
+    s.grow(2);
+    PE_CHECK(s.active());
+    PE_CHECK_EQ(static_cast<int>(s.value(-5, -5)), 255);   // still selected after grow (not wiped)
+    PE_CHECK_EQ(static_cast<int>(s.value(-12, -5)), 255);  // grew further out by 2px
 }
 
 PE_TEST(selection_feather_softens_edge) {
@@ -288,15 +309,37 @@ PE_TEST(selection_feather_softens_edge) {
     PE_CHECK(outside > 0);  // coverage bled outward (no longer a hard 0)
 }
 
+// Regression for the audit feather-MEDIUM: a canvas-filling selection must NOT fade at the canvas
+// border (clamp-extend treats the canvas edge as "the selection continues").
+PE_TEST(selection_feather_does_not_fade_canvas_border) {
+    const Rect canvas{0, 0, 32, 32};
+    Selection s;
+    s.selectAll(canvas);
+    s.feather(3.0f, canvas);
+    PE_CHECK(s.active());
+    PE_CHECK_EQ(static_cast<int>(s.value(0, 16)), 255);   // canvas-edge pixel stays fully selected
+    PE_CHECK_EQ(static_cast<int>(s.value(16, 16)), 255);  // interior unchanged
+}
+
 PE_TEST(selection_refine_noops_when_inactive) {
     const Rect canvas{0, 0, 32, 32};
     Selection s;  // inactive
-    s.grow(3, canvas);
+    s.grow(3);
     PE_CHECK(!s.active());
-    s.shrink(3, canvas);
+    s.shrink(3);
     PE_CHECK(!s.active());
     s.feather(3.0f, canvas);
     PE_CHECK(!s.active());
-    s.grow(0, canvas);  // non-positive radius is a no-op too
+    s.grow(0);  // non-positive radius is a no-op too
     PE_CHECK(!s.active());
+}
+
+// A tiny-but-positive feather sigma must not produce a NaN-poisoned kernel (sigma is floored).
+PE_TEST(selection_feather_tiny_sigma_is_safe) {
+    const Rect canvas{0, 0, 32, 32};
+    Selection s;
+    s.selectRect(Rect{8, 8, 16, 16});
+    s.feather(1e-30f, canvas);
+    PE_CHECK(s.active());                                 // not NaN-wiped into deselection
+    PE_CHECK_EQ(static_cast<int>(s.value(15, 15)), 255);  // interior intact
 }

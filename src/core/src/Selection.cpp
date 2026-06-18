@@ -318,8 +318,10 @@ void chamferThreshold(PixelBuffer& mask, int radius, bool grow) {
     }
 }
 
-// Separable Gaussian blur of mask.r (coverage 0..255), zero-padded at the buffer edges (outside
-// the materialized region is unselected). sigma must be > 0.
+// Separable Gaussian blur of mask.r (coverage 0..255). Samples past the buffer edge clamp-extend
+// (replicate the edge value): feather clamps its region to the canvas, so this treats the canvas
+// border as "the selection continues" — a selection touching/filling the canvas does NOT fade
+// there (only a real selected/unselected boundary inside the buffer softens). sigma must be > 0.
 void gaussianMask(PixelBuffer& mask, float sigma) {
     const int w = mask.width();
     const int h = mask.height();
@@ -344,8 +346,7 @@ void gaussianMask(PixelBuffer& mask, float sigma) {
         for (int x = 0; x < w; ++x) {
             float acc = 0.0f;
             for (int i = -radius; i <= radius; ++i) {
-                const int sx = x + i;
-                if (sx < 0 || sx >= w) continue;  // zero-pad
+                const int sx = std::clamp(x + i, 0, w - 1);  // clamp-extend (replicate edge)
                 acc += kernel[static_cast<std::size_t>(i + radius)] * src[idx(sx, y)];
             }
             tmp[idx(x, y)] = acc;
@@ -355,8 +356,7 @@ void gaussianMask(PixelBuffer& mask, float sigma) {
         for (int x = 0; x < w; ++x) {
             float acc = 0.0f;
             for (int i = -radius; i <= radius; ++i) {
-                const int sy = y + i;
-                if (sy < 0 || sy >= h) continue;
+                const int sy = std::clamp(y + i, 0, h - 1);  // clamp-extend (replicate edge)
                 acc += kernel[static_cast<std::size_t>(i + radius)] * tmp[idx(x, sy)];
             }
             const auto v =
@@ -367,13 +367,15 @@ void gaussianMask(PixelBuffer& mask, float sigma) {
 }
 }  // namespace
 
-void Selection::grow(int radius, Rect canvas) {
+void Selection::grow(int radius) {
     if (!active_ || radius <= 0) return;
     const int r = std::min(radius, kMaxRefineRadius);
     const Rect bounds = tightBounds();
     if (bounds.isEmpty()) return;
-    // Expand by r so the dilation has room to grow into; clamp to the canvas.
-    const Rect region = expandRect(bounds, r).intersected(canvas);
+    // Expand by r so the dilation has room to grow into. NOT clamped to the canvas: the region
+    // covers the whole selection (so off-canvas coverage round-trips and is preserved), and the
+    // un-materialized exterior reads as unselected via toMask.
+    const Rect region = expandRect(bounds, r);
     if (region.isEmpty()) return;
     if (static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) return;
     PixelBuffer mask = toMask(region);
@@ -383,14 +385,15 @@ void Selection::grow(int radius, Rect canvas) {
     if (tiles_.empty()) selectNone();
 }
 
-void Selection::shrink(int radius, Rect canvas) {
+void Selection::shrink(int radius) {
     if (!active_ || radius <= 0) return;
     const int r = std::min(radius, kMaxRefineRadius);
     const Rect bounds = tightBounds();
     if (bounds.isEmpty()) return;
-    // Expand by r so the surrounding OUT pixels seed the distance transform (erosion measures the
-    // distance to the nearest unselected pixel, which lies just outside the selection's edge).
-    const Rect region = expandRect(bounds, r).intersected(canvas);
+    // Expand by r (NOT clamped to the canvas) so the r-wide exterior collar is materialized as
+    // unselected and seeds the erosion distance transform on EVERY side — including any edge that
+    // coincides with the canvas boundary, so a canvas-filling selection still contracts inward.
+    const Rect region = expandRect(bounds, r);
     if (region.isEmpty()) return;
     if (static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) return;
     PixelBuffer mask = toMask(region);
@@ -402,7 +405,9 @@ void Selection::shrink(int radius, Rect canvas) {
 
 void Selection::feather(float radius, Rect canvas) {
     if (!active_ || !(radius > 0.0f)) return;
-    const float sigma = std::min(radius, kMaxFeatherSigma);
+    // Floor the sigma so 2*sigma*sigma can't underflow to 0 (which would make the Gaussian kernel
+    // NaN); the UI already clamps, but the engine API must not produce garbage on a tiny input.
+    const float sigma = std::clamp(radius, 0.05f, kMaxFeatherSigma);
     const int margin = std::max(1, static_cast<int>(std::ceil(sigma * 3.0f)));
     const Rect bounds = tightBounds();
     if (bounds.isEmpty()) return;
