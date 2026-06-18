@@ -4,6 +4,7 @@
 #include "pe/core/Document.hpp"
 #include "pe/core/History.hpp"
 
+#include <cmath>
 #include <utility>
 
 namespace pe {
@@ -18,6 +19,14 @@ std::unique_ptr<PaintCommand> PaintToolController::buildStroke(Document& doc) co
             return dodgeStroke(doc, layer_, brush_, points_, selection_);
         case Mode::Burn:
             return burnStroke(doc, layer_, brush_, points_, selection_);
+        case Mode::Clone: {
+            if (!cloneSourceValid_ || points_.empty()) return nullptr;  // no source anchor set
+            // Lock the source->dest offset to the stroke's first point (sampled every rebuild from
+            // points_[0], so it is stable across extend()).
+            const int offX = static_cast<int>(std::lround(points_[0].pos.x)) - cloneSource_.x;
+            const int offY = static_cast<int>(std::lround(points_[0].pos.y)) - cloneSource_.y;
+            return cloneStroke(doc, layer_, brush_, points_, offX, offY, selection_);
+        }
         case Mode::Brush:
         default:
             return paintStroke(doc, layer_, brush_, color_, points_, selection_);

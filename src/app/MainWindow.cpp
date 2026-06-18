@@ -343,7 +343,7 @@ void MainWindow::buildToolBar() {
          {"pipette", "Eyedropper", Tool::Eyedropper, "I"}},
         {{"bandage", "Spot Healing Brush", Tool::Inactive, "J"},
          {"paintbrush", "Brush", Tool::Brush, "B"},
-         {"stamp", "Clone Stamp", Tool::Inactive, "S"},
+         {"stamp", "Clone Stamp", Tool::Clone, "S"},
          {"history", "History Brush", Tool::Inactive, "Y"},
          {"eraser", "Eraser", Tool::Eraser, "E"},
          {"blend", "Gradient", Tool::Gradient, "G"},
@@ -371,14 +371,16 @@ void MainWindow::buildToolBar() {
             QString tip = QString::fromUtf8(def.label);
             if (!shortcut.isEmpty()) tip += QStringLiteral("  (%1)").arg(shortcut);
             if (def.tool == Tool::Dodge) tip += QStringLiteral("  —  hold Alt to Burn (darken)");
+            if (def.tool == Tool::Clone) tip += QStringLiteral("  —  Alt-click to set the source");
             if (!wired) tip += QStringLiteral("  — coming soon");
             a->setToolTip(tip);
             if (!shortcut.isEmpty()) a->setShortcut(QKeySequence(shortcut));
             const Tool tool = def.tool;
             const QString label = QString::fromUtf8(def.label);
             OptKind kind = OptKind::None;
-            if (def.tool == Tool::Brush || def.tool == Tool::Eraser || def.tool == Tool::Dodge) {
-                kind = OptKind::Brush;  // size/opacity drive the tone brush's footprint + strength
+            if (def.tool == Tool::Brush || def.tool == Tool::Eraser || def.tool == Tool::Dodge ||
+                def.tool == Tool::Clone) {
+                kind = OptKind::Brush;  // size/opacity drive the brush footprint + strength
             } else if (std::string_view(def.icon) == "move") {
                 kind = OptKind::Move;
             }

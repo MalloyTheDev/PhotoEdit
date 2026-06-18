@@ -197,6 +197,8 @@ void CanvasView::setTool(Tool t) {
         tool_.setMode(pe::PaintToolController::Mode::Eraser);
     } else if (t == Tool::Dodge) {
         tool_.setMode(pe::PaintToolController::Mode::Dodge);  // Alt at stroke start burns instead
+    } else if (t == Tool::Clone) {
+        tool_.setMode(pe::PaintToolController::Mode::Clone);  // Alt-click sets the source anchor
     }
     if (draggingMarquee_ && doc_ != nullptr) {
         draggingMarquee_ = false;
@@ -349,7 +351,8 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
         e->ignore();
         return;
     }
-    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge) {
+    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge &&
+        toolMode_ != Tool::Clone) {
         e->ignore();
         return;
     }
@@ -500,7 +503,23 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         if (doc_->canvasBounds().contains(p)) emit textRequested(QPointF(d.x, d.y));
         return;
     }
-    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge) {
+    if (toolMode_ == Tool::Clone) {
+        const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        if (e->modifiers() & Qt::AltModifier) {
+            // Alt-click sets the clone source anchor (no stroke); the next drag clones from it.
+            tool_.setCloneSource(
+                pe::Point{static_cast<int>(std::lround(d.x)), static_cast<int>(std::lround(d.y))});
+            emit toolMessage(QStringLiteral("Clone source set"));
+            return;
+        }
+        if (!tool_.hasCloneSource()) {
+            emit toolMessage(QStringLiteral("Alt-click to set a clone source first."));
+            return;
+        }
+        // else: fall through to begin a clone stroke (mode is Clone via setTool).
+    }
+    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge &&
+        toolMode_ != Tool::Clone) {
         return;  // Inactive: no paint
     }
     if (toolMode_ == Tool::Dodge) {

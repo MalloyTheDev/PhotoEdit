@@ -32,7 +32,7 @@ class PaintCommand;
 // docs/systems/09-tool-system.md.
 class PaintToolController {
 public:
-    enum class Mode { Brush, Eraser, Dodge, Burn };
+    enum class Mode { Brush, Eraser, Dodge, Burn, Clone };
 
     PaintToolController() = default;
     // Out-of-line so unique_ptr<PaintCommand> only needs a forward declaration here.
@@ -49,6 +49,15 @@ public:
     [[nodiscard]] Rgbaf color() const noexcept { return color_; }
     void setMode(Mode m) noexcept { mode_ = m; }
     [[nodiscard]] Mode mode() const noexcept { return mode_; }
+
+    // Clone Stamp source anchor (document space), set by Alt-click. The Clone-mode stroke samples
+    // from here, with the source->dest offset locked to the stroke's first point. Persists across
+    // strokes until reset; a Clone stroke before a source is set deposits nothing.
+    void setCloneSource(Point p) noexcept {
+        cloneSource_ = p;
+        cloneSourceValid_ = true;
+    }
+    [[nodiscard]] bool hasCloneSource() const noexcept { return cloneSourceValid_; }
 
     [[nodiscard]] bool isStroking() const noexcept { return stroking_; }
 
@@ -81,6 +90,9 @@ private:
     BrushSettings brush_{};
     Rgbaf color_{0.0f, 0.0f, 0.0f, 1.0f};  // opaque black foreground default
     Mode mode_ = Mode::Brush;
+
+    Point cloneSource_{};            // Clone Stamp source anchor (doc space)
+    bool cloneSourceValid_ = false;  // set once the user Alt-clicks a source
 
     bool stroking_ = false;
     LayerId layer_ = kNoLayer;

@@ -283,3 +283,35 @@ PE_TEST(dodge_does_not_darken_superwhite_f32) {
     if (cmd != nullptr) doc->history().push(std::move(cmd));
     PE_CHECK(pl->tilesF().pixel(8, 8).r >= 2.0f - 1e-4f);  // not darkened
 }
+
+PE_TEST(clone_stroke_copies_source_region) {
+    // A red square at the top-left; cloning with an offset that maps the brushed area back onto the
+    // red square copies red into the (empty) brushed area.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 16, 16}, Rgba8{255, 0, 0, 255});  // red source patch
+
+    // Paint at (40,40); offset = firstPoint - sourceAnchor = (40,40) - (8,8) = (32,32). So pixel
+    // (40,40) samples source (8,8) which is inside the red patch.
+    std::vector<StrokePoint> pts = {{{40, 40}, 1.0f}};
+    auto cmd = cloneStroke(*doc, base, hardBrush(8, 1.0f), pts, /*offsetX=*/32, /*offsetY=*/32);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK_EQ(pl->tiles().pixel(40, 40), (Rgba8{255, 0, 0, 255}));  // red cloned in
+    PE_CHECK(pl->tiles().pixel(0, 0).r == 255);                       // source untouched
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(40, 40).a, static_cast<uint8_t>(0));  // restored
+}
+
+PE_TEST(clone_stroke_empty_source_deposits_nothing) {
+    // Cloning from an empty (transparent) source region composites nothing -> no command.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 16, 16}, Rgba8{255, 0, 0, 255});  // red patch at top-left
+    // Offset (0,0): pixel (40,40) samples source (40,40), which is transparent.
+    std::vector<StrokePoint> pts = {{{40, 40}, 1.0f}};
+    PE_CHECK(cloneStroke(*doc, base, hardBrush(8, 1.0f), pts, 0, 0) == nullptr);
+}
