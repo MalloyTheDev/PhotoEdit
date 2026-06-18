@@ -283,3 +283,119 @@ PE_TEST(dodge_does_not_darken_superwhite_f32) {
     if (cmd != nullptr) doc->history().push(std::move(cmd));
     PE_CHECK(pl->tilesF().pixel(8, 8).r >= 2.0f - 1e-4f);  // not darkened
 }
+
+PE_TEST(clone_stroke_copies_source_region) {
+    // A red square at the top-left; cloning with an offset that maps the brushed area back onto the
+    // red square copies red into the (empty) brushed area.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 16, 16}, Rgba8{255, 0, 0, 255});  // red source patch
+
+    // Paint at (40,40); offset = firstPoint - sourceAnchor = (40,40) - (8,8) = (32,32). So pixel
+    // (40,40) samples source (8,8) which is inside the red patch.
+    std::vector<StrokePoint> pts = {{{40, 40}, 1.0f}};
+    auto cmd = cloneStroke(*doc, base, hardBrush(8, 1.0f), pts, /*offsetX=*/32, /*offsetY=*/32);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK_EQ(pl->tiles().pixel(40, 40), (Rgba8{255, 0, 0, 255}));  // red cloned in
+    PE_CHECK(pl->tiles().pixel(0, 0).r == 255);                       // source untouched
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(40, 40).a, static_cast<uint8_t>(0));  // restored
+}
+
+PE_TEST(clone_stroke_empty_source_deposits_nothing) {
+    // Cloning from an empty (transparent) source region composites nothing -> no command.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 16, 16}, Rgba8{255, 0, 0, 255});  // red patch at top-left
+    // Offset (0,0): pixel (40,40) samples source (40,40), which is transparent.
+    std::vector<StrokePoint> pts = {{{40, 40}, 1.0f}};
+    PE_CHECK(cloneStroke(*doc, base, hardBrush(8, 1.0f), pts, 0, 0) == nullptr);
+}
+
+PE_TEST(controller_clone_no_feedback_on_overlapping_drag) {
+    // Drive Clone through the controller (begin/extend/end). A left->right drag with a small
+    // offset over a narrow source stripe must NOT smear: each painted pixel samples the PRE-STROKE
+    // (S0) source, so red only appears where the original source maps in — it does not propagate
+    // across the whole drag (which is what a feedback bug would do).
+    auto doc = Document::createBlank(Size{80, 80});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 16, 80}, Rgba8{255, 0, 0, 255});  // 16px red stripe on the left
+
+    PaintToolController c;
+    c.setBrush(hardBrush(8, 1.0f));
+    c.setMode(PaintToolController::Mode::Clone);
+    c.setCloneSource(Point{8, 40});                        // inside the red stripe
+    PE_CHECK(c.begin(*doc, StrokePoint{{18, 40}, 1.0f}));  // offset = (18-8, 0) = (10, 0)
+    c.extend(*doc, StrokePoint{{30, 40}, 1.0f});
+    c.extend(*doc, StrokePoint{{50, 40}, 1.0f});
+    c.extend(*doc, StrokePoint{{70, 40}, 1.0f});
+    PE_CHECK(c.end(*doc));
+
+    PE_CHECK_EQ(pl->tiles().pixel(20, 40), (Rgba8{255, 0, 0, 255}));  // samples original x=10 (red)
+    PE_CHECK_EQ(pl->tiles().pixel(50, 40).a,
+                static_cast<uint8_t>(0));  // samples original x=40 (empty) -> no smear
+}
+
+PE_TEST(controller_clone_requires_a_source) {
+    // Clone mode with no source anchor deposits nothing (the stroke commits no command).
+    auto doc = Document::createBlank(Size{32, 32});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 32, 32}, Rgba8{0, 0, 255, 255});
+    PaintToolController c;
+    c.setBrush(hardBrush(8, 1.0f));
+    c.setMode(PaintToolController::Mode::Clone);  // no setCloneSource()
+    PE_CHECK(c.begin(*doc, StrokePoint{{16, 16}, 1.0f}));
+    PE_CHECK(!c.end(*doc));  // nothing deposited
+}
+
+PE_TEST(clone_honors_selection) {
+    auto doc = Document::createBlank(Size{32, 32});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 8, 32}, Rgba8{255, 0, 0, 255});  // red source strip
+
+    Selection sel;
+    sel.selectRect(Rect{0, 0, 32, 8});  // only the top band is writable
+    std::vector<StrokePoint> pts = {{{20, 4}, 1.0f},
+                                    {{20, 20}, 1.0f}};  // spans in/out of selection
+    auto cmd =
+        cloneStroke(*doc, base, hardBrush(8, 1.0f), pts, /*offsetX=*/16, /*offsetY=*/0, &sel);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK_EQ(pl->tiles().pixel(20, 4), (Rgba8{255, 0, 0, 255}));  // in selection -> cloned
+    PE_CHECK_EQ(pl->tiles().pixel(20, 20).a,
+                static_cast<uint8_t>(0));  // outside selection -> untouched
+}
+
+PE_TEST(clone_on_16bit_layer) {
+    auto doc = Document::createBlank(Size{32, 32}, ColorMode::RGB, BitDepth::U16);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles16().fillRect(Rect{0, 0, 8, 32}, Rgba16{60000, 0, 0, 65535});  // red source (16-bit)
+    std::vector<StrokePoint> pts = {{{20, 16}, 1.0f}};
+    auto cmd = cloneStroke(*doc, base, hardBrush(8, 1.0f), pts, /*offsetX=*/16, /*offsetY=*/0);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    const Rgba16 px = pl->tiles16().pixel(20, 16);
+    PE_CHECK(px.r > 55000 && px.g < 2000 && px.a > 60000);  // cloned 16-bit red
+}
+
+PE_TEST(clone_preserves_superwhite_on_f32) {
+    // Cloning an HDR (>1.0) source onto a transparent F32 layer must reproduce the value, not clip
+    // it to 1.0 (Clone uses an unclamped straight-alpha composite for Normal blend).
+    auto doc = Document::createBlank(Size{32, 32}, ColorMode::RGB, BitDepth::F32);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tilesF().fillRect(Rect{0, 0, 8, 32}, Rgbaf{4.0f, 0.0f, 0.0f, 1.0f});  // super-white red
+    std::vector<StrokePoint> pts = {{{20, 16}, 1.0f}};
+    auto cmd = cloneStroke(*doc, base, hardBrush(8, 1.0f), pts, /*offsetX=*/16, /*offsetY=*/0);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(pl->tilesF().pixel(20, 16).r > 3.5f);  // HDR value preserved, not clamped to 1.0
+}

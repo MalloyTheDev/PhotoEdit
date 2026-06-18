@@ -78,6 +78,7 @@ void CanvasView::setDocument(pe::Document* doc) {
     draggingLasso_ = false;
     lassoPts_.clear();
     draggingGradient_ = false;
+    tool_.clearCloneSource();  // a clone anchor is stale doc-space state across documents
     doc_ = doc;
     if (doc_ != nullptr) {
         doc_->addObserver(this);
@@ -125,6 +126,21 @@ QString CanvasView::fillUnavailableMessage() const {
         return QStringLiteral("Select a pixel layer to fill.");
     }
     return QStringLiteral("Image is too large to fill in one step.");
+}
+
+bool CanvasView::handleClonePress(const pe::PointD& docPt, bool altHeld) {
+    if (altHeld) {
+        // Alt-click sets the clone source anchor (no stroke); the next drag clones from it.
+        tool_.setCloneSource(pe::Point{static_cast<int>(std::lround(docPt.x)),
+                                       static_cast<int>(std::lround(docPt.y))});
+        emit toolMessage(QStringLiteral("Clone source set"));
+        return true;
+    }
+    if (!tool_.hasCloneSource()) {
+        emit toolMessage(QStringLiteral("Alt-click to set a clone source first."));
+        return true;
+    }
+    return false;  // begin a clone stroke
 }
 
 void CanvasView::cancelMovePreview() {
@@ -197,6 +213,8 @@ void CanvasView::setTool(Tool t) {
         tool_.setMode(pe::PaintToolController::Mode::Eraser);
     } else if (t == Tool::Dodge) {
         tool_.setMode(pe::PaintToolController::Mode::Dodge);  // Alt at stroke start burns instead
+    } else if (t == Tool::Clone) {
+        tool_.setMode(pe::PaintToolController::Mode::Clone);  // Alt-click sets the source anchor
     }
     if (draggingMarquee_ && doc_ != nullptr) {
         draggingMarquee_ = false;
@@ -349,7 +367,8 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
         e->ignore();
         return;
     }
-    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge) {
+    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge &&
+        toolMode_ != Tool::Clone) {
         e->ignore();
         return;
     }
@@ -358,6 +377,12 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
     switch (e->type()) {
         case QEvent::TabletPress:
             if (tool_.isStroking()) tool_.cancel(*doc_);
+            if (toolMode_ == Tool::Clone &&
+                handleClonePress(view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()}),
+                                 (e->modifiers() & Qt::AltModifier) != 0)) {
+                e->accept();  // Alt set the source / no source yet — no stroke begins
+                return;
+            }
             if (toolMode_ == Tool::Dodge) {
                 tool_.setMode((e->modifiers() & Qt::AltModifier)
                                   ? pe::PaintToolController::Mode::Burn
@@ -500,7 +525,13 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         if (doc_->canvasBounds().contains(p)) emit textRequested(QPointF(d.x, d.y));
         return;
     }
-    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge) {
+    if (toolMode_ == Tool::Clone) {
+        const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        if (handleClonePress(d, (e->modifiers() & Qt::AltModifier) != 0)) return;
+        // else: fall through to begin a clone stroke (mode is Clone via setTool).
+    }
+    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge &&
+        toolMode_ != Tool::Clone) {
         return;  // Inactive: no paint
     }
     if (toolMode_ == Tool::Dodge) {

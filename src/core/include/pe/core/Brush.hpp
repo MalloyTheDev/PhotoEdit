@@ -126,4 +126,15 @@ private:
                                                        std::span<const StrokePoint> points,
                                                        const Selection* selection = nullptr);
 
+// Clone Stamp: the same brush pipeline, but each painted pixel (x, y) is composited from the
+// layer's PRE-STROKE pixel at (x - offsetX, y - offsetY) — `offset` is the first stroke point minus
+// the user's clone-source anchor. Sampling the pre-stroke state means source/dest overlap does not
+// feed back. Honors the selection. Returns nullptr if not a pixel layer or nothing is deposited
+// (e.g. the source region is empty/transparent).
+[[nodiscard]] std::unique_ptr<PaintCommand> cloneStroke(Document& doc, LayerId layerId,
+                                                        const BrushSettings& settings,
+                                                        std::span<const StrokePoint> points,
+                                                        int offsetX, int offsetY,
+                                                        const Selection* selection = nullptr);
+
 }  // namespace pe

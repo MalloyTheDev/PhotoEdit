@@ -53,6 +53,7 @@ public:
         Gradient,
         Type,
         Dodge,  // tone brush (lighten); Alt during the stroke burns (darkens) instead
+        Clone,  // clone stamp; Alt-click sets the source, then drag clones from it
         Eyedropper,
         Inactive
     };
@@ -118,6 +119,10 @@ private:
     // Why a Bucket/Gradient fill returned no command, for status-bar feedback: the active layer
     // isn't paintable pixels, or the canvas exceeds the engine's per-op fill budget.
     [[nodiscard]] QString fillUnavailableMessage() const;
+    // Clone-tool press handling shared by the mouse and tablet paths. Alt-click sets the source
+    // anchor (`docPt` in document space); a click with no source set shows a hint. Returns true if
+    // the press was consumed (no stroke should begin), false to begin a clone stroke.
+    [[nodiscard]] bool handleClonePress(const pe::PointD& docPt, bool altHeld);
 
     pe::Document* doc_ = nullptr;  // not owned; observed while non-null
     // Tile-cache renderer bound to doc_: composites only visible/dirty tiles, so a huge

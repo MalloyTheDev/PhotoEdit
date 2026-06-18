@@ -24,7 +24,7 @@ float dabCoverage(float d, float hardness) noexcept {
 
 namespace {
 
-enum class PaintOp { Paint, Erase, Dodge, Burn };
+enum class PaintOp { Paint, Erase, Dodge, Burn, Clone };
 
 // Per-stroke tone strength for Dodge/Burn at full brush coverage, modulated further by the brush
 // opacity/flow. Kept low so each pass is a modest adjustment that builds up over repeated strokes
@@ -96,6 +96,7 @@ template <class Pixel>
 std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& store,
                                           const CoverageMap& cov, std::string name, Rgbaf color,
                                           BlendMode blendMode, float opacity, PaintOp op,
+                                          int cloneOffX, int cloneOffY,
                                           const Selection* selection) {
     std::vector<PaintCommand::DeltaT<Pixel>> deltas;
     Rect dirty{};
@@ -151,6 +152,37 @@ std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& st
                     }
                     break;
                 }
+                case PaintOp::Clone: {
+                    // Sample the layer's pre-stroke pixels (the store is at its S0 state during the
+                    // flush — the controller reverts the preview before each rebuild, so there is
+                    // no feedback even where source and dest overlap) at the fixed stroke offset,
+                    // and composite over the destination at the brush coverage.
+                    const int lx = static_cast<int>(idx % static_cast<std::size_t>(kTileSize));
+                    const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
+                    const Rgbaf srcF =
+                        toFloat(store.pixel(baseX + lx - cloneOffX, baseY + ly - cloneOffY));
+                    if (blendMode == BlendMode::Normal) {
+                        // Straight-alpha source-over WITHOUT clamping the source/backdrop RGB, so
+                        // cloning faithfully reproduces HDR/super-white values on an F32 layer
+                        // (compositeOver clamps them to 1.0). Identical to compositeOver(Normal)
+                        // for the in-gamut [0,1] case, since blendChannel(Normal) is the source.
+                        const float sa = clamp01(srcF.a) * a;
+                        const float ba = clamp01(dst.a);
+                        const float outA = sa + ba * (1.0f - sa);
+                        if (outA > 0.0f) {
+                            const float inv = 1.0f / outA;
+                            out.r = (srcF.r * sa + dst.r * ba * (1.0f - sa)) * inv;
+                            out.g = (srcF.g * sa + dst.g * ba * (1.0f - sa)) * inv;
+                            out.b = (srcF.b * sa + dst.b * ba * (1.0f - sa)) * inv;
+                            out.a = outA;
+                        } else {
+                            out = Rgbaf{};
+                        }
+                    } else {
+                        out = compositeOver(blendMode, dst, srcF, a);
+                    }
+                    break;
+                }
             }
             const Pixel newPx = fromFloat<Pixel>(out);
             if (!pixelEqual(newPx, after->px[idx])) {
@@ -170,8 +202,8 @@ std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& st
 
 std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const BrushSettings& in,
                                           Rgbaf color, std::span<const StrokePoint> points,
-                                          PaintOp op, std::string name,
-                                          const Selection* selection) {
+                                          PaintOp op, std::string name, int cloneOffX,
+                                          int cloneOffY, const Selection* selection) {
     Layer* layer = doc.findLayer(layerId);
     if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
     if (points.empty()) return nullptr;
@@ -241,14 +273,14 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
     switch (pl->depth()) {
         case BitDepth::U16:
             return flushStroke<Rgba16>(layerId, pl->tiles16(), cov, std::move(name), color,
-                                       in.blendMode, opacity, op, selection);
+                                       in.blendMode, opacity, op, cloneOffX, cloneOffY, selection);
         case BitDepth::F32:
             return flushStroke<Rgbaf>(layerId, pl->tilesF(), cov, std::move(name), color,
-                                      in.blendMode, opacity, op, selection);
+                                      in.blendMode, opacity, op, cloneOffX, cloneOffY, selection);
         case BitDepth::U8:
         default:
             return flushStroke<Rgba8>(layerId, pl->tiles(), cov, std::move(name), color,
-                                      in.blendMode, opacity, op, selection);
+                                      in.blendMode, opacity, op, cloneOffX, cloneOffY, selection);
     }
 }
 
@@ -330,14 +362,15 @@ std::unique_ptr<PaintCommand> paintStroke(Document& doc, LayerId layerId,
                                           const BrushSettings& settings, Rgbaf color,
                                           std::span<const StrokePoint> points,
                                           const Selection* selection) {
-    return buildStroke(doc, layerId, settings, color, points, PaintOp::Paint, "Brush", selection);
+    return buildStroke(doc, layerId, settings, color, points, PaintOp::Paint, "Brush", 0, 0,
+                       selection);
 }
 
 std::unique_ptr<PaintCommand> eraseStroke(Document& doc, LayerId layerId,
                                           const BrushSettings& settings,
                                           std::span<const StrokePoint> points,
                                           const Selection* selection) {
-    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Erase, "Eraser",
+    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Erase, "Eraser", 0, 0,
                        selection);
 }
 
@@ -345,14 +378,24 @@ std::unique_ptr<PaintCommand> dodgeStroke(Document& doc, LayerId layerId,
                                           const BrushSettings& settings,
                                           std::span<const StrokePoint> points,
                                           const Selection* selection) {
-    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Dodge, "Dodge", selection);
+    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Dodge, "Dodge", 0, 0,
+                       selection);
 }
 
 std::unique_ptr<PaintCommand> burnStroke(Document& doc, LayerId layerId,
                                          const BrushSettings& settings,
                                          std::span<const StrokePoint> points,
                                          const Selection* selection) {
-    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Burn, "Burn", selection);
+    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Burn, "Burn", 0, 0,
+                       selection);
+}
+
+std::unique_ptr<PaintCommand> cloneStroke(Document& doc, LayerId layerId,
+                                          const BrushSettings& settings,
+                                          std::span<const StrokePoint> points, int offsetX,
+                                          int offsetY, const Selection* selection) {
+    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Clone, "Clone Stamp",
+                       offsetX, offsetY, selection);
 }
 
 }  // namespace pe
