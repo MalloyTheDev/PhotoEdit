@@ -29,6 +29,8 @@ add_library(pe_core
     src/Channels.cpp
     src/NativeFormat.cpp
     src/DocumentIO.cpp
+    src/Psd.cpp
+
     src/AutoTone.cpp
     src/ColorSpace.cpp
 )

@@ -16,7 +16,7 @@ class Document;
 
 // Path/format-level document I/O: the layer the application's Open/Save use, sitting
 // on top of the byte-level codecs. See docs/systems/16-file-formats.md.
-enum class ImageFormat : std::uint8_t { Unknown, Png, Jpeg, Tiff, WebP, Native };
+enum class ImageFormat : std::uint8_t { Unknown, Png, Jpeg, Tiff, WebP, Psd, Native };
 
 // Per-format encode options for export/save. Fields not relevant to the chosen format are
 // ignored (only JPEG is lossy/tunable today; the lossless codecs have no knobs). Defaults
@@ -26,8 +26,8 @@ struct ExportOptions {
 };
 
 // Map a file path (or bare extension) to a format, case-insensitively. ".png"->Png,
-// ".jpg"/".jpeg"->Jpeg, ".tif"/".tiff"->Tiff, ".webp"->WebP, ".pedoc"->Native; else
-// Unknown.
+// ".jpg"/".jpeg"->Jpeg, ".tif"/".tiff"->Tiff, ".webp"->WebP, ".psd"->Psd, ".pedoc"->Native;
+// else Unknown.
 [[nodiscard]] ImageFormat formatFromExtension(std::string_view path);
 
 // Whether this binary was built with the codec for `fmt` (Native is always available).

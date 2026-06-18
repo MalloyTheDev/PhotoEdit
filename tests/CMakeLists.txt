@@ -36,6 +36,7 @@ add_executable(pe_core_tests
     core/test_jpeg.cpp
     core/test_tiff.cpp
     core/test_webp.cpp
+    core/test_psd.cpp
     core/test_nativeformat.cpp
     core/test_documentio.cpp
 )

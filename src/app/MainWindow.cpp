@@ -54,7 +54,7 @@ namespace pe::app {
 namespace {
 // File-dialog filter covering the formats the engine can read/write.
 constexpr const char* kOpenFilter =
-    "Images (*.pedoc *.png *.jpg *.jpeg *.tif *.tiff *.webp);;All files (*)";
+    "Images (*.pedoc *.png *.jpg *.jpeg *.tif *.tiff *.webp *.psd);;All files (*)";
 constexpr const char* kSaveFilter =
     "PhotoEdit document (*.pedoc);;PNG (*.png);;JPEG (*.jpg);;TIFF (*.tif);;WebP (*.webp)";
 
