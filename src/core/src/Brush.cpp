@@ -161,7 +161,26 @@ std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& st
                     const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
                     const Rgbaf srcF =
                         toFloat(store.pixel(baseX + lx - cloneOffX, baseY + ly - cloneOffY));
-                    out = compositeOver(blendMode, dst, srcF, a);
+                    if (blendMode == BlendMode::Normal) {
+                        // Straight-alpha source-over WITHOUT clamping the source/backdrop RGB, so
+                        // cloning faithfully reproduces HDR/super-white values on an F32 layer
+                        // (compositeOver clamps them to 1.0). Identical to compositeOver(Normal)
+                        // for the in-gamut [0,1] case, since blendChannel(Normal) is the source.
+                        const float sa = clamp01(srcF.a) * a;
+                        const float ba = clamp01(dst.a);
+                        const float outA = sa + ba * (1.0f - sa);
+                        if (outA > 0.0f) {
+                            const float inv = 1.0f / outA;
+                            out.r = (srcF.r * sa + dst.r * ba * (1.0f - sa)) * inv;
+                            out.g = (srcF.g * sa + dst.g * ba * (1.0f - sa)) * inv;
+                            out.b = (srcF.b * sa + dst.b * ba * (1.0f - sa)) * inv;
+                            out.a = outA;
+                        } else {
+                            out = Rgbaf{};
+                        }
+                    } else {
+                        out = compositeOver(blendMode, dst, srcF, a);
+                    }
                     break;
                 }
             }

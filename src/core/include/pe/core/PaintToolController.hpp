@@ -58,6 +58,7 @@ public:
         cloneSourceValid_ = true;
     }
     [[nodiscard]] bool hasCloneSource() const noexcept { return cloneSourceValid_; }
+    void clearCloneSource() noexcept { cloneSourceValid_ = false; }  // e.g. on a document swap
 
     [[nodiscard]] bool isStroking() const noexcept { return stroking_; }
 
