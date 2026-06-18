@@ -50,6 +50,14 @@ class Document;
 // or if the dimensions exceed the decode safety cap.
 [[nodiscard]] std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data);
 
+// Decode the bytes of a Photoshop PSD file to an 8-bit RGBA image, reading the merged/composite
+// image at the end of the file (not the layer stack). Supported: PSD (not PSB), 8-bit depth,
+// Grayscale or RGB color mode, raw or RLE (PackBits) compression; alpha is taken from the extra
+// channel when present. Returns nullopt for anything else, malformed/truncated input, or
+// dimensions past the decode safety cap. Unlike the other codecs this needs no external library,
+// so it is always available (it is a hardened from-scratch parser of untrusted input).
+[[nodiscard]] std::optional<PixelBuffer> decodePsd(std::span<const std::byte> data);
+
 // Document-level convenience over the codec:
 // Flatten `doc` to a single raster and encode it as the bytes of a PNG file. Returns
 // an empty vector on failure (e.g. an empty document).

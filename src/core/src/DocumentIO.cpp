@@ -29,6 +29,7 @@ ImageFormat formatFromExtension(std::string_view path) {
     if (ext == ".jpg" || ext == ".jpeg") return ImageFormat::Jpeg;
     if (ext == ".tif" || ext == ".tiff") return ImageFormat::Tiff;
     if (ext == ".webp") return ImageFormat::WebP;
+    if (ext == ".psd") return ImageFormat::Psd;
     if (ext == ".pedoc") return ImageFormat::Native;
     return ImageFormat::Unknown;
 }
@@ -61,6 +62,8 @@ bool formatAvailable(ImageFormat fmt) {
 #else
             return false;
 #endif
+        case ImageFormat::Psd:
+            return true;  // dependency-free reader; always available (import only)
         case ImageFormat::Unknown:
         default:
             return false;
@@ -82,15 +85,12 @@ std::unique_ptr<Document> documentFromImage(const PixelBuffer& image) {
 }
 
 namespace {
-#if defined(PHOTOEDIT_HAVE_PNG) || defined(PHOTOEDIT_HAVE_JPEG) || defined(PHOTOEDIT_HAVE_TIFF) || \
-    defined(PHOTOEDIT_HAVE_WEBP)
-// Decode a raster format to a single-layer document, or nullptr. Only needed when at
-// least one raster codec is compiled in; otherwise it would be an unused function.
+// Decode a raster format to a single-layer document, or nullptr. Always compiled: the PSD
+// reader is dependency-free and present in every build, so this is never unused.
 std::unique_ptr<Document> fromRaster(std::optional<PixelBuffer>&& image) {
     if (!image) return nullptr;
     return documentFromImage(*image);
 }
-#endif
 }  // namespace
 
 std::unique_ptr<Document> importDocument(std::span<const std::byte> data, ImageFormat fmt) {
@@ -113,6 +113,8 @@ std::unique_ptr<Document> importDocument(std::span<const std::byte> data, ImageF
         case ImageFormat::WebP:
             return fromRaster(decodeWebp(data));
 #endif
+        case ImageFormat::Psd:
+            return fromRaster(decodePsd(data));  // dependency-free; always available
         default:
             return nullptr;  // unknown format or codec not built in
     }
