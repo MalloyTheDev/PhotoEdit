@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace pe::app {
@@ -36,6 +37,11 @@ constexpr std::array<FormatInfo, 4> kFormats{{
 }};
 
 constexpr int kDefaultJpegQuality = 90;
+
+// Cap on the canvas area for which the live size estimate runs a real (synchronous) encode.
+// Above this, encoding the whole canvas on the UI thread would visibly stall, so the estimate
+// is skipped — the export itself is unaffected. ~6 MP encodes in well under a frame's budget.
+constexpr int64_t kMaxEstimatePixels = 6'000'000;
 
 // Human-readable byte size for the estimate label.
 [[nodiscard]] QString humanSize(std::size_t bytes) {
@@ -95,30 +101,39 @@ ExportDialog::ExportDialog(QWidget* parent, const pe::Document& doc, pe::ImageFo
     auto* buttons =
         new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, this);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Export"));
+    // No raster codec compiled in -> empty combo -> nothing to export: disable Export so the
+    // accept path can never be a silent no-op.
+    buttons->button(QDialogButtonBox::Ok)->setEnabled(formatCombo_->count() > 0);
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-    // Slider <-> spinbox sync; recompute the size estimate only when the value settles
-    // (slider release / spinbox commit), not on every intermediate tick.
+    // Slider <-> spinbox sync, and a settled-only estimate refresh. The estimate is heavy (it
+    // composites + encodes), so it runs only when the value has SETTLED: never on a mid-drag
+    // slider tick (isSliderDown()), but on every other route — keyboard, groove page-step, wheel,
+    // and spinbox arrows/typing (which reach the slider through the sync below) — and at end of
+    // drag (sliderReleased). updateEstimate itself skips large canvases (see its definition).
     connect(qualitySlider_, &QSlider::valueChanged, this, [this](int v) {
-        if (syncing_) return;
-        syncing_ = true;
-        qualitySpin_->setValue(v);
-        syncing_ = false;
+        if (!syncing_) {
+            syncing_ = true;
+            qualitySpin_->setValue(v);
+            syncing_ = false;
+        }
+        if (!qualitySlider_->isSliderDown()) updateEstimate();
     });
     connect(qualitySpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int v) {
         if (syncing_) return;
         syncing_ = true;
-        qualitySlider_->setValue(v);
+        qualitySlider_->setValue(v);  // drives the slider's valueChanged -> settled estimate
         syncing_ = false;
     });
     connect(qualitySlider_, &QSlider::sliderReleased, this, &ExportDialog::updateEstimate);
-    connect(qualitySpin_, &QSpinBox::editingFinished, this, &ExportDialog::updateEstimate);
+
+    // Establish the initial format with the change signal NOT yet connected, so the single
+    // explicit onFormatChanged() below is the only initial composite+encode (no double pass).
+    formatCombo_->setCurrentIndex(initialIndex);
     connect(formatCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
             &ExportDialog::onFormatChanged);
-
-    formatCombo_->setCurrentIndex(initialIndex);
     onFormatChanged();  // set initial option visibility + estimate
 }
 
@@ -141,6 +156,20 @@ void ExportDialog::onFormatChanged() {
 }
 
 void ExportDialog::updateEstimate() {
+    // The estimate is a real encode (composite + codec), run synchronously on the UI thread.
+    // To keep the dialog responsive, only do it for a moderate-size canvas; above the threshold
+    // a full encode could stall for hundreds of ms, so skip it (the export itself still honors
+    // the chosen format/options — only the live preview number is omitted).
+    const pe::Size cs = doc_.canvasSize();
+    const int64_t area = static_cast<int64_t>(cs.width) * static_cast<int64_t>(cs.height);
+    if (area <= 0) {
+        sizeLabel_->setText(QStringLiteral("—"));
+        return;
+    }
+    if (area > kMaxEstimatePixels) {
+        sizeLabel_->setText(QStringLiteral("— (image too large to estimate)"));
+        return;
+    }
     const std::vector<std::byte> bytes = pe::exportDocument(doc_, selectedFormat(), options());
     sizeLabel_->setText(bytes.empty() ? QStringLiteral("—") : humanSize(bytes.size()));
 }

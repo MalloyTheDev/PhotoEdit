@@ -668,6 +668,7 @@ void MainWindow::exportDocumentAs() {
     // Guarantee the chosen format's extension so saveDocument writes that exact format
     // (the dialog, not the typed name, is the source of truth for the format).
     if (pe::formatFromExtension(path.toStdString()) != fmt) {
+        if (path.endsWith(QLatin1Char('.'))) path.chop(1);  // avoid "name..ext"
         path += QStringLiteral(".%1").arg(ext);
     }
 

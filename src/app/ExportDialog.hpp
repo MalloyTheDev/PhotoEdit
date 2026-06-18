@@ -21,9 +21,10 @@ namespace pe::app {
 // formats (PNG/TIFF/WebP) have no adjustable options and show a short note instead.
 //
 // Usage: construct, exec(); on QDialog::Accepted read selectedFormat() + options(), then pick a
-// path and write via pe::saveDocument(doc, path, options). The dialog re-encodes the document
-// for the size estimate only on "settled" interactions (format change, slider release), never
-// per slider tick, so it does not thrash on a large canvas.
+// path and write via pe::saveDocument(doc, path, options). The size estimate is a real encode run
+// synchronously on the GUI thread on "settled" interactions (format change, value settled — never
+// a mid-drag slider tick); to stay responsive it is computed only for a moderate-size canvas and
+// shows a placeholder above that threshold (the export itself is never gated).
 class ExportDialog : public QDialog {
     Q_OBJECT
 
