@@ -24,7 +24,12 @@ float dabCoverage(float d, float hardness) noexcept {
 
 namespace {
 
-enum class PaintOp { Paint, Erase };
+enum class PaintOp { Paint, Erase, Dodge, Burn };
+
+// Per-stroke tone strength for Dodge/Burn at full brush coverage, modulated further by the brush
+// opacity/flow. Kept low so each pass is a modest adjustment that builds up over repeated strokes
+// (a photographic dodge/burn "exposure" feel) rather than slamming pixels to white/black.
+constexpr float kToneExposure = 0.3f;
 
 using CoverageKey = std::pair<int, int>;  // {tileCol, tileRow}
 using CoverageMap = std::map<CoverageKey, std::vector<float>>;
@@ -116,13 +121,36 @@ std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& st
                 if (a <= 0.0f) continue;
             }
             const Rgbaf dst = toFloat(after->px[idx]);
-            Rgbaf out;
-            if (op == PaintOp::Paint) {
-                const Rgbaf src{color.r, color.g, color.b, a * colorA};
-                out = compositeOver(blendMode, dst, src, 1.0f);
-            } else {
-                out = dst;
-                out.a = dst.a * (1.0f - a);  // erase: reduce alpha
+            Rgbaf out = dst;
+            switch (op) {
+                case PaintOp::Paint: {
+                    const Rgbaf src{color.r, color.g, color.b, a * colorA};
+                    out = compositeOver(blendMode, dst, src, 1.0f);
+                    break;
+                }
+                case PaintOp::Erase:
+                    out.a = dst.a * (1.0f - a);  // reduce alpha
+                    break;
+                case PaintOp::Dodge:
+                case PaintOp::Burn: {
+                    // Tone tools adjust RGB of existing content, weighted by coverage; alpha is
+                    // preserved and fully transparent pixels are left alone (their RGB is moot).
+                    if (dst.a <= 0.0f) continue;
+                    const float k = a * kToneExposure;
+                    if (op == PaintOp::Dodge) {  // lighten toward white
+                        // max(0, 1-dst) keeps dodge monotonic on F32/HDR pixels: a super-white
+                        // value (dst > 1, preserved by the float store) is left unchanged rather
+                        // than darkened. For the in-gamut [0,1] case this is identical to (1-dst).
+                        out.r = dst.r + k * std::max(0.0f, 1.0f - dst.r);
+                        out.g = dst.g + k * std::max(0.0f, 1.0f - dst.g);
+                        out.b = dst.b + k * std::max(0.0f, 1.0f - dst.b);
+                    } else {  // burn: darken toward black (dst*(1-k) shrinks any value toward 0)
+                        out.r = dst.r * (1.0f - k);
+                        out.g = dst.g * (1.0f - k);
+                        out.b = dst.b * (1.0f - k);
+                    }
+                    break;
+                }
             }
             const Pixel newPx = fromFloat<Pixel>(out);
             if (!pixelEqual(newPx, after->px[idx])) {
@@ -311,6 +339,20 @@ std::unique_ptr<PaintCommand> eraseStroke(Document& doc, LayerId layerId,
                                           const Selection* selection) {
     return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Erase, "Eraser",
                        selection);
+}
+
+std::unique_ptr<PaintCommand> dodgeStroke(Document& doc, LayerId layerId,
+                                          const BrushSettings& settings,
+                                          std::span<const StrokePoint> points,
+                                          const Selection* selection) {
+    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Dodge, "Dodge", selection);
+}
+
+std::unique_ptr<PaintCommand> burnStroke(Document& doc, LayerId layerId,
+                                         const BrushSettings& settings,
+                                         std::span<const StrokePoint> points,
+                                         const Selection* selection) {
+    return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Burn, "Burn", selection);
 }
 
 }  // namespace pe

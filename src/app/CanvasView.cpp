@@ -184,13 +184,19 @@ void CanvasView::zoomOut() {
 
 void CanvasView::setTool(Tool t) {
     toolMode_ = t;
+    // Abandon any live stroke FIRST, before changing the paint mode: otherwise a tool change
+    // mid-stroke (e.g. a shortcut while the button is held) would leave the stroke active and the
+    // next mouse-move would rebuild it under the new mode — silently changing what it commits.
+    if (doc_ != nullptr && tool_.isStroking()) {
+        tool_.cancel(*doc_);
+        reloadImage();  // the cancel reverted tiles without notifying the renderer
+    }
     if (t == Tool::Brush) {
         tool_.setMode(pe::PaintToolController::Mode::Brush);
     } else if (t == Tool::Eraser) {
         tool_.setMode(pe::PaintToolController::Mode::Eraser);
-    } else if (doc_ != nullptr && tool_.isStroking()) {
-        tool_.cancel(*doc_);  // switching away from a paint tool drops any live stroke
-        reloadImage();        // the cancel reverted tiles without notifying the renderer
+    } else if (t == Tool::Dodge) {
+        tool_.setMode(pe::PaintToolController::Mode::Dodge);  // Alt at stroke start burns instead
     }
     if (draggingMarquee_ && doc_ != nullptr) {
         draggingMarquee_ = false;
@@ -343,7 +349,7 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
         e->ignore();
         return;
     }
-    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser) {
+    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge) {
         e->ignore();
         return;
     }
@@ -352,6 +358,11 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
     switch (e->type()) {
         case QEvent::TabletPress:
             if (tool_.isStroking()) tool_.cancel(*doc_);
+            if (toolMode_ == Tool::Dodge) {
+                tool_.setMode((e->modifiers() & Qt::AltModifier)
+                                  ? pe::PaintToolController::Mode::Burn
+                                  : pe::PaintToolController::Mode::Dodge);
+            }
             if (tool_.begin(*doc_, sp, &doc_->selection())) {
                 if (renderer_ != nullptr) renderer_->invalidate(tool_.strokeDirtyBounds());
                 update();
@@ -489,7 +500,15 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         if (doc_->canvasBounds().contains(p)) emit textRequested(QPointF(d.x, d.y));
         return;
     }
-    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser) return;  // Inactive: no paint
+    if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge) {
+        return;  // Inactive: no paint
+    }
+    if (toolMode_ == Tool::Dodge) {
+        // Alt temporarily switches the tone brush from Dodge (lighten) to Burn (darken) for this
+        // stroke, the Photoshop convention — set per stroke since the modifier is read at press.
+        tool_.setMode((e->modifiers() & Qt::AltModifier) ? pe::PaintToolController::Mode::Burn
+                                                         : pe::PaintToolController::Mode::Dodge);
+    }
     // Recover if a prior stroke never received its release (e.g. mouse capture was
     // stolen by a modal/Alt-Tab): drop the stale preview before starting fresh.
     if (tool_.isStroking()) tool_.cancel(*doc_);
