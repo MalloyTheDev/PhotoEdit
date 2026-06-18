@@ -51,6 +51,7 @@ public:
         Crop,
         Bucket,
         Gradient,
+        Type,
         Eyedropper,
         Inactive
     };
@@ -78,6 +79,7 @@ signals:
     void colorPicked(const QColor& c);  // for eyedropper tool
     void toolMessage(
         const QString& msg);  // transient status-bar feedback (e.g. a fill that no-ops)
+    void textRequested(const QPointF& docPos);  // Type tool clicked at this doc-space point
 
 public:
     // View navigation (also driven by the View menu).

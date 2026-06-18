@@ -9,6 +9,7 @@
 
 class QAction;
 class QLabel;
+class QPointF;
 class QSpinBox;
 class QToolBar;
 class QToolButton;
@@ -61,6 +62,7 @@ private:
     void exportDocumentAs();  // flatten + encode to a raster format with per-format options
     void undo();
     void redo();
+    void onAddText(const QPointF& docPos);  // Type tool: prompt + rasterize + stamp text
     bool writeTo(const QString& path);
     void setDocument(std::unique_ptr<pe::Document> doc, QString path);
     void refreshTitle();

@@ -15,6 +15,7 @@ namespace pe {
 
 class Document;
 class Selection;
+class PixelBuffer;
 
 // Run an in-place per-pixel transform over a pixel layer's content as a reversible
 // tile-delta command (the shared machinery behind destructive filters and
@@ -48,6 +49,16 @@ class Selection;
 [[nodiscard]] std::unique_ptr<PaintCommand> bucketFill(Document& doc, LayerId layerId, int seedX,
                                                        int seedY, Rgbaf fillColor, int tolerance,
                                                        const Selection* selection = nullptr);
+
+// Stamp a straight-alpha RGBA8 source raster onto a pixel layer at `origin`, compositing it
+// (Normal, straight alpha) over the existing pixels as a reversible tile-delta command — the
+// general primitive behind the Type tool (rasterized text) and future paste/clone paths. Honors
+// the selection. `name` labels the History entry. nullptr for a non-pixel layer, an empty source,
+// or a region beyond the engine's size caps.
+[[nodiscard]] std::unique_ptr<PaintCommand> stampBuffer(Document& doc, LayerId layerId,
+                                                        Point origin, const PixelBuffer& src,
+                                                        std::string name,
+                                                        const Selection* selection = nullptr);
 
 // Gradient: composite a linear gradient over layer `layerId`, from c0 (at `start`) to c1 (at
 // `end`), each pixel's stop color interpolated by its projection onto the start->end axis (clamped

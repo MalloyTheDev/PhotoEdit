@@ -214,6 +214,7 @@ void CanvasView::setTool(Tool t) {
               : t == Tool::Zoom     ? Qt::PointingHandCursor
               : t == Tool::Move     ? Qt::SizeAllCursor
               : t == Tool::Wand     ? Qt::PointingHandCursor
+              : t == Tool::Type     ? Qt::IBeamCursor
               : t == Tool::Inactive ? Qt::ArrowCursor
                                     : Qt::CrossCursor);  // all other interactive tools
                                                          // (Brush/Eraser/Marquee/Lasso/Crop/
@@ -477,6 +478,15 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         gradStartWidget_ = e->position();
         gradEndWidget_ = e->position();
         update();
+        return;
+    }
+    if (toolMode_ == Tool::Type) {
+        // Report an on-canvas click in document space; MainWindow prompts for the text and stamps
+        // it (rasterized) onto the active layer as an undoable command. Off-canvas (pasteboard)
+        // clicks are ignored, like the other click tools, so text can't land outside the image.
+        const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        const pe::Point p{static_cast<int>(std::lround(d.x)), static_cast<int>(std::lround(d.y))};
+        if (doc_->canvasBounds().contains(p)) emit textRequested(QPointF(d.x, d.y));
         return;
     }
     if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser) return;  // Inactive: no paint

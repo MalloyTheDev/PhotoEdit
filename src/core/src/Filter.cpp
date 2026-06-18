@@ -1,7 +1,8 @@
 #include "pe/core/Filter.hpp"
 
-#include "pe/core/BlendMode.hpp"  // compositeOver (bucket fill)
-#include "pe/core/Document.hpp"   // kMaxCanvasDimension
+#include "pe/core/BlendMode.hpp"    // compositeOver (bucket fill)
+#include "pe/core/Document.hpp"     // kMaxCanvasDimension
+#include "pe/core/PixelBuffer.hpp"  // stampBuffer source raster
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
 
@@ -377,6 +378,14 @@ std::unique_ptr<PaintCommand> bakePixelEditRegion(
     const Rect bb = region;
     if (bb.isEmpty()) return nullptr;
     if (bb.width > kMaxCanvasDimension || bb.height > kMaxCanvasDimension) return nullptr;
+    // Bound the origin too, so right()/bottom() (computed as int x+width downstream, e.g. in
+    // tilesForRect) cannot overflow for a far-off-canvas region. With both |x|,|y| and width,
+    // height <= kMaxCanvasDimension, the sums stay well within int. (Canvas-bounded callers pass
+    // |x|,|y| <= the canvas size; this only rejects pathological external origins.)
+    if (bb.x > kMaxCanvasDimension || bb.x < -kMaxCanvasDimension || bb.y > kMaxCanvasDimension ||
+        bb.y < -kMaxCanvasDimension) {
+        return nullptr;
+    }
     const int64_t area = static_cast<int64_t>(bb.width) * static_cast<int64_t>(bb.height);
     if (area > kMaxFilterPixels) return nullptr;
 
@@ -529,6 +538,36 @@ std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId, Point
                     img[idx(x, y, w)] =
                         compositeOver(BlendMode::Normal, orig[idx(x, y, w)], stop, 1.0f);
                 }
+            }
+        },
+        selection);
+}
+
+std::unique_ptr<PaintCommand> stampBuffer(Document& doc, LayerId layerId, Point origin,
+                                          const PixelBuffer& src, std::string name,
+                                          const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    if (src.isEmpty()) return nullptr;
+    // Enforce the size caps BEFORE the float snapshot allocation (the engine's "DoS caps before
+    // allocation" rule): bakePixelEditRegion re-checks, but it runs only after srcF is built, so a
+    // huge source would otherwise force a multi-hundred-MB transient before being rejected.
+    if (src.width() > kMaxCanvasDimension || src.height() > kMaxCanvasDimension) return nullptr;
+    if (static_cast<int64_t>(src.width()) * static_cast<int64_t>(src.height()) > kMaxFilterPixels) {
+        return nullptr;
+    }
+    const Rect region{origin.x, origin.y, src.width(), src.height()};
+    // Snapshot the source as working-float, index-aligned with the region the transform sees
+    // (row-major, w == region.width == src.width). The origin is bounded by bakePixelEditRegion.
+    std::vector<Rgbaf> srcF(static_cast<std::size_t>(src.width()) *
+                            static_cast<std::size_t>(src.height()));
+    for (std::size_t i = 0; i < srcF.size(); ++i) srcF[i] = toFloat(src.data()[i]);
+    return bakePixelEditRegion(
+        doc, layerId, std::move(name), region,
+        [srcF = std::move(srcF)](std::span<Rgbaf> img, int w, int h) {
+            const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+            for (std::size_t i = 0; i < n; ++i) {
+                img[i] = compositeOver(BlendMode::Normal, img[i], srcF[i], 1.0f);
             }
         },
         selection);
