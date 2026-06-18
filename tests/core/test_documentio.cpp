@@ -117,3 +117,30 @@ PE_TEST(documentio_png_dispatch_roundtrip) {
     PE_CHECK_EQ(lpl->tiles().pixel(3, 2), (Rgba8{12, 34, 56, 255}));
 }
 #endif
+
+#ifdef PHOTOEDIT_HAVE_JPEG
+PE_TEST(documentio_export_jpeg_quality_option) {
+    // A varied image so JPEG quality has something to trade off (a flat fill compresses
+    // to nearly the same size at any quality).
+    auto doc = Document::createBlank(Size{64, 64});
+    auto* pl = dynamic_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+            pl->tiles().setPixel(x, y,
+                                 Rgba8{static_cast<uint8_t>(x * 4), static_cast<uint8_t>(y * 4),
+                                       static_cast<uint8_t>((x ^ y) * 3), 255});
+        }
+    }
+
+    const std::vector<std::byte> low = exportDocument(*doc, ImageFormat::Jpeg, ExportOptions{15});
+    const std::vector<std::byte> high = exportDocument(*doc, ImageFormat::Jpeg, ExportOptions{95});
+    PE_CHECK(!low.empty() && !high.empty());
+    PE_CHECK(low.size() < high.size());  // lower quality -> smaller JPEG
+
+    // The no-options overload matches the default options (jpegQuality 90), since both
+    // delegate to the same encoder default.
+    const std::vector<std::byte> deflt = exportDocument(*doc, ImageFormat::Jpeg);
+    const std::vector<std::byte> opt90 = exportDocument(*doc, ImageFormat::Jpeg, ExportOptions{90});
+    PE_CHECK_EQ(deflt.size(), opt90.size());
+}
+#endif

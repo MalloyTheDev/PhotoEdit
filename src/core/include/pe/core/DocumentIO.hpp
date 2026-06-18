@@ -18,6 +18,13 @@ class Document;
 // on top of the byte-level codecs. See docs/systems/16-file-formats.md.
 enum class ImageFormat : std::uint8_t { Unknown, Png, Jpeg, Tiff, WebP, Native };
 
+// Per-format encode options for export/save. Fields not relevant to the chosen format are
+// ignored (only JPEG is lossy/tunable today; the lossless codecs have no knobs). Defaults
+// match the codecs' own defaults, so the no-options overloads below behave unchanged.
+struct ExportOptions {
+    int jpegQuality = 90;  // 1..100 (clamped by the JPEG encoder); ignored by other formats
+};
+
 // Map a file path (or bare extension) to a format, case-insensitively. ".png"->Png,
 // ".jpg"/".jpeg"->Jpeg, ".tif"/".tiff"->Tiff, ".webp"->WebP, ".pedoc"->Native; else
 // Unknown.
@@ -38,7 +45,10 @@ enum class ImageFormat : std::uint8_t { Unknown, Png, Jpeg, Tiff, WebP, Native }
 
 // Encode a document to file bytes. Native preserves the full layer tree; raster
 // formats flatten (composite) to a single image. Empty on failure or unavailable codec.
+// The first overload uses default encode options; the second honors `opts` (e.g. JPEG quality).
 [[nodiscard]] std::vector<std::byte> exportDocument(const Document& doc, ImageFormat fmt);
+[[nodiscard]] std::vector<std::byte> exportDocument(const Document& doc, ImageFormat fmt,
+                                                    const ExportOptions& opts);
 
 // --- filesystem convenience (the layer the app's Open/Save call) ---
 // Load a document from a file on disk; the format is inferred from the extension.
@@ -47,7 +57,10 @@ enum class ImageFormat : std::uint8_t { Unknown, Png, Jpeg, Tiff, WebP, Native }
 [[nodiscard]] std::unique_ptr<Document> loadDocument(const std::string& path);
 
 // Save a document to a file on disk; the format is inferred from the extension.
-// Returns false on an unknown extension, an encode failure, or a write error.
+// Returns false on an unknown extension, an encode failure, or a write error. The first
+// overload uses default encode options; the second honors `opts` (e.g. JPEG quality).
 [[nodiscard]] bool saveDocument(const Document& doc, const std::string& path);
+[[nodiscard]] bool saveDocument(const Document& doc, const std::string& path,
+                                const ExportOptions& opts);
 
 }  // namespace pe

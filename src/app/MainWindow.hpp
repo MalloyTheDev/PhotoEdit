@@ -56,8 +56,9 @@ private:
 
     void newDocument();
     void openDocument();
-    bool saveDocument();    // saves to the current path, or prompts if none
-    bool saveDocumentAs();  // always prompts
+    bool saveDocument();      // saves to the current path, or prompts if none
+    bool saveDocumentAs();    // always prompts
+    void exportDocumentAs();  // flatten + encode to a raster format with per-format options
     void undo();
     void redo();
     bool writeTo(const QString& path);

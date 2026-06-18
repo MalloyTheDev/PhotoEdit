@@ -119,6 +119,11 @@ std::unique_ptr<Document> importDocument(std::span<const std::byte> data, ImageF
 }
 
 std::vector<std::byte> exportDocument(const Document& doc, ImageFormat fmt) {
+    return exportDocument(doc, fmt, ExportOptions{});
+}
+
+std::vector<std::byte> exportDocument(const Document& doc, ImageFormat fmt,
+                                      [[maybe_unused]] const ExportOptions& opts) {
     switch (fmt) {
         case ImageFormat::Native:
             return serializeDocument(doc);
@@ -128,7 +133,7 @@ std::vector<std::byte> exportDocument(const Document& doc, ImageFormat fmt) {
 #endif
 #ifdef PHOTOEDIT_HAVE_JPEG
         case ImageFormat::Jpeg:
-            return encodeJpeg(doc.compositeImage());
+            return encodeJpeg(doc.compositeImage(), opts.jpegQuality);
 #endif
 #ifdef PHOTOEDIT_HAVE_TIFF
         case ImageFormat::Tiff:
@@ -166,10 +171,14 @@ std::unique_ptr<Document> loadDocument(const std::string& path) {
 }
 
 bool saveDocument(const Document& doc, const std::string& path) {
+    return saveDocument(doc, path, ExportOptions{});
+}
+
+bool saveDocument(const Document& doc, const std::string& path, const ExportOptions& opts) {
     const ImageFormat fmt = formatFromExtension(path);
     if (fmt == ImageFormat::Unknown) return false;
 
-    const std::vector<std::byte> bytes = exportDocument(doc, fmt);
+    const std::vector<std::byte> bytes = exportDocument(doc, fmt, opts);
     if (bytes.empty()) return false;
 
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
