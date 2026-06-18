@@ -43,6 +43,17 @@ public:
     // selects nothing.
     void selectPolygon(std::span<const Point> vertices);
 
+    // --- edge refinements (Select menu) ---
+    // Each operates on the current selection, clamped to `canvas`, and is a no-op when the
+    // selection is inactive/empty, when `radius` is non-positive, or when the working region
+    // would exceed the selection size caps (so a pathological input never over-allocates).
+    // grow/shrink treat the mask as binary (coverage >= 50% is "in") and move the boundary by
+    // ~`radius` px using a chamfer distance transform (round, not boxy). feather softens the
+    // edge with a Gaussian of standard deviation `radius` px, producing partial coverage.
+    void grow(int radius, Rect canvas);
+    void shrink(int radius, Rect canvas);
+    void feather(float radius, Rect canvas);
+
     // --- saved selections <-> alpha channels (systems/19) ---
     // Save the selection's coverage over `bounds` to an 8-bit grayscale mask (the
     // alpha-channel representation): the value is replicated to R=G=B, alpha opaque.

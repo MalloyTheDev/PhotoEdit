@@ -32,6 +32,7 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenu>
@@ -238,6 +239,43 @@ void MainWindow::buildMenuBar() {
             target.invert(doc_->canvasBounds());
             doc_->history().push(std::make_unique<SetSelectionCommand>(target));
         }
+    });
+    selMenu->addSeparator();
+    // Edge refinements. Each prompts for an amount and pushes the modified selection as one undo
+    // step; they only apply to an active selection (no-ops otherwise, so the menu items just
+    // return without prompting when nothing is selected).
+    selMenu->addAction(QStringLiteral("Grow…"), this, [this]() {
+        if (doc_ == nullptr || !doc_->selection().active()) return;
+        bool ok = false;
+        const int px =
+            QInputDialog::getInt(this, QStringLiteral("Grow Selection"),
+                                 QStringLiteral("Expand by (pixels):"), 4, 1, 1000, 1, &ok);
+        if (!ok) return;
+        Selection target = doc_->selection();
+        target.grow(px, doc_->canvasBounds());
+        doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+    });
+    selMenu->addAction(QStringLiteral("Shrink…"), this, [this]() {
+        if (doc_ == nullptr || !doc_->selection().active()) return;
+        bool ok = false;
+        const int px =
+            QInputDialog::getInt(this, QStringLiteral("Shrink Selection"),
+                                 QStringLiteral("Contract by (pixels):"), 4, 1, 1000, 1, &ok);
+        if (!ok) return;
+        Selection target = doc_->selection();
+        target.shrink(px, doc_->canvasBounds());
+        doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+    });
+    selMenu->addAction(QStringLiteral("Feather…"), this, [this]() {
+        if (doc_ == nullptr || !doc_->selection().active()) return;
+        bool ok = false;
+        const double r =
+            QInputDialog::getDouble(this, QStringLiteral("Feather Selection"),
+                                    QStringLiteral("Radius (pixels):"), 4.0, 0.1, 250.0, 1, &ok);
+        if (!ok) return;
+        Selection target = doc_->selection();
+        target.feather(static_cast<float>(r), doc_->canvasBounds());
+        doc_->history().push(std::make_unique<SetSelectionCommand>(target));
     });
     auto* filterMenu = menuBar()->addMenu(QStringLiteral("F&ilter"));
     {

@@ -257,6 +257,165 @@ void Selection::selectPolygon(std::span<const Point> verts) {
     dropEmptyTiles();
 }
 
+namespace {
+// Working-area cap for the edge refinements. Tighter than the selection's 64 MP storage cap
+// because these materialize several dense region buffers (mask + an int distance field, or two
+// float blur buffers); 16 MP keeps the transient under ~256 MB. A larger region is a no-op.
+constexpr int64_t kMaxRefinePixels = 16'000'000;
+constexpr int kMaxRefineRadius = 30000;      // clamp grow/shrink radius (canvas-dimension scale)
+constexpr float kMaxFeatherSigma = 1000.0f;  // clamp feather sigma
+constexpr int kChamferOrtho = 3;             // 3-4 chamfer ~ Euclidean*3 (round, not boxy)
+constexpr int kChamferDiag = 4;
+
+[[nodiscard]] Rect expandRect(Rect r, int m) noexcept {
+    return Rect{r.x - m, r.y - m, r.width + 2 * m, r.height + 2 * m};
+}
+
+// In-place chamfer distance transform + threshold on mask.r (0..255 coverage, treated as binary
+// at 50%). grow==true: output 255 where the distance to the nearest IN pixel is <= radius (dilate);
+// grow==false (shrink/erode): 255 where the distance to the nearest OUT pixel is > radius. The
+// 3-4 chamfer approximates Euclidean distance scaled by kChamferOrtho, so the threshold is
+// radius*kChamferOrtho. Two passes -> O(area).
+void chamferThreshold(PixelBuffer& mask, int radius, bool grow) {
+    const int w = mask.width();
+    const int h = mask.height();
+    constexpr int kInf = 1 << 28;  // +kChamferDiag stays well within int
+    std::vector<int> dist(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), kInf);
+    auto at = [w](int x, int y) { return static_cast<std::size_t>(y) * w + x; };
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const bool in = mask.at(x, y).r >= 128;
+            if (in == grow) dist[at(x, y)] = 0;  // seed: IN for grow, OUT for shrink
+        }
+    }
+    for (int y = 0; y < h; ++y) {  // forward pass (uses already-computed up/left neighbors)
+        for (int x = 0; x < w; ++x) {
+            int d = dist[at(x, y)];
+            if (x > 0) d = std::min(d, dist[at(x - 1, y)] + kChamferOrtho);
+            if (y > 0) d = std::min(d, dist[at(x, y - 1)] + kChamferOrtho);
+            if (x > 0 && y > 0) d = std::min(d, dist[at(x - 1, y - 1)] + kChamferDiag);
+            if (x + 1 < w && y > 0) d = std::min(d, dist[at(x + 1, y - 1)] + kChamferDiag);
+            dist[at(x, y)] = d;
+        }
+    }
+    for (int y = h - 1; y >= 0; --y) {  // backward pass (down/right neighbors)
+        for (int x = w - 1; x >= 0; --x) {
+            int d = dist[at(x, y)];
+            if (x + 1 < w) d = std::min(d, dist[at(x + 1, y)] + kChamferOrtho);
+            if (y + 1 < h) d = std::min(d, dist[at(x, y + 1)] + kChamferOrtho);
+            if (x + 1 < w && y + 1 < h) d = std::min(d, dist[at(x + 1, y + 1)] + kChamferDiag);
+            if (x > 0 && y + 1 < h) d = std::min(d, dist[at(x - 1, y + 1)] + kChamferDiag);
+            dist[at(x, y)] = d;
+        }
+    }
+    const int thr = radius * kChamferOrtho;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const bool sel = grow ? (dist[at(x, y)] <= thr) : (dist[at(x, y)] > thr);
+            const uint8_t v = sel ? 255 : 0;
+            mask.set(x, y, Rgba8{v, v, v, 255});
+        }
+    }
+}
+
+// Separable Gaussian blur of mask.r (coverage 0..255), zero-padded at the buffer edges (outside
+// the materialized region is unselected). sigma must be > 0.
+void gaussianMask(PixelBuffer& mask, float sigma) {
+    const int w = mask.width();
+    const int h = mask.height();
+    const int radius = std::max(1, static_cast<int>(std::ceil(sigma * 3.0f)));
+    std::vector<float> kernel(static_cast<std::size_t>(2 * radius + 1));
+    const float inv2s2 = 1.0f / (2.0f * sigma * sigma);
+    float sum = 0.0f;
+    for (int i = -radius; i <= radius; ++i) {
+        const float k = std::exp(-static_cast<float>(i) * static_cast<float>(i) * inv2s2);
+        kernel[static_cast<std::size_t>(i + radius)] = k;
+        sum += k;
+    }
+    for (float& k : kernel) k /= sum;
+
+    auto idx = [w](int x, int y) { return static_cast<std::size_t>(y) * w + x; };
+    const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+    std::vector<float> src(n), tmp(n);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) src[idx(x, y)] = static_cast<float>(mask.at(x, y).r);
+    }
+    for (int y = 0; y < h; ++y) {  // horizontal
+        for (int x = 0; x < w; ++x) {
+            float acc = 0.0f;
+            for (int i = -radius; i <= radius; ++i) {
+                const int sx = x + i;
+                if (sx < 0 || sx >= w) continue;  // zero-pad
+                acc += kernel[static_cast<std::size_t>(i + radius)] * src[idx(sx, y)];
+            }
+            tmp[idx(x, y)] = acc;
+        }
+    }
+    for (int y = 0; y < h; ++y) {  // vertical, write back as uint8
+        for (int x = 0; x < w; ++x) {
+            float acc = 0.0f;
+            for (int i = -radius; i <= radius; ++i) {
+                const int sy = y + i;
+                if (sy < 0 || sy >= h) continue;
+                acc += kernel[static_cast<std::size_t>(i + radius)] * tmp[idx(x, sy)];
+            }
+            const auto v =
+                static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::lround(acc)), 0, 255));
+            mask.set(x, y, Rgba8{v, v, v, 255});
+        }
+    }
+}
+}  // namespace
+
+void Selection::grow(int radius, Rect canvas) {
+    if (!active_ || radius <= 0) return;
+    const int r = std::min(radius, kMaxRefineRadius);
+    const Rect bounds = tightBounds();
+    if (bounds.isEmpty()) return;
+    // Expand by r so the dilation has room to grow into; clamp to the canvas.
+    const Rect region = expandRect(bounds, r).intersected(canvas);
+    if (region.isEmpty()) return;
+    if (static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) return;
+    PixelBuffer mask = toMask(region);
+    if (mask.isEmpty()) return;
+    chamferThreshold(mask, r, /*grow=*/true);
+    loadMask(mask, region.left(), region.top());
+    if (tiles_.empty()) selectNone();
+}
+
+void Selection::shrink(int radius, Rect canvas) {
+    if (!active_ || radius <= 0) return;
+    const int r = std::min(radius, kMaxRefineRadius);
+    const Rect bounds = tightBounds();
+    if (bounds.isEmpty()) return;
+    // Expand by r so the surrounding OUT pixels seed the distance transform (erosion measures the
+    // distance to the nearest unselected pixel, which lies just outside the selection's edge).
+    const Rect region = expandRect(bounds, r).intersected(canvas);
+    if (region.isEmpty()) return;
+    if (static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) return;
+    PixelBuffer mask = toMask(region);
+    if (mask.isEmpty()) return;
+    chamferThreshold(mask, r, /*grow=*/false);
+    loadMask(mask, region.left(), region.top());
+    if (tiles_.empty()) selectNone();  // eroded to nothing -> deselect
+}
+
+void Selection::feather(float radius, Rect canvas) {
+    if (!active_ || !(radius > 0.0f)) return;
+    const float sigma = std::min(radius, kMaxFeatherSigma);
+    const int margin = std::max(1, static_cast<int>(std::ceil(sigma * 3.0f)));
+    const Rect bounds = tightBounds();
+    if (bounds.isEmpty()) return;
+    const Rect region = expandRect(bounds, margin).intersected(canvas);
+    if (region.isEmpty()) return;
+    if (static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) return;
+    PixelBuffer mask = toMask(region);
+    if (mask.isEmpty()) return;
+    gaussianMask(mask, sigma);
+    loadMask(mask, region.left(), region.top());
+    if (tiles_.empty()) selectNone();
+}
+
 Rect Selection::selectedBounds() const noexcept {
     // tiles_ holds only non-all-zero tiles (dropEmptyTiles keeps it tight), so the
     // union of their bounds is a correct tile-granular selected bounds.

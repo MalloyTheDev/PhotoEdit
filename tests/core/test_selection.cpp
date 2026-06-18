@@ -244,3 +244,59 @@ PE_TEST(selection_magic_wand_contiguous_color) {
     PE_CHECK(!magicWandSelection(img, -1, 0, 10).active());  // out-of-bounds seed -> inactive
     PE_CHECK(!magicWandSelection(img, 0, 99, 10).active());
 }
+
+PE_TEST(selection_grow_expands_boundary) {
+    const Rect canvas{0, 0, 32, 32};
+    Selection s;
+    s.selectRect(Rect{10, 10, 4, 4});  // x in [10,13], y in [10,13]
+    s.grow(2, canvas);
+    PE_CHECK(s.active());
+    PE_CHECK_EQ(static_cast<int>(s.value(8, 11)), 255);   // 2px left of the edge -> now selected
+    PE_CHECK_EQ(static_cast<int>(s.value(7, 11)), 0);     // 3px out -> still unselected
+    PE_CHECK_EQ(static_cast<int>(s.value(12, 12)), 255);  // original interior stays selected
+}
+
+PE_TEST(selection_shrink_contracts_boundary) {
+    const Rect canvas{0, 0, 32, 32};
+    Selection s;
+    s.selectRect(Rect{8, 8, 16, 16});  // x,y in [8,23]
+    s.shrink(2, canvas);
+    PE_CHECK(s.active());
+    PE_CHECK_EQ(static_cast<int>(s.value(8, 15)), 0);     // original edge -> eroded away
+    PE_CHECK_EQ(static_cast<int>(s.value(11, 15)), 255);  // 3px in -> kept
+}
+
+PE_TEST(selection_shrink_to_nothing_deselects) {
+    const Rect canvas{0, 0, 32, 32};
+    Selection s;
+    s.selectRect(Rect{10, 10, 2, 2});
+    s.shrink(5, canvas);  // erodes the whole 2x2 away
+    PE_CHECK(!s.active());
+}
+
+PE_TEST(selection_feather_softens_edge) {
+    const Rect canvas{0, 0, 48, 48};
+    Selection s;
+    s.selectRect(Rect{12, 12, 20, 20});  // hard-edged 20x20
+    s.feather(2.0f, canvas);
+    PE_CHECK(s.active());
+    const int interior = static_cast<int>(s.value(22, 22));  // deep inside
+    const int edge = static_cast<int>(s.value(12, 22));      // on the original boundary
+    const int outside = static_cast<int>(s.value(9, 22));    // 3px outside
+    PE_CHECK(interior > 180);                                // interior stays mostly selected
+    PE_CHECK(edge > 40 && edge < 220);                       // boundary became partial coverage
+    PE_CHECK(outside > 0);  // coverage bled outward (no longer a hard 0)
+}
+
+PE_TEST(selection_refine_noops_when_inactive) {
+    const Rect canvas{0, 0, 32, 32};
+    Selection s;  // inactive
+    s.grow(3, canvas);
+    PE_CHECK(!s.active());
+    s.shrink(3, canvas);
+    PE_CHECK(!s.active());
+    s.feather(3.0f, canvas);
+    PE_CHECK(!s.active());
+    s.grow(0, canvas);  // non-positive radius is a no-op too
+    PE_CHECK(!s.active());
+}
