@@ -3,6 +3,7 @@
 #include "CanvasView.hpp"
 #include "ColorPanel.hpp"
 #include "EffectDialog.hpp"
+#include "ExportDialog.hpp"
 #include "HistoryPanel.hpp"
 #include "IconUtil.hpp"
 #include "LayersPanel.hpp"
@@ -109,6 +110,7 @@ void MainWindow::buildMenuBar() {
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("&Save"), this, &MainWindow::saveDocument);
     fileMenu->addAction(QStringLiteral("Save &As..."), this, &MainWindow::saveDocumentAs);
+    fileMenu->addAction(QStringLiteral("E&xport As..."), this, &MainWindow::exportDocumentAs);
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("E&xit"), qApp, &QApplication::quit);
 
@@ -620,6 +622,63 @@ bool MainWindow::writeTo(const QString& path) {
     refreshTitle();
     statusBar()->showMessage(QStringLiteral("Saved %1").arg(path), 3000);
     return true;
+}
+
+void MainWindow::exportDocumentAs() {
+    if (doc_ == nullptr) return;
+
+    // Default the dialog to the current file's format when it is a raster format, else PNG.
+    pe::ImageFormat initial = pe::formatFromExtension(currentPath_.toStdString());
+    if (initial == pe::ImageFormat::Unknown || initial == pe::ImageFormat::Native) {
+        initial = pe::ImageFormat::Png;
+    }
+
+    ExportDialog dlg(this, *doc_, initial);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const pe::ImageFormat fmt = dlg.selectedFormat();
+    if (fmt == pe::ImageFormat::Unknown) return;  // no raster codec available (defensive)
+
+    // Per-format save-dialog filter and canonical extension.
+    QString filter;
+    QString ext;
+    switch (fmt) {
+        case pe::ImageFormat::Png:
+            filter = QStringLiteral("PNG (*.png)");
+            ext = QStringLiteral("png");
+            break;
+        case pe::ImageFormat::Jpeg:
+            filter = QStringLiteral("JPEG (*.jpg *.jpeg)");
+            ext = QStringLiteral("jpg");
+            break;
+        case pe::ImageFormat::Tiff:
+            filter = QStringLiteral("TIFF (*.tif *.tiff)");
+            ext = QStringLiteral("tif");
+            break;
+        case pe::ImageFormat::WebP:
+            filter = QStringLiteral("WebP (*.webp)");
+            ext = QStringLiteral("webp");
+            break;
+        default:
+            return;
+    }
+
+    QString path =
+        QFileDialog::getSaveFileName(this, QStringLiteral("Export As"), QString(), filter);
+    if (path.isEmpty()) return;
+    // Guarantee the chosen format's extension so saveDocument writes that exact format
+    // (the dialog, not the typed name, is the source of truth for the format).
+    if (pe::formatFromExtension(path.toStdString()) != fmt) {
+        path += QStringLiteral(".%1").arg(ext);
+    }
+
+    if (!pe::saveDocument(*doc_, path.toStdString(), dlg.options())) {
+        QMessageBox::warning(this, QStringLiteral("Export failed"),
+                             QStringLiteral("Could not export \"%1\".").arg(path));
+        return;
+    }
+    // An export is a flattened copy: unlike Save/Save As it does not change the document's
+    // identity (currentPath_) or clear its dirty flag — matching Photoshop/GIMP semantics.
+    statusBar()->showMessage(QStringLiteral("Exported %1").arg(path), 3000);
 }
 
 void MainWindow::undo() {
