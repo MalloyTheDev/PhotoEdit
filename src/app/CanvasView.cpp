@@ -77,6 +77,7 @@ void CanvasView::setDocument(pe::Document* doc) {
     liveMarquee_ = Rect{};
     draggingLasso_ = false;
     lassoPts_.clear();
+    draggingGradient_ = false;
     doc_ = doc;
     if (doc_ != nullptr) {
         doc_->addObserver(this);
@@ -113,6 +114,17 @@ void CanvasView::reloadImage() {
 
 pe::Size CanvasView::canvasSize() const {
     return doc_ != nullptr ? doc_->canvasSize() : pe::Size{0, 0};
+}
+
+QString CanvasView::fillUnavailableMessage() const {
+    // A fill (Bucket/Gradient) returned no command. The two reasons the app can distinguish: the
+    // active layer is not a paintable pixel layer, otherwise the canvas is over the engine's
+    // per-operation fill budget (the fills always span the whole canvas).
+    const pe::Layer* layer = doc_ != nullptr ? doc_->findLayer(doc_->activeLayer()) : nullptr;
+    if (layer == nullptr || layer->kind() != pe::LayerKind::Pixel) {
+        return QStringLiteral("Select a pixel layer to fill.");
+    }
+    return QStringLiteral("Image is too large to fill in one step.");
 }
 
 void CanvasView::cancelMovePreview() {
@@ -194,12 +206,18 @@ void CanvasView::setTool(Tool t) {
         lassoPts_.clear();
         update();
     }
+    if (draggingGradient_) {  // switching away mid-gradient discards the in-progress guide
+        draggingGradient_ = false;
+        update();
+    }
     setCursor(t == Tool::Hand       ? Qt::OpenHandCursor
               : t == Tool::Zoom     ? Qt::PointingHandCursor
               : t == Tool::Move     ? Qt::SizeAllCursor
               : t == Tool::Wand     ? Qt::PointingHandCursor
               : t == Tool::Inactive ? Qt::ArrowCursor
-                                    : Qt::CrossCursor);  // Brush/Eraser/Marquee/Lasso
+                                    : Qt::CrossCursor);  // all other interactive tools
+                                                         // (Brush/Eraser/Marquee/Lasso/Crop/
+                                                         // Bucket/Gradient/Eyedropper)
 }
 
 void CanvasView::maybeInitialFit() {
@@ -302,6 +320,21 @@ void CanvasView::paintEvent(QPaintEvent*) {
             drawAntRect(selectionAnts_);
         }
     }
+
+    // Gradient tool: while dragging, draw a guide line from the drag start to the cursor. It is
+    // a UI overlay in widget (device-independent) space, so reset the doc->view transform first
+    // and use cosmetic pens (a black line under a white dashed one, like the marching ants).
+    if (draggingGradient_ && doc_ != nullptr) {
+        painter.resetTransform();
+        QPen guideBlack(QColor(0, 0, 0), 1);
+        guideBlack.setCosmetic(true);
+        painter.setPen(guideBlack);
+        painter.drawLine(gradStartWidget_, gradEndWidget_);
+        QPen guideWhite(QColor(255, 255, 255), 1, Qt::DashLine);
+        guideWhite.setCosmetic(true);
+        painter.setPen(guideWhite);
+        painter.drawLine(gradStartWidget_, gradEndWidget_);
+    }
 }
 
 void CanvasView::tabletEvent(QTabletEvent* e) {
@@ -349,6 +382,9 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
     const bool wantPan = e->button() == Qt::MiddleButton ||
                          (e->button() == Qt::LeftButton && toolMode_ == Tool::Hand);
     if (wantPan) {
+        // Abandon an in-progress gradient drag: panning shifts the view transform, so the
+        // captured widget endpoints would map to the wrong document points on release.
+        if (draggingGradient_) draggingGradient_ = false;
         panning_ = true;
         lastPanPos_ = e->position();
         setCursor(Qt::ClosedHandCursor);
@@ -416,6 +452,33 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         }
         return;
     }
+    if (toolMode_ == Tool::Bucket) {
+        // Flood-fill from the clicked pixel with the foreground color, gated by the selection.
+        // bucketFill returns a command (nothing applied yet); push() executes + notifies so the
+        // renderer-observer marks the touched tiles dirty and the canvas repaints.
+        const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        const pe::Point seed{static_cast<int>(std::lround(d.x)),
+                             static_cast<int>(std::lround(d.y))};
+        constexpr int kBucketTolerance = 32;  // default per-channel tolerance (v1)
+        if (auto cmd = pe::bucketFill(*doc_, doc_->activeLayer(), seed.x, seed.y, tool_.color(),
+                                      kBucketTolerance, &doc_->selection())) {
+            doc_->history().push(std::move(cmd));
+        } else if (doc_->canvasBounds().contains(seed)) {
+            // An on-canvas click that filled nothing is a failure worth reporting; an off-canvas
+            // click (on the pasteboard) is simply ignored.
+            emit toolMessage(fillUnavailableMessage());
+        }
+        return;
+    }
+    if (toolMode_ == Tool::Gradient) {
+        // Begin a gradient drag: a guide line is drawn until release, when the foreground->
+        // background gradient is applied along start->end (see mouseReleaseEvent).
+        draggingGradient_ = true;
+        gradStartWidget_ = e->position();
+        gradEndWidget_ = e->position();
+        update();
+        return;
+    }
     if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser) return;  // Inactive: no paint
     // Recover if a prior stroke never received its release (e.g. mouse capture was
     // stolen by a modal/Alt-Tab): drop the stale preview before starting fresh.
@@ -454,6 +517,11 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         const pe::Point p{static_cast<int>(std::lround(d.x)), static_cast<int>(std::lround(d.y))};
         if (lassoPts_.empty() || !(lassoPts_.back() == p)) lassoPts_.push_back(p);  // dedup
         update();
+        return;
+    }
+    if (draggingGradient_ && doc_ != nullptr) {
+        gradEndWidget_ = e->position();
+        update();  // redraw the guide line to the new cursor position
         return;
     }
     if (movingContent_ && doc_ != nullptr) {
@@ -526,6 +594,37 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
             }
         }
         lassoPts_.clear();
+        update();
+        return;
+    }
+    if (draggingGradient_) {
+        draggingGradient_ = false;
+        if (doc_ != nullptr) {
+            // Map the guide endpoints back to document space and apply a foreground->background
+            // linear gradient along start->end. gradientFill no-ops on a zero-length drag and
+            // honors the active selection; push() executes + notifies (observer repaints).
+            const pe::PointD a =
+                view_.viewToDoc(pe::PointD{gradStartWidget_.x(), gradStartWidget_.y()});
+            const pe::PointD b =
+                view_.viewToDoc(pe::PointD{gradEndWidget_.x(), gradEndWidget_.y()});
+            const pe::Point start{static_cast<int>(std::lround(a.x)),
+                                  static_cast<int>(std::lround(a.y))};
+            const pe::Point end{static_cast<int>(std::lround(b.x)),
+                                static_cast<int>(std::lround(b.y))};
+            const pe::Rgbaf fg = tool_.color();  // foreground = near stop (at start)
+            const pe::Rgbaf bg{static_cast<float>(bgColor_.redF()),
+                               static_cast<float>(bgColor_.greenF()),
+                               static_cast<float>(bgColor_.blueF()),
+                               static_cast<float>(bgColor_.alphaF())};  // background = far stop
+            if (auto cmd = pe::gradientFill(*doc_, doc_->activeLayer(), start, end, fg, bg,
+                                            &doc_->selection())) {
+                doc_->history().push(std::move(cmd));
+            } else if (start.x != end.x || start.y != end.y) {
+                // A genuine drag (not a zero-length click) that produced nothing is a failure
+                // worth reporting; a click without a drag is silently ignored.
+                emit toolMessage(fillUnavailableMessage());
+            }
+        }
         update();
         return;
     }

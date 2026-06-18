@@ -299,3 +299,66 @@ PE_TEST(move_layer_content_edge_cases) {
     PE_CHECK(moveLayerContent(*doc, base, 0, 0) == nullptr);       // zero move: no command
     PE_CHECK(moveLayerContent(*doc, base, 999999, 0) == nullptr);  // offset beyond the size cap
 }
+
+PE_TEST(bucket_fill_floods_contiguous_region) {
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 8, 16}, Rgba8{255, 255, 255, 255});  // left half white
+    pl->tiles().fillRect(Rect{8, 0, 8, 16}, Rgba8{0, 0, 200, 255});      // right half blue
+
+    auto cmd = bucketFill(*doc, base, 2, 2, Rgbaf{1.0f, 0.0f, 0.0f, 1.0f}, 10);  // red into white
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK_EQ(pl->tiles().pixel(2, 2), (Rgba8{255, 0, 0, 255}));   // white region -> red
+    PE_CHECK_EQ(pl->tiles().pixel(12, 2), (Rgba8{0, 0, 200, 255}));  // blue region untouched
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(2, 2), (Rgba8{255, 255, 255, 255}));  // restored
+
+    PE_CHECK(bucketFill(*doc, base, 999, 999, Rgbaf{}, 0) == nullptr);  // off-canvas seed
+}
+
+PE_TEST(gradient_fill_interpolates_along_axis) {
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+
+    // Horizontal black->white gradient across the 16px width.
+    auto cmd =
+        gradientFill(*doc, base, Point{0, 0}, Point{15, 0}, Rgbaf{0, 0, 0, 1}, Rgbaf{1, 1, 1, 1});
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(pl->tiles().pixel(0, 0).r < 40);    // near black
+    PE_CHECK(pl->tiles().pixel(15, 0).r > 215);  // near white
+    const int mid = pl->tiles().pixel(8, 0).r;
+    PE_CHECK(mid > 110 && mid < 180);  // roughly mid-gray in the middle
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(8, 0).a, static_cast<uint8_t>(0));  // restored transparent
+
+    PE_CHECK(gradientFill(*doc, base, Point{5, 5}, Point{5, 5}, Rgbaf{}, Rgbaf{}) ==
+             nullptr);  // zero-length drag
+}
+
+PE_TEST(gradient_fill_composites_over_backdrop) {
+    // A semi-transparent stop must let the existing pixels show through (straight-alpha Normal),
+    // matching bucketFill — not hard-overwrite. Fill the layer opaque red, then run a gradient
+    // from transparent (alpha 0, at x=0) to opaque blue (at x=15).
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 16, 16}, Rgba8{255, 0, 0, 255});  // opaque red backdrop
+
+    auto cmd =
+        gradientFill(*doc, base, Point{0, 0}, Point{15, 0}, Rgbaf{0, 0, 0, 0}, Rgbaf{0, 0, 1, 1});
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    const Rgba8 left = pl->tiles().pixel(0, 0);    // transparent stop -> backdrop shows through
+    const Rgba8 right = pl->tiles().pixel(15, 0);  // opaque blue stop -> replaces
+    PE_CHECK(left.r > 215 && left.b < 40);         // still red
+    PE_CHECK(right.b > 215 && right.r < 40);       // now blue
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(0, 0), (Rgba8{255, 0, 0, 255}));  // backdrop restored
+}

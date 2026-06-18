@@ -77,6 +77,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     canvas_ = new CanvasView(this);
     connect(canvas_, &CanvasView::colorPicked, this, &MainWindow::onColorPicked);
+    connect(canvas_, &CanvasView::toolMessage, this,
+            [this](const QString& msg) { statusBar()->showMessage(msg, 4000); });
 
     buildMenuBar();
     buildToolBar();     // left tool strip (+ fg/bg swatches)
@@ -337,8 +339,8 @@ void MainWindow::buildToolBar() {
          {"stamp", "Clone Stamp", Tool::Inactive, "S"},
          {"history", "History Brush", Tool::Inactive, "Y"},
          {"eraser", "Eraser", Tool::Eraser, "E"},
-         {"blend", "Gradient", Tool::Inactive, "G"},
-         {"paint-bucket", "Paint Bucket", Tool::Inactive, ""}},
+         {"blend", "Gradient", Tool::Gradient, "G"},
+         {"paint-bucket", "Paint Bucket", Tool::Bucket, ""}},
         {{"droplet", "Blur", Tool::Inactive, ""}, {"sun", "Dodge", Tool::Inactive, "O"}},
         {{"pen-tool", "Pen", Tool::Inactive, "P"},
          {"type", "Type", Tool::Inactive, "T"},
@@ -565,6 +567,7 @@ void MainWindow::chooseBackgroundColor() {
     const QColor c = QColorDialog::getColor(bgColor_, this, QStringLiteral("Background Color"));
     if (!c.isValid()) return;
     bgColor_ = c;
+    canvas_->setBackgroundColor(bgColor_);  // the Gradient tool's far stop tracks the bg swatch
     updateSwatches();
 }
 

@@ -8,9 +8,11 @@
 #include <vector>
 
 #include <QBrush>
+#include <QColor>
 #include <QImage>
 #include <QPoint>
 #include <QPointF>
+#include <QString>
 #include <QWidget>
 
 namespace pe {
@@ -47,6 +49,8 @@ public:
         Lasso,
         Wand,
         Crop,
+        Bucket,
+        Gradient,
         Eyedropper,
         Inactive
     };
@@ -66,9 +70,14 @@ public:
     void setTool(Tool t);
     [[nodiscard]] Tool activeTool() const noexcept { return toolMode_; }
 
+    // Background color (the Gradient tool's far stop; the foreground is the paint color).
+    void setBackgroundColor(const QColor& c) { bgColor_ = c; }
+
 signals:
     void zoomChanged(double percent);   // for the status-bar zoom readout
     void colorPicked(const QColor& c);  // for eyedropper tool
+    void toolMessage(
+        const QString& msg);  // transient status-bar feedback (e.g. a fill that no-ops)
 
 public:
     // View navigation (also driven by the View menu).
@@ -103,6 +112,9 @@ private:
     void maybeInitialFit();                // fit once the widget has a real size
     [[nodiscard]] pe::StrokePoint sampleAt(QPointF widgetPos) const;  // widget -> doc space
     [[nodiscard]] pe::Size canvasSize() const;  // doc_'s canvas size, or {0,0} if no document
+    // Why a Bucket/Gradient fill returned no command, for status-bar feedback: the active layer
+    // isn't paintable pixels, or the canvas exceeds the engine's per-op fill budget.
+    [[nodiscard]] QString fillUnavailableMessage() const;
 
     pe::Document* doc_ = nullptr;  // not owned; observed while non-null
     // Tile-cache renderer bound to doc_: composites only visible/dirty tiles, so a huge
@@ -126,6 +138,13 @@ private:
     // a polygon selection on release).
     bool draggingLasso_ = false;
     std::vector<pe::Point> lassoPts_;
+
+    // Gradient tool drag: a guide line (widget space) drawn while dragging; on release the
+    // foreground->background gradient is applied along start->end.
+    bool draggingGradient_ = false;
+    QPointF gradStartWidget_;
+    QPointF gradEndWidget_;
+    QColor bgColor_{255, 255, 255};  // gradient far stop (kept in sync by MainWindow)
 
     // Pixel-tight bounds of the committed selection, for the marching-ants outline. Cached
     // on selection change (and on setDocument) so paintEvent never scans the mask per frame.
