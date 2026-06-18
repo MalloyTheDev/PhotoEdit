@@ -49,11 +49,3 @@ target_link_libraries(photoedit
 set_target_properties(photoedit PROPERTIES
     WIN32_EXECUTABLE ON
     MACOSX_BUNDLE OFF)
-
-# Throwaway offscreen smoke harness for the Dodge/Burn tool (removed before commit).
-option(PHOTOEDIT_DODGE_SMOKE "Build the dodge/burn offscreen smoke harness" OFF)
-if(PHOTOEDIT_DODGE_SMOKE)
-    qt_add_executable(dodge_smoke dodge_smoke.cpp CanvasView.cpp CanvasView.hpp Theme.cpp Theme.hpp)
-    target_link_libraries(dodge_smoke
-        PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Svg PhotoEdit::Core)
-endif()

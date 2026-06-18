@@ -1,6 +1,8 @@
 #include "pe/core/Brush.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/PaintToolController.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/Selection.hpp"
 #include "pe_test.hpp"
 
 #include <cmath>
@@ -214,4 +216,70 @@ PE_TEST(dodge_burn_skip_transparent_pixels) {
     std::vector<StrokePoint> pts = {{{4, 16}, 1.0f}, {{28, 16}, 1.0f}};
     PE_CHECK(dodgeStroke(*doc, base, hardBrush(12, 1.0f), pts) == nullptr);
     PE_CHECK(burnStroke(*doc, base, hardBrush(12, 1.0f), pts) == nullptr);
+}
+
+PE_TEST(controller_dodge_and_burn_modes) {
+    // Drive the tone ops through PaintToolController (the path the Dodge tool + Alt=Burn use).
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{128, 128, 128, 255});
+    const int before = pl->tiles().pixel(32, 32).r;
+
+    PaintToolController c;
+    c.setBrush(hardBrush(16, 1.0f));
+    c.setMode(PaintToolController::Mode::Dodge);
+    PE_CHECK(c.begin(*doc, StrokePoint{{32, 32}, 1.0f}));
+    PE_CHECK(c.end(*doc));
+    PE_CHECK(pl->tiles().pixel(32, 32).r > before);  // dodge lightened
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(32, 32).r, before);
+
+    c.setMode(PaintToolController::Mode::Burn);
+    PE_CHECK(c.begin(*doc, StrokePoint{{32, 32}, 1.0f}));
+    PE_CHECK(c.end(*doc));
+    PE_CHECK(pl->tiles().pixel(32, 32).r < before);  // burn darkened
+}
+
+PE_TEST(dodge_honors_selection) {
+    auto doc = Document::createBlank(Size{32, 32});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 32, 32}, Rgba8{128, 128, 128, 255});
+
+    Selection sel;
+    sel.selectRect(Rect{0, 0, 16, 32});                                  // left half selected
+    std::vector<StrokePoint> pts = {{{4, 16}, 1.0f}, {{28, 16}, 1.0f}};  // spans both halves
+    auto cmd = dodgeStroke(*doc, base, hardBrush(16, 1.0f), pts, &sel);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(pl->tiles().pixel(6, 16).r > 128);     // inside selection -> lightened
+    PE_CHECK_EQ(pl->tiles().pixel(26, 16).r, 128);  // outside selection -> unchanged
+}
+
+PE_TEST(dodge_on_16bit_layer) {
+    auto doc = Document::createBlank(Size{32, 32}, ColorMode::RGB, BitDepth::U16);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles16().fillRect(Rect{0, 0, 32, 32}, Rgba16{32768, 32768, 32768, 65535});  // mid-gray
+    const int before = pl->tiles16().pixel(16, 16).r;
+    std::vector<StrokePoint> pts = {{{4, 16}, 1.0f}, {{28, 16}, 1.0f}};
+    auto cmd = dodgeStroke(*doc, base, hardBrush(16, 1.0f), pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(pl->tiles16().pixel(16, 16).r > before);  // lightened in the native 16-bit store
+}
+
+PE_TEST(dodge_does_not_darken_superwhite_f32) {
+    // On an F32 layer holding a super-white (>1.0) value, dodge must NOT reduce it (the
+    // max(0, 1-dst) guard) — a "lighten" tool must never darken.
+    auto doc = Document::createBlank(Size{16, 16}, ColorMode::RGB, BitDepth::F32);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tilesF().fillRect(Rect{0, 0, 16, 16}, Rgbaf{2.0f, 2.0f, 2.0f, 1.0f});  // HDR highlight
+    std::vector<StrokePoint> pts = {{{2, 8}, 1.0f}, {{14, 8}, 1.0f}};
+    auto cmd = dodgeStroke(*doc, base, hardBrush(12, 1.0f), pts);
+    // With the clamp, dodging a super-white pixel is a no-op, so the stroke may deposit nothing.
+    if (cmd != nullptr) doc->history().push(std::move(cmd));
+    PE_CHECK(pl->tilesF().pixel(8, 8).r >= 2.0f - 1e-4f);  // not darkened
 }

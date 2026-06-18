@@ -184,15 +184,19 @@ void CanvasView::zoomOut() {
 
 void CanvasView::setTool(Tool t) {
     toolMode_ = t;
+    // Abandon any live stroke FIRST, before changing the paint mode: otherwise a tool change
+    // mid-stroke (e.g. a shortcut while the button is held) would leave the stroke active and the
+    // next mouse-move would rebuild it under the new mode — silently changing what it commits.
+    if (doc_ != nullptr && tool_.isStroking()) {
+        tool_.cancel(*doc_);
+        reloadImage();  // the cancel reverted tiles without notifying the renderer
+    }
     if (t == Tool::Brush) {
         tool_.setMode(pe::PaintToolController::Mode::Brush);
     } else if (t == Tool::Eraser) {
         tool_.setMode(pe::PaintToolController::Mode::Eraser);
     } else if (t == Tool::Dodge) {
         tool_.setMode(pe::PaintToolController::Mode::Dodge);  // Alt at stroke start burns instead
-    } else if (doc_ != nullptr && tool_.isStroking()) {
-        tool_.cancel(*doc_);  // switching away from a paint tool drops any live stroke
-        reloadImage();        // the cancel reverted tiles without notifying the renderer
     }
     if (draggingMarquee_ && doc_ != nullptr) {
         draggingMarquee_ = false;

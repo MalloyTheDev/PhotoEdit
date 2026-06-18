@@ -26,10 +26,10 @@ namespace {
 
 enum class PaintOp { Paint, Erase, Dodge, Burn };
 
-// Per-stroke tone strength for Dodge/Burn at full brush coverage. Kept well below 1 so a single
-// pass is a gentle adjustment that builds up with repeated strokes (matching a photographic
-// dodge/burn "exposure"), rather than slamming pixels to white/black in one dab.
-constexpr float kToneExposure = 0.5f;
+// Per-stroke tone strength for Dodge/Burn at full brush coverage, modulated further by the brush
+// opacity/flow. Kept low so each pass is a modest adjustment that builds up over repeated strokes
+// (a photographic dodge/burn "exposure" feel) rather than slamming pixels to white/black.
+constexpr float kToneExposure = 0.3f;
 
 using CoverageKey = std::pair<int, int>;  // {tileCol, tileRow}
 using CoverageMap = std::map<CoverageKey, std::vector<float>>;
@@ -138,10 +138,13 @@ std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& st
                     if (dst.a <= 0.0f) continue;
                     const float k = a * kToneExposure;
                     if (op == PaintOp::Dodge) {  // lighten toward white
-                        out.r = dst.r + k * (1.0f - dst.r);
-                        out.g = dst.g + k * (1.0f - dst.g);
-                        out.b = dst.b + k * (1.0f - dst.b);
-                    } else {  // burn: darken toward black
+                        // max(0, 1-dst) keeps dodge monotonic on F32/HDR pixels: a super-white
+                        // value (dst > 1, preserved by the float store) is left unchanged rather
+                        // than darkened. For the in-gamut [0,1] case this is identical to (1-dst).
+                        out.r = dst.r + k * std::max(0.0f, 1.0f - dst.r);
+                        out.g = dst.g + k * std::max(0.0f, 1.0f - dst.g);
+                        out.b = dst.b + k * std::max(0.0f, 1.0f - dst.b);
+                    } else {  // burn: darken toward black (dst*(1-k) shrinks any value toward 0)
                         out.r = dst.r * (1.0f - k);
                         out.g = dst.g * (1.0f - k);
                         out.b = dst.b * (1.0f - k);

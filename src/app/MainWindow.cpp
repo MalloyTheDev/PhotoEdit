@@ -370,6 +370,7 @@ void MainWindow::buildToolBar() {
             const QString shortcut = QString::fromUtf8(def.shortcut);
             QString tip = QString::fromUtf8(def.label);
             if (!shortcut.isEmpty()) tip += QStringLiteral("  (%1)").arg(shortcut);
+            if (def.tool == Tool::Dodge) tip += QStringLiteral("  —  hold Alt to Burn (darken)");
             if (!wired) tip += QStringLiteral("  — coming soon");
             a->setToolTip(tip);
             if (!shortcut.isEmpty()) a->setShortcut(QKeySequence(shortcut));
