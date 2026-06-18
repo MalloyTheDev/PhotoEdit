@@ -378,6 +378,14 @@ std::unique_ptr<PaintCommand> bakePixelEditRegion(
     const Rect bb = region;
     if (bb.isEmpty()) return nullptr;
     if (bb.width > kMaxCanvasDimension || bb.height > kMaxCanvasDimension) return nullptr;
+    // Bound the origin too, so right()/bottom() (computed as int x+width downstream, e.g. in
+    // tilesForRect) cannot overflow for a far-off-canvas region. With both |x|,|y| and width,
+    // height <= kMaxCanvasDimension, the sums stay well within int. (Canvas-bounded callers pass
+    // |x|,|y| <= the canvas size; this only rejects pathological external origins.)
+    if (bb.x > kMaxCanvasDimension || bb.x < -kMaxCanvasDimension || bb.y > kMaxCanvasDimension ||
+        bb.y < -kMaxCanvasDimension) {
+        return nullptr;
+    }
     const int64_t area = static_cast<int64_t>(bb.width) * static_cast<int64_t>(bb.height);
     if (area > kMaxFilterPixels) return nullptr;
 
@@ -541,9 +549,16 @@ std::unique_ptr<PaintCommand> stampBuffer(Document& doc, LayerId layerId, Point 
     Layer* layer = doc.findLayer(layerId);
     if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
     if (src.isEmpty()) return nullptr;
+    // Enforce the size caps BEFORE the float snapshot allocation (the engine's "DoS caps before
+    // allocation" rule): bakePixelEditRegion re-checks, but it runs only after srcF is built, so a
+    // huge source would otherwise force a multi-hundred-MB transient before being rejected.
+    if (src.width() > kMaxCanvasDimension || src.height() > kMaxCanvasDimension) return nullptr;
+    if (static_cast<int64_t>(src.width()) * static_cast<int64_t>(src.height()) > kMaxFilterPixels) {
+        return nullptr;
+    }
     const Rect region{origin.x, origin.y, src.width(), src.height()};
     // Snapshot the source as working-float, index-aligned with the region the transform sees
-    // (row-major, w == region.width == src.width). bakePixelEditRegion enforces the size caps.
+    // (row-major, w == region.width == src.width). The origin is bounded by bakePixelEditRegion.
     std::vector<Rgbaf> srcF(static_cast<std::size_t>(src.width()) *
                             static_cast<std::size_t>(src.height()));
     for (std::size_t i = 0; i < srcF.size(); ++i) srcF[i] = toFloat(src.data()[i]);

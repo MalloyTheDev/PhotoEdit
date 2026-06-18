@@ -631,6 +631,13 @@ bool MainWindow::writeTo(const QString& path) {
 
 void MainWindow::onAddText(const QPointF& docPos) {
     if (doc_ == nullptr) return;
+    // Check paintability up front so the user isn't prompted to type (and configure a font) only
+    // to lose that input when the active layer turns out not to be a pixel layer.
+    const pe::Layer* active = doc_->findLayer(doc_->activeLayer());
+    if (active == nullptr || active->kind() != pe::LayerKind::Pixel) {
+        statusBar()->showMessage(QStringLiteral("Select a pixel layer to add text."), 4000);
+        return;
+    }
     TextDialog dlg(this);
     if (dlg.exec() != QDialog::Accepted) return;
     const QString text = dlg.text();

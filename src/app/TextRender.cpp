@@ -5,11 +5,12 @@
 #include <QFontMetrics>
 #include <QImage>
 #include <QPainter>
-#include <QSize>
+#include <QRect>
 #include <QString>
 #include <Qt>
 
-#include <cstdint>
+#include <cstddef>
+#include <cstring>
 
 namespace pe::app {
 
@@ -24,16 +25,22 @@ constexpr long long kMaxTextPixels = 16'000'000;
 pe::PixelBuffer renderText(const QString& text, const QFont& font, const QColor& color) {
     if (text.isEmpty()) return {};
 
+    // Size the buffer from the ink bounding rect (not the advance box), so italic/script glyphs
+    // whose ink overhangs the advance — including a negative left/top side bearing — are captured
+    // rather than clipped. A small margin absorbs antialiasing fringe on all four sides.
+    constexpr int kMargin = 2;
     const QFontMetrics fm(font);
-    const QSize sz = fm.size(Qt::TextSingleLine, text);
-    const int w = sz.width() + 4;  // small margins so AA / italic overhang isn't clipped
-    const int h = sz.height() + 2;
+    const QRect br = fm.boundingRect(text);
+    const int w = br.width() + 2 * kMargin;
+    const int h = br.height() + 2 * kMargin;
     if (w <= 0 || h <= 0 || w > kMaxTextDim || h > kMaxTextDim ||
         static_cast<long long>(w) * static_cast<long long>(h) > kMaxTextPixels) {
-        return {};  // empty or pathologically large -> refuse before allocating
+        return {};  // empty (whitespace-only) or pathologically large -> refuse before allocating
     }
 
-    QImage img(w, h, QImage::Format_ARGB32);  // straight (non-premultiplied) alpha, like Rgba8
+    // Format_RGBA8888 stores bytes as R,G,B,A — the exact layout of pe::Rgba8 — and is straight
+    // (non-premultiplied) alpha, so the buffer copies back row-for-row with no channel shuffle.
+    QImage img(w, h, QImage::Format_RGBA8888);
     img.fill(Qt::transparent);
     {
         QPainter p(&img);
@@ -41,18 +48,15 @@ pe::PixelBuffer renderText(const QString& text, const QFont& font, const QColor&
         p.setRenderHint(QPainter::TextAntialiasing, true);
         p.setFont(font);
         p.setPen(color);
-        p.drawText(2, fm.ascent(), text);  // 2px left margin; baseline within the buffer
+        // Offset the baseline so the ink rect (which may start left of / above the origin) lands
+        // at (kMargin, kMargin) inside the buffer.
+        p.drawText(kMargin - br.left(), kMargin - br.top(), text);
     }
 
     pe::PixelBuffer out(w, h);
     for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            const QRgb c = img.pixel(x, y);
-            out.set(x, y,
-                    pe::Rgba8{
-                        static_cast<std::uint8_t>(qRed(c)), static_cast<std::uint8_t>(qGreen(c)),
-                        static_cast<std::uint8_t>(qBlue(c)), static_cast<std::uint8_t>(qAlpha(c))});
-        }
+        std::memcpy(out.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(w),
+                    img.constScanLine(y), static_cast<std::size_t>(w) * 4);
     }
     return out;
 }

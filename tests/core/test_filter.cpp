@@ -2,6 +2,7 @@
 #include "pe/core/Filter.hpp"
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/Selection.hpp"
 #include "pe_test.hpp"
 
 #include <vector>
@@ -391,4 +392,45 @@ PE_TEST(stamp_buffer_composites_and_undoes) {
 
     // Degenerate / unsupported inputs return nullptr.
     PE_CHECK(stampBuffer(*doc, base, Point{0, 0}, PixelBuffer{}, "Type") == nullptr);  // empty src
+    PE_CHECK(stampBuffer(*doc, kNoLayer, Point{0, 0}, src, "Type") == nullptr);  // no such layer
+}
+
+PE_TEST(stamp_buffer_honors_selection) {
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+
+    Selection sel;
+    sel.selectRect(Rect{0, 0, 2, 2});              // only the top-left 2x2 is selected
+    PixelBuffer src(4, 4, Rgba8{0, 255, 0, 255});  // opaque green 4x4 at the origin
+    auto cmd = stampBuffer(*doc, base, Point{0, 0}, src, "Type", &sel);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK_EQ(pl->tiles().pixel(0, 0), (Rgba8{0, 255, 0, 255}));  // inside selection -> stamped
+    PE_CHECK_EQ(pl->tiles().pixel(3, 3).a,
+                static_cast<uint8_t>(0));  // outside selection -> untouched
+}
+
+PE_TEST(stamp_buffer_16bit_layer_and_negative_origin) {
+    // 16-bit-depth layer: the stamp routes through the native U16 store.
+    auto doc = Document::createBlank(Size{16, 16}, ColorMode::RGB, BitDepth::U16);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    PixelBuffer src(4, 4, Rgba8{255, 0, 0, 255});
+    auto cmd = stampBuffer(*doc, base, Point{0, 0}, src, "Type");
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    const Rgba16 px = pl->tiles16().pixel(1, 1);
+    PE_CHECK(px.r > 60000 && px.g < 5000 && px.a > 60000);  // opaque red, widened to 16-bit
+
+    // Negative origin: a 4x4 stamp at (-2,-2) lands its lower-right quarter at doc (0,0)..(1,1).
+    auto doc2 = Document::createBlank(Size{16, 16});
+    const LayerId b2 = doc2->activeLayer();
+    auto* pl2 = static_cast<PixelLayer*>(doc2->findLayer(b2));
+    auto cmd2 = stampBuffer(*doc2, b2, Point{-2, -2}, src, "Type");
+    PE_CHECK(cmd2 != nullptr);
+    doc2->history().push(std::move(cmd2));
+    PE_CHECK_EQ(pl2->tiles().pixel(0, 0), (Rgba8{255, 0, 0, 255}));  // covered by the stamp
+    doc2->history().undo();
+    PE_CHECK_EQ(pl2->tiles().pixel(0, 0).a, static_cast<uint8_t>(0));  // restored
 }
