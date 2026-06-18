@@ -73,10 +73,13 @@ private:
 };
 
 // Decode one PackBits (RLE) row of exactly `outWidth` bytes from the next `compressedLen` bytes of
-// `r`. Returns false (and consumes nothing past the slice) if the row over-/under-runs or the
-// input is exhausted — i.e. malformed/truncated data fails cleanly rather than corrupting memory.
-bool unpackBitsRow(Reader& r, std::uint32_t compressedLen, int outWidth, std::uint8_t* out) {
-    std::uint32_t consumed = 0;
+// `r`. On success returns true and sets `consumed` to the number of compressed bytes actually read
+// (always <= compressedLen); the caller realigns the cursor to the declared slice end. Returns
+// false (without escaping the slice) if the row over-/under-runs or the input is exhausted — i.e.
+// malformed/truncated data fails cleanly rather than corrupting memory.
+bool unpackBitsRow(Reader& r, std::uint32_t compressedLen, int outWidth, std::uint8_t* out,
+                   std::uint32_t& consumed) {
+    consumed = 0;
     int written = 0;
     while (written < outWidth) {
         if (consumed >= compressedLen) return false;  // ran out of compressed data for this row
@@ -193,7 +196,7 @@ std::optional<PixelBuffer> decodePsd(std::span<const std::byte> data) {
                 if (store) (*dst)[i] = v;
             }
             if (!r.ok()) return std::nullopt;
-        } else {  // RLE: h scanlines, each from its tabled compressed length
+        } else {  // RLE: h scanlines, each occupying exactly its tabled compressed length
             for (int y = 0; y < h; ++y) {
                 const std::size_t idx = static_cast<std::size_t>(ch) * static_cast<std::size_t>(h) +
                                         static_cast<std::size_t>(y);
@@ -201,12 +204,19 @@ std::optional<PixelBuffer> decodePsd(std::span<const std::byte> data) {
                 if (clen > r.remaining()) return std::nullopt;
                 const std::size_t rowStart =
                     static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
+                std::uint8_t* target = nullptr;
                 if (store) {
-                    if (!unpackBitsRow(r, clen, w, dst->data() + rowStart)) return std::nullopt;
+                    target = dst->data() + rowStart;
                 } else {
                     scratch.assign(static_cast<std::size_t>(w), 0);
-                    if (!unpackBitsRow(r, clen, w, scratch.data())) return std::nullopt;
+                    target = scratch.data();
                 }
+                std::uint32_t consumed = 0;
+                if (!unpackBitsRow(r, clen, w, target, consumed)) return std::nullopt;
+                // A scanline occupies exactly clen bytes; skip any unused tail (consumed <= clen)
+                // so a row that decoded in fewer bytes than declared cannot desync the next one.
+                r.skip(clen - consumed);
+                if (!r.ok()) return std::nullopt;
             }
         }
     }
