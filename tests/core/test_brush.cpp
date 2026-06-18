@@ -177,3 +177,41 @@ PE_TEST(paint_stabilize_smooths_without_collapsing) {
     auto cmd2 = paintStroke(*doc2, doc2->activeLayer(), b2, kRedF, pts);
     PE_CHECK(cmd2 != nullptr);  // does not collapse to nothing / crash
 }
+
+PE_TEST(dodge_lightens_burn_darkens_and_undo) {
+    // A mid-gray opaque field: a dodge stroke through the center lightens it; burn darkens it.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{128, 128, 128, 255});
+    const Rgba8 before = pl->tiles().pixel(32, 32);
+
+    std::vector<StrokePoint> pts = {{{8, 32}, 1.0f}, {{56, 32}, 1.0f}};
+    auto dodge = dodgeStroke(*doc, base, hardBrush(12, 1.0f), pts);
+    PE_CHECK(dodge != nullptr);
+    doc->history().push(std::move(dodge));
+    const Rgba8 dodged = pl->tiles().pixel(32, 32);
+    PE_CHECK(dodged.r > before.r);                 // lightened
+    PE_CHECK_EQ(dodged.a, before.a);               // alpha preserved
+    PE_CHECK_EQ(pl->tiles().pixel(2, 2), before);  // off-stroke pixel unchanged
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(32, 32), before);  // restored
+
+    auto burn = burnStroke(*doc, base, hardBrush(12, 1.0f), pts);
+    PE_CHECK(burn != nullptr);
+    doc->history().push(std::move(burn));
+    const Rgba8 burned = pl->tiles().pixel(32, 32);
+    PE_CHECK(burned.r < before.r);    // darkened
+    PE_CHECK_EQ(burned.a, before.a);  // alpha preserved
+}
+
+PE_TEST(dodge_burn_skip_transparent_pixels) {
+    // On a fully transparent layer the tone tools change nothing (no phantom RGB deltas), so
+    // the stroke deposits no command.
+    auto doc = Document::createBlank(Size{32, 32});
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{4, 16}, 1.0f}, {{28, 16}, 1.0f}};
+    PE_CHECK(dodgeStroke(*doc, base, hardBrush(12, 1.0f), pts) == nullptr);
+    PE_CHECK(burnStroke(*doc, base, hardBrush(12, 1.0f), pts) == nullptr);
+}

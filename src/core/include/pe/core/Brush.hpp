@@ -113,4 +113,17 @@ private:
                                                         std::span<const StrokePoint> points,
                                                         const Selection* selection = nullptr);
 
+// Dodge (lighten) / Burn (darken): the same brush pipeline, but each dab adjusts the tone of the
+// EXISTING pixels under the brush instead of depositing color — weighted by brush coverage (so
+// size/hardness/flow/opacity and the selection all apply). Alpha is preserved and fully
+// transparent pixels are left untouched. Returns nullptr if not a pixel layer or nothing changes.
+[[nodiscard]] std::unique_ptr<PaintCommand> dodgeStroke(Document& doc, LayerId layerId,
+                                                        const BrushSettings& settings,
+                                                        std::span<const StrokePoint> points,
+                                                        const Selection* selection = nullptr);
+[[nodiscard]] std::unique_ptr<PaintCommand> burnStroke(Document& doc, LayerId layerId,
+                                                       const BrushSettings& settings,
+                                                       std::span<const StrokePoint> points,
+                                                       const Selection* selection = nullptr);
+
 }  // namespace pe

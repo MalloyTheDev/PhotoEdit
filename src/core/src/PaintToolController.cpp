@@ -14,6 +14,10 @@ std::unique_ptr<PaintCommand> PaintToolController::buildStroke(Document& doc) co
     switch (mode_) {
         case Mode::Eraser:
             return eraseStroke(doc, layer_, brush_, points_, selection_);
+        case Mode::Dodge:
+            return dodgeStroke(doc, layer_, brush_, points_, selection_);
+        case Mode::Burn:
+            return burnStroke(doc, layer_, brush_, points_, selection_);
         case Mode::Brush:
         default:
             return paintStroke(doc, layer_, brush_, color_, points_, selection_);

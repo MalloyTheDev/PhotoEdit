@@ -52,6 +52,7 @@ public:
         Bucket,
         Gradient,
         Type,
+        Dodge,  // tone brush (lighten); Alt during the stroke burns (darkens) instead
         Eyedropper,
         Inactive
     };
