@@ -24,6 +24,9 @@ TextDialog::TextDialog(QWidget* parent) : QDialog(parent) {
 
     textEdit_ = new QLineEdit(this);
     textEdit_->setPlaceholderText(QStringLiteral("Text"));
+    // Bound the input so the rasterized width can't overflow the size math (renderText also caps
+    // the rendered area, but limiting at the source keeps a pasted megastring well-behaved).
+    textEdit_->setMaxLength(512);
     form->addRow(QStringLiteral("Text:"), textEdit_);
 
     fontCombo_ = new QFontComboBox(this);
