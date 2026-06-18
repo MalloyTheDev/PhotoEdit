@@ -12,6 +12,7 @@
 #include <QImage>
 #include <QPoint>
 #include <QPointF>
+#include <QString>
 #include <QWidget>
 
 namespace pe {
@@ -75,6 +76,8 @@ public:
 signals:
     void zoomChanged(double percent);   // for the status-bar zoom readout
     void colorPicked(const QColor& c);  // for eyedropper tool
+    void toolMessage(
+        const QString& msg);  // transient status-bar feedback (e.g. a fill that no-ops)
 
 public:
     // View navigation (also driven by the View menu).
@@ -109,6 +112,9 @@ private:
     void maybeInitialFit();                // fit once the widget has a real size
     [[nodiscard]] pe::StrokePoint sampleAt(QPointF widgetPos) const;  // widget -> doc space
     [[nodiscard]] pe::Size canvasSize() const;  // doc_'s canvas size, or {0,0} if no document
+    // Why a Bucket/Gradient fill returned no command, for status-bar feedback: the active layer
+    // isn't paintable pixels, or the canvas exceeds the engine's per-op fill budget.
+    [[nodiscard]] QString fillUnavailableMessage() const;
 
     pe::Document* doc_ = nullptr;  // not owned; observed while non-null
     // Tile-cache renderer bound to doc_: composites only visible/dirty tiles, so a huge

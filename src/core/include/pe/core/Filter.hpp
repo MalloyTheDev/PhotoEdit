@@ -41,7 +41,7 @@ class Selection;
 [[nodiscard]] std::unique_ptr<PaintCommand> moveLayerContent(Document& doc, LayerId layerId, int dx,
                                                              int dy);
 
-// Paint Bucket: flood-fill the contiguous (4-connected) region of the active layer reachable
+// Paint Bucket: flood-fill the contiguous (4-connected) region of layer `layerId` reachable
 // from the seed whose color is within `tolerance` (max per-channel, 0..255) of the seed's,
 // compositing `fillColor` (straight alpha, Normal) over each. Bounded by the canvas; honors the
 // selection. nullptr for a non-pixel layer, an off-canvas seed, or an over-budget canvas.
@@ -49,10 +49,11 @@ class Selection;
                                                        int seedY, Rgbaf fillColor, int tolerance,
                                                        const Selection* selection = nullptr);
 
-// Gradient: fill the canvas with a linear gradient from c0 (at `start`) to c1 (at `end`), each
-// pixel interpolated by its projection onto the start->end axis (clamped to [0,1]). Honors the
-// selection (confines to it). nullptr for a non-pixel layer, a zero-length drag, or an
-// over-budget canvas.
+// Gradient: composite a linear gradient over layer `layerId`, from c0 (at `start`) to c1 (at
+// `end`), each pixel's stop color interpolated by its projection onto the start->end axis (clamped
+// to [0,1]) and composited straight-alpha (Normal) over the existing pixel — so a semi-transparent
+// stop lets the backdrop show through, matching bucketFill. Honors the selection (confines to it).
+// nullptr for a non-pixel layer, a zero-length drag, or an over-budget canvas.
 [[nodiscard]] std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId,
                                                          Point start, Point end, Rgbaf c0, Rgbaf c1,
                                                          const Selection* selection = nullptr);

@@ -511,6 +511,8 @@ std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId, Point
     return bakePixelEditRegion(
         doc, layerId, "Gradient", region,
         [start, dx, dy, len2, c0, c1, region](std::span<Rgbaf> img, int w, int h) {
+            const std::vector<Rgbaf> orig(img.begin(),
+                                          img.end());  // composite the gradient over these
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
                     // Project the pixel center onto the start->end axis, clamped to [0,1].
@@ -519,8 +521,13 @@ std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId, Point
                     double t = (px * dx + py * dy) / len2;
                     t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
                     const float tf = static_cast<float>(t);
-                    img[idx(x, y, w)] = Rgbaf{c0.r + (c1.r - c0.r) * tf, c0.g + (c1.g - c0.g) * tf,
-                                              c0.b + (c1.b - c0.b) * tf, c0.a + (c1.a - c0.a) * tf};
+                    const Rgbaf stop{c0.r + (c1.r - c0.r) * tf, c0.g + (c1.g - c0.g) * tf,
+                                     c0.b + (c1.b - c0.b) * tf, c0.a + (c1.a - c0.a) * tf};
+                    // Composite straight-alpha (Normal) over the backdrop, like bucketFill: a
+                    // semi-transparent stop lets existing pixels show through, and compositeOver
+                    // clamps every channel (sinking NaN / bounding range) at any layer depth.
+                    img[idx(x, y, w)] =
+                        compositeOver(BlendMode::Normal, orig[idx(x, y, w)], stop, 1.0f);
                 }
             }
         },

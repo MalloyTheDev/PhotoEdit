@@ -77,6 +77,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     canvas_ = new CanvasView(this);
     connect(canvas_, &CanvasView::colorPicked, this, &MainWindow::onColorPicked);
+    connect(canvas_, &CanvasView::toolMessage, this,
+            [this](const QString& msg) { statusBar()->showMessage(msg, 4000); });
 
     buildMenuBar();
     buildToolBar();     // left tool strip (+ fg/bg swatches)
