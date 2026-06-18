@@ -587,7 +587,11 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
                                             : Qt::CrossCursor);
         return;
     }
-    if (draggingMarquee_ && doc_ != nullptr) {
+    // The drag tools (marquee/crop, lasso, gradient, move) commit only on a LEFT-button release,
+    // like the brush path below. A non-left release mid-drag falls through to that final guard
+    // (which returns), so the gesture is left intact and continues until the left button is up —
+    // pressing a second button no longer prematurely commits the gesture.
+    if (draggingMarquee_ && doc_ != nullptr && e->button() == Qt::LeftButton) {
         draggingMarquee_ = false;
         if (liveMarquee_.width > 0 && liveMarquee_.height > 0) {
             if (toolMode_ == Tool::Crop) {
@@ -613,7 +617,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
         update();
         return;
     }
-    if (draggingLasso_ && doc_ != nullptr) {
+    if (draggingLasso_ && doc_ != nullptr && e->button() == Qt::LeftButton) {
         draggingLasso_ = false;
         if (lassoPts_.size() >= 3) {
             Selection target;
@@ -626,7 +630,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
         update();
         return;
     }
-    if (draggingGradient_) {
+    if (draggingGradient_ && e->button() == Qt::LeftButton) {
         draggingGradient_ = false;
         if (doc_ != nullptr) {
             // Map the guide endpoints back to document space and apply a foreground->background
@@ -657,7 +661,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
         update();
         return;
     }
-    if (movingContent_) {
+    if (movingContent_ && e->button() == Qt::LeftButton) {
         movingContent_ = false;
         moveLayer_ = pe::kNoLayer;
         if (movePreview_ && doc_ != nullptr) {
