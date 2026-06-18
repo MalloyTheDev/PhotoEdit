@@ -1,7 +1,8 @@
 #include "pe/core/Filter.hpp"
 
-#include "pe/core/BlendMode.hpp"  // compositeOver (bucket fill)
-#include "pe/core/Document.hpp"   // kMaxCanvasDimension
+#include "pe/core/BlendMode.hpp"    // compositeOver (bucket fill)
+#include "pe/core/Document.hpp"     // kMaxCanvasDimension
+#include "pe/core/PixelBuffer.hpp"  // stampBuffer source raster
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
 
@@ -529,6 +530,29 @@ std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId, Point
                     img[idx(x, y, w)] =
                         compositeOver(BlendMode::Normal, orig[idx(x, y, w)], stop, 1.0f);
                 }
+            }
+        },
+        selection);
+}
+
+std::unique_ptr<PaintCommand> stampBuffer(Document& doc, LayerId layerId, Point origin,
+                                          const PixelBuffer& src, std::string name,
+                                          const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    if (src.isEmpty()) return nullptr;
+    const Rect region{origin.x, origin.y, src.width(), src.height()};
+    // Snapshot the source as working-float, index-aligned with the region the transform sees
+    // (row-major, w == region.width == src.width). bakePixelEditRegion enforces the size caps.
+    std::vector<Rgbaf> srcF(static_cast<std::size_t>(src.width()) *
+                            static_cast<std::size_t>(src.height()));
+    for (std::size_t i = 0; i < srcF.size(); ++i) srcF[i] = toFloat(src.data()[i]);
+    return bakePixelEditRegion(
+        doc, layerId, std::move(name), region,
+        [srcF = std::move(srcF)](std::span<Rgbaf> img, int w, int h) {
+            const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+            for (std::size_t i = 0; i < n; ++i) {
+                img[i] = compositeOver(BlendMode::Normal, img[i], srcF[i], 1.0f);
             }
         },
         selection);

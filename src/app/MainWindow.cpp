@@ -8,6 +8,8 @@
 #include "IconUtil.hpp"
 #include "LayersPanel.hpp"
 #include "PropertiesPanel.hpp"
+#include "TextDialog.hpp"
+#include "TextRender.hpp"
 #include "pe/core/Adjustment.hpp"
 #include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Brush.hpp"  // pe::PaintCommand (effect-dialog command factories)
@@ -35,6 +37,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPointF>
 #include <QSettings>
 #include <QSizePolicy>
 #include <QSpinBox>
@@ -44,6 +47,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <cmath>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -80,6 +84,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(canvas_, &CanvasView::colorPicked, this, &MainWindow::onColorPicked);
     connect(canvas_, &CanvasView::toolMessage, this,
             [this](const QString& msg) { statusBar()->showMessage(msg, 4000); });
+    connect(canvas_, &CanvasView::textRequested, this, &MainWindow::onAddText);
 
     buildMenuBar();
     buildToolBar();     // left tool strip (+ fg/bg swatches)
@@ -345,7 +350,7 @@ void MainWindow::buildToolBar() {
          {"paint-bucket", "Paint Bucket", Tool::Bucket, ""}},
         {{"droplet", "Blur", Tool::Inactive, ""}, {"sun", "Dodge", Tool::Inactive, "O"}},
         {{"pen-tool", "Pen", Tool::Inactive, "P"},
-         {"type", "Type", Tool::Inactive, "T"},
+         {"type", "Type", Tool::Type, "T"},
          {"mouse-pointer-2", "Path Selection", Tool::Inactive, "A"},
          {"shapes", "Shape", Tool::Inactive, "U"}},
         {{"hand", "Hand", Tool::Hand, "H"}, {"zoom-in", "Zoom", Tool::Zoom, "Z"}},
@@ -622,6 +627,30 @@ bool MainWindow::writeTo(const QString& path) {
     refreshTitle();
     statusBar()->showMessage(QStringLiteral("Saved %1").arg(path), 3000);
     return true;
+}
+
+void MainWindow::onAddText(const QPointF& docPos) {
+    if (doc_ == nullptr) return;
+    TextDialog dlg(this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QString text = dlg.text();
+    if (text.isEmpty()) return;
+
+    // Rasterize in the app layer (Qt fonts), then hand the pixels to the headless engine to
+    // composite onto the active layer as one undoable command (the foreground color is the ink).
+    const pe::PixelBuffer raster = renderText(text, dlg.font(), fgColor_);
+    if (raster.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Text is too large to rasterize."), 4000);
+        return;
+    }
+    const pe::Point origin{static_cast<int>(std::lround(docPos.x())),
+                           static_cast<int>(std::lround(docPos.y()))};
+    if (auto cmd = pe::stampBuffer(*doc_, doc_->activeLayer(), origin, raster,
+                                   std::string("Type Text"), &doc_->selection())) {
+        doc_->history().push(std::move(cmd));  // observer repaints
+    } else {
+        statusBar()->showMessage(QStringLiteral("Select a pixel layer to add text."), 4000);
+    }
 }
 
 void MainWindow::exportDocumentAs() {

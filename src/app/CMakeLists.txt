@@ -19,6 +19,10 @@ qt_add_executable(photoedit
     EffectDialog.hpp
     ExportDialog.cpp
     ExportDialog.hpp
+    TextDialog.cpp
+    TextDialog.hpp
+    TextRender.cpp
+    TextRender.hpp
     LayersPanel.cpp
     LayersPanel.hpp
     HistoryPanel.cpp
