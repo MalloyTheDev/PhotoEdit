@@ -538,12 +538,17 @@ std::unique_ptr<PaintCommand> healStroke(Document& doc, LayerId layerId, const B
             for (std::size_t i = 0; i < n; ++i) {
                 if (hole[i] == 0) continue;
                 const Rgbaf& pm = p[i];
-                const float fa = clamp01(pm.a);
+                // No [0,1] clamp on the fill: HDR / super-white surroundings must survive on an F32
+                // layer, exactly as they do for the Blur/Sharpen/Clone siblings (the region bake is
+                // depth-generic). The integer stores still clamp on write via
+                // fromFloat<Rgba8/Rgba16>, so U8/U16 results are byte-identical. Guard only against
+                // a negative/NaN alpha.
+                const float fa = pm.a > 0.0f ? pm.a : 0.0f;
                 Rgbaf fill{0.0f, 0.0f, 0.0f, fa};
                 if (pm.a > 1e-4f) {
-                    fill.r = clamp01(pm.r / pm.a);
-                    fill.g = clamp01(pm.g / pm.a);
-                    fill.b = clamp01(pm.b / pm.a);
+                    fill.r = pm.r / pm.a;
+                    fill.g = pm.g / pm.a;
+                    fill.b = pm.b / pm.a;
                 }
                 const Rgbaf o = img[i];
                 const float c = heal[i];

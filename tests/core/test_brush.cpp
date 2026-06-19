@@ -710,6 +710,25 @@ PE_TEST(heal_on_16bit_layer) {
     PE_CHECK(pl->tiles16().pixel(32, 32).g < 24000);
 }
 
+PE_TEST(heal_preserves_superwhite_on_f32) {
+    // Healing on an F32 layer must reconstruct HDR (>1.0) surroundings, not clamp them to 1.0 — the
+    // fill passes super-white through, like the Blur/Sharpen/Clone siblings (the bake is
+    // depth-generic).
+    auto doc = Document::createBlank(Size{64, 64}, ColorMode::RGB, BitDepth::F32);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tilesF().fillRect(Rect{0, 0, 64, 64},
+                          Rgbaf{4.0f, 0.0f, 0.0f, 1.0f});  // super-white red field
+    pl->tilesF().fillRect(Rect{28, 28, 8, 8}, Rgbaf{0.0f, 0.0f, 0.0f, 1.0f});  // black blemish
+
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    auto cmd = healStroke(*doc, base, hardBrush(20, 1.0f), pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(pl->tilesF().pixel(32, 32).r >
+             3.0f);  // HDR surroundings reconstructed, not clamped to 1
+}
+
 PE_TEST(controller_heal_mode_removes_blemish) {
     // Drive Heal through PaintToolController (the path the Spot Healing tool uses): begin/end over
     // a blemish dissolves it and commits exactly one undoable command.
