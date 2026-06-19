@@ -217,6 +217,10 @@ DocumentChange GroupLayersCommand::execute(Document& doc) {
         groupId_ = ownedGroup_->id();
     }
     if (noop_) return structureChange(Rect{}, kNoLayer);
+    // Defensive: the shell is created on first execute and round-tripped via undo, so it is
+    // non-null under the History lockstep. Guard anyway — a command driven out of order must
+    // never dereference null.
+    if (!ownedGroup_) return structureChange(Rect{}, kNoLayer);
 
     // Move each member out of the top level (highest index first so the remaining indices
     // stay valid) and into the retained group shell. Re-add in member order afterwards so
@@ -241,6 +245,8 @@ DocumentChange GroupLayersCommand::undo(Document& doc) {
     // its exact original top-level index. Re-inserting in ascending original-index order
     // reproduces the original flat layout exactly (lower slots are filled before higher ones).
     ownedGroup_ = doc.cmdRemoveTopLevel(groupId_);
+    if (!ownedGroup_)
+        return structureChange(Rect{}, kNoLayer);  // group already gone; nothing to undo
     auto* group = static_cast<GroupLayer*>(ownedGroup_.get());
     const Rect region = group->contentBounds();
     for (std::size_t k = 0; k < members_.size(); ++k) {
@@ -278,6 +284,8 @@ DocumentChange UngroupCommand::execute(Document& doc) {
     // level at the group's slot, preserving order: inserting child k at groupIndex_ + k keeps
     // top-to-bottom order since earlier children already occupy the lower slots.
     ownedGroup_ = doc.cmdRemoveTopLevel(groupId_);
+    if (!ownedGroup_)
+        return structureChange(Rect{}, kNoLayer);  // group already gone; defensive no-op
     auto* group = static_cast<GroupLayer*>(ownedGroup_.get());
     const Rect region = group->contentBounds();
     for (std::size_t k = 0; k < childIds_.size(); ++k) {
@@ -295,6 +303,7 @@ DocumentChange UngroupCommand::undo(Document& doc) {
     // Pull the children back out of the top level (highest slot first so indices stay valid)
     // and return them to the retained group shell in their original order, then re-insert the
     // rebuilt group at its slot. Same id, same children, same order.
+    if (!ownedGroup_) return structureChange(Rect{}, kNoLayer);  // execute never captured the shell
     auto* group = static_cast<GroupLayer*>(ownedGroup_.get());
     std::vector<std::unique_ptr<Layer>> taken(childIds_.size());
     for (std::size_t k = childIds_.size(); k-- > 0;) {
