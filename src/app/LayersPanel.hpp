@@ -75,6 +75,7 @@ private:
     [[nodiscard]] QIcon layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> siblings,
                                        std::size_t index) const;
     [[nodiscard]] QIcon groupIcon() const;
+    [[nodiscard]] QIcon adjustmentIcon() const;  // glyph for non-pixel adjustment layers
     // Refresh just one layer's row icon after a pixel edit (the paint hot path),
     // instead of rebuilding the whole tree. Falls back to rebuild() if not found.
     void updateLayerThumbnail(pe::LayerId id);

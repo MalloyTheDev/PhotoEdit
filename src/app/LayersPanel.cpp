@@ -188,6 +188,27 @@ QIcon LayersPanel::groupIcon() const {
     return QIcon(pm);
 }
 
+QIcon LayersPanel::adjustmentIcon() const {
+    constexpr int kThumb = 26;
+    QPixmap pm(kThumb, kThumb);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    // A half-filled circle — the conventional "adjustment layer" glyph. Adjustment layers
+    // contribute no pixels, so a composited thumbnail would be blank; this reads as a tonal/color
+    // adjustment instead.
+    const QColor ring(150, 162, 178);
+    const QRectF disc(5.5, 5.5, 15.0, 15.0);
+    p.setPen(QPen(ring, 1.4));
+    p.setBrush(Qt::NoBrush);
+    p.drawEllipse(disc);
+    p.setPen(Qt::NoPen);
+    p.setBrush(ring);
+    p.drawPie(disc, 90 * 16, 180 * 16);  // fill the left half
+    p.end();
+    return QIcon(pm);
+}
+
 QIcon LayersPanel::layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> siblings,
                                   std::size_t index) const {
     constexpr int kThumb = 26;
@@ -282,7 +303,11 @@ void LayersPanel::addLevel(QTreeWidgetItem* parentItem,
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(0, l->visible() ? Qt::Checked : Qt::Unchecked);
         item->setData(0, Qt::UserRole, static_cast<qulonglong>(l->id()));
-        item->setIcon(0, isGroup ? groupIcon() : layerThumbnail(siblings, i));
+        // Adjustment layers contribute no pixels (a composited thumbnail would be blank), so they
+        // get the adjustment glyph; groups get the folder glyph; pixel layers get a live thumbnail.
+        item->setIcon(0, isGroup             ? groupIcon()
+                         : l->isAdjustment() ? adjustmentIcon()
+                                             : layerThumbnail(siblings, i));
         if (parentItem != nullptr) {
             parentItem->addChild(item);
         } else {
