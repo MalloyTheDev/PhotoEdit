@@ -212,6 +212,19 @@ void MainWindow::buildMenuBar() {
                               &doc_->selection());
                       });
         });
+        adj->addAction(QStringLiteral("Color Balance..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Color Balance"),
+                      {{QStringLiteral("Cyan / Red"), -1.0, 1.0, 0.0, 2},
+                       {QStringLiteral("Magenta / Green"), -1.0, 1.0, 0.0, 2},
+                       {QStringLiteral("Yellow / Blue"), -1.0, 1.0, 0.0, 2}},
+                      [this](const std::vector<double>& v) {
+                          pe::ColorBalance cb;
+                          cb.setMidtones(static_cast<float>(v[0]), static_cast<float>(v[1]),
+                                         static_cast<float>(v[2]));
+                          return pe::applyAdjustment(*doc_, doc_->activeLayer(), cb,
+                                                     &doc_->selection());
+                      });
+        });
         adj->addAction(QStringLiteral("Posterize..."), this, [this, runEffect] {
             runEffect(QStringLiteral("Posterize"), {{QStringLiteral("Levels"), 2.0, 255.0, 4.0, 0}},
                       [this](const std::vector<double>& v) {
