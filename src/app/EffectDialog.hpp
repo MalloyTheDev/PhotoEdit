@@ -13,7 +13,7 @@ class QSlider;
 
 namespace pe {
 class Document;
-class PaintCommand;
+class Command;
 }  // namespace pe
 
 namespace pe::app {
@@ -40,10 +40,11 @@ public:
         int decimals = 2;  // 0 => integer parameter
     };
 
-    // Builds a PaintCommand from the current parameter values, or nullptr if the effect
-    // cannot apply (no paintable active layer, empty content, over budget).
-    using CommandFactory =
-        std::function<std::unique_ptr<pe::PaintCommand>(const std::vector<double>&)>;
+    // Builds an undoable command from the current parameter values, or nullptr if the effect
+    // cannot apply (no paintable active layer, empty content, over budget). Any Command works:
+    // a destructive PaintCommand (Adjustments/Filters) or an EditAdjustmentCommand (adjustment
+    // layers) — the dialog only needs execute()/undo()/push() (the Command base).
+    using CommandFactory = std::function<std::unique_ptr<pe::Command>(const std::vector<double>&)>;
 
     EffectDialog(QWidget* parent, const QString& title, std::vector<Param> params,
                  CommandFactory factory, pe::Document* doc, std::function<void()> onPreview);
@@ -62,7 +63,7 @@ private:
     CommandFactory factory_;
     pe::Document* doc_ = nullptr;  // not owned
     std::function<void()> onPreview_;
-    std::unique_ptr<pe::PaintCommand> preview_;  // provisional, applied-to-doc command
+    std::unique_ptr<pe::Command> preview_;  // provisional, applied-to-doc command
 
     std::vector<QDoubleSpinBox*> spins_;
     std::vector<QSlider*> sliders_;

@@ -128,6 +128,12 @@ public:
         rebuild();
     }
 
+    [[nodiscard]] float inputBlack() const noexcept { return inBlack_; }
+    [[nodiscard]] float inputWhite() const noexcept { return inWhite_; }
+    [[nodiscard]] float gamma() const noexcept { return gamma_; }
+    [[nodiscard]] float outputBlack() const noexcept { return outBlack_; }
+    [[nodiscard]] float outputWhite() const noexcept { return outWhite_; }
+
     [[nodiscard]] AdjustmentKind kind() const noexcept override { return AdjustmentKind::Levels; }
     [[nodiscard]] std::string name() const override { return "Levels"; }
     void apply(std::span<Rgbaf> tile) const override;
@@ -196,6 +202,9 @@ public:
     void setStops(float s) noexcept { stops_ = s; }
     void setOffset(float o) noexcept { offset_ = o; }
     void setGamma(float g) noexcept { gamma_ = g > 0.0f ? g : 1.0f; }
+    [[nodiscard]] float stops() const noexcept { return stops_; }
+    [[nodiscard]] float offset() const noexcept { return offset_; }
+    [[nodiscard]] float gamma() const noexcept { return gamma_; }
 
     [[nodiscard]] AdjustmentKind kind() const noexcept override { return AdjustmentKind::Exposure; }
     [[nodiscard]] std::string name() const override { return "Exposure"; }
@@ -220,6 +229,10 @@ public:
         colorizeHue_ = hueDeg;
         colorizeSat_ = clamp01(sat);
     }
+    [[nodiscard]] float hueShiftDegrees() const noexcept { return hueShift_; }
+    [[nodiscard]] float saturationScale() const noexcept { return satScale_; }
+    [[nodiscard]] float lightness() const noexcept { return lightness_; }
+    [[nodiscard]] bool colorize() const noexcept { return colorize_; }
 
     [[nodiscard]] AdjustmentKind kind() const noexcept override {
         return AdjustmentKind::HueSaturation;
@@ -276,6 +289,8 @@ public:
           saturation_(std::clamp(saturation, -1.0f, 1.0f)) {}
     void setVibrance(float v) noexcept { vibrance_ = std::clamp(v, -1.0f, 1.0f); }
     void setSaturation(float s) noexcept { saturation_ = std::clamp(s, -1.0f, 1.0f); }
+    [[nodiscard]] float vibrance() const noexcept { return vibrance_; }
+    [[nodiscard]] float saturation() const noexcept { return saturation_; }
 
     [[nodiscard]] AdjustmentKind kind() const noexcept override { return AdjustmentKind::Vibrance; }
     [[nodiscard]] std::string name() const override { return "Vibrance"; }
@@ -296,6 +311,11 @@ public:
     void setMidtones(float r, float g, float b) noexcept { set(midtones_, r, g, b); }
     void setHighlights(float r, float g, float b) noexcept { set(highlights_, r, g, b); }
     void setPreserveLuminosity(bool on) noexcept { preserveLum_ = on; }
+    // Per-channel read access (channel 0=R, 1=G, 2=B; out-of-range yields 0).
+    [[nodiscard]] float shadow(int ch) const noexcept { return get(shadows_, ch); }
+    [[nodiscard]] float midtone(int ch) const noexcept { return get(midtones_, ch); }
+    [[nodiscard]] float highlight(int ch) const noexcept { return get(highlights_, ch); }
+    [[nodiscard]] bool preserveLuminosity() const noexcept { return preserveLum_; }
 
     [[nodiscard]] AdjustmentKind kind() const noexcept override {
         return AdjustmentKind::ColorBalance;
@@ -311,6 +331,9 @@ private:
         dst[0] = std::clamp(r, -1.0f, 1.0f);
         dst[1] = std::clamp(g, -1.0f, 1.0f);
         dst[2] = std::clamp(b, -1.0f, 1.0f);
+    }
+    static float get(const float (&src)[3], int ch) noexcept {
+        return (ch >= 0 && ch < 3) ? src[ch] : 0.0f;
     }
     float shadows_[3] = {0, 0, 0};
     float midtones_[3] = {0, 0, 0};

@@ -1,6 +1,6 @@
 #include "EffectDialog.hpp"
 
-#include "pe/core/Brush.hpp"     // pe::PaintCommand
+#include "pe/core/Command.hpp"   // pe::Command (execute/undo/name)
 #include "pe/core/Document.hpp"  // pe::Document, history()
 
 #include <QCheckBox>
@@ -146,7 +146,7 @@ void EffectDialog::commit() {
             preview_->undo(*doc_);
             preview_.reset();
         }
-        std::unique_ptr<pe::PaintCommand> cmd = factory_(values());
+        std::unique_ptr<pe::Command> cmd = factory_(values());
         if (cmd) {
             // History re-executes from the original state and notifies observers (the canvas
             // refreshes itself), collapsing the whole edit into one undo step.

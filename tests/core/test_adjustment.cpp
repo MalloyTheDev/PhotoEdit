@@ -483,3 +483,45 @@ PE_TEST(destructive_adjustment_on_16bit_layer) {
     doc->history().undo();
     PE_CHECK_EQ(pl->tiles16().pixel(8, 8).r, static_cast<uint16_t>(40000));  // exact restore
 }
+
+PE_TEST(adjustment_param_getters_roundtrip) {
+    // The getters added for the adjustment-layer edit dialog must report back exactly what the
+    // setters stored (within each parameter's clamp range), so the dialog can populate from the
+    // layer's current parameters.
+    Levels lv;
+    lv.setInputBlack(0.1f);
+    lv.setInputWhite(0.9f);
+    lv.setGamma(1.5f);
+    lv.setOutputBlack(0.05f);
+    lv.setOutputWhite(0.95f);
+    PE_CHECK_NEAR(lv.inputBlack(), 0.1f);
+    PE_CHECK_NEAR(lv.inputWhite(), 0.9f);
+    PE_CHECK_NEAR(lv.gamma(), 1.5f);
+    PE_CHECK_NEAR(lv.outputBlack(), 0.05f);
+    PE_CHECK_NEAR(lv.outputWhite(), 0.95f);
+
+    Exposure ex(1.5f, 0.1f, 1.2f);
+    PE_CHECK_NEAR(ex.stops(), 1.5f);
+    PE_CHECK_NEAR(ex.offset(), 0.1f);
+    PE_CHECK_NEAR(ex.gamma(), 1.2f);
+
+    HueSaturation hs;
+    hs.setHueShiftDegrees(45.0f);
+    hs.setSaturationScale(1.3f);
+    hs.setLightness(-0.2f);
+    PE_CHECK_NEAR(hs.hueShiftDegrees(), 45.0f);
+    PE_CHECK_NEAR(hs.saturationScale(), 1.3f);
+    PE_CHECK_NEAR(hs.lightness(), -0.2f);
+
+    Vibrance vb(0.4f, -0.3f);
+    PE_CHECK_NEAR(vb.vibrance(), 0.4f);
+    PE_CHECK_NEAR(vb.saturation(), -0.3f);
+
+    ColorBalance cb;
+    cb.setMidtones(0.2f, -0.4f, 0.6f);
+    PE_CHECK_NEAR(cb.midtone(0), 0.2f);
+    PE_CHECK_NEAR(cb.midtone(1), -0.4f);
+    PE_CHECK_NEAR(cb.midtone(2), 0.6f);
+    PE_CHECK_NEAR(cb.shadow(0), 0.0f);   // untouched range
+    PE_CHECK_NEAR(cb.midtone(9), 0.0f);  // out-of-range channel -> 0
+}
