@@ -161,4 +161,22 @@ private:
                                                           std::span<const StrokePoint> points,
                                                           const Selection* selection = nullptr);
 
+// Spot Healing brush: paint over a blemish and it dissolves into the surrounding texture — no
+// source anchor (unlike Clone Stamp). Like Blur/Sharpen it runs ONE region bake, but the baked
+// region is the stroke's coverage box INFLATED by a margin so the transform can read the
+// surrounding "known" pixels. Within the bake it discards the painted pixels and refills them by
+// solving a discrete Laplace equation (bounded Gauss-Seidel relaxation) with those surrounding
+// pixels as the boundary, so each painted pixel converges to a smooth, gradient-following blend of
+// its surroundings. The solve runs in premultiplied alpha (transparent surroundings don't bleed
+// color); each pixel is then blended from its original toward the healed value by its accumulated
+// brush coverage (capped at the stroke opacity), and the bake applies any active selection on top.
+// Returns nullptr if not a pixel layer, the stroke has no coverage, or the inflated region exceeds
+// the heal budget (very large brushes). v1 is the smooth-fill core that removes spots on
+// near-uniform / smoothly-varying backgrounds; texture-synthesizing content-aware fill is future
+// work.
+[[nodiscard]] std::unique_ptr<PaintCommand> healStroke(Document& doc, LayerId layerId,
+                                                       const BrushSettings& settings,
+                                                       std::span<const StrokePoint> points,
+                                                       const Selection* selection = nullptr);
+
 }  // namespace pe

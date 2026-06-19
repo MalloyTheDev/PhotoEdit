@@ -218,6 +218,8 @@ void CanvasView::setTool(Tool t) {
         tool_.setMode(pe::PaintToolController::Mode::Clone);  // Alt-click sets the source anchor
     } else if (t == Tool::Blur) {
         tool_.setMode(pe::PaintToolController::Mode::Blur);  // drag to locally soften pixels
+    } else if (t == Tool::Heal) {
+        tool_.setMode(pe::PaintToolController::Mode::Heal);  // drag over a blemish to heal it
     }
     if (draggingMarquee_ && doc_ != nullptr) {
         draggingMarquee_ = false;
@@ -388,7 +390,7 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
         return;
     }
     if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge &&
-        toolMode_ != Tool::Clone && toolMode_ != Tool::Blur) {
+        toolMode_ != Tool::Clone && toolMode_ != Tool::Blur && toolMode_ != Tool::Heal) {
         e->ignore();
         return;
     }
@@ -555,7 +557,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         // else: fall through to begin a clone stroke (mode is Clone via setTool).
     }
     if (toolMode_ != Tool::Brush && toolMode_ != Tool::Eraser && toolMode_ != Tool::Dodge &&
-        toolMode_ != Tool::Clone && toolMode_ != Tool::Blur) {
+        toolMode_ != Tool::Clone && toolMode_ != Tool::Blur && toolMode_ != Tool::Heal) {
         return;  // Inactive: no paint
     }
     if (toolMode_ == Tool::Dodge) {
