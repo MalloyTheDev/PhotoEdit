@@ -66,6 +66,74 @@ PE_TEST(adjustment_levels_identity_and_gamma) {
     PE_CHECK_NEAR(gamma.mapChannel(0.5f), 0.70710677f);  // pow(0.5, 0.5)
 }
 
+PE_TEST(adjustment_levels_input_black_darkens_shadows) {
+    // Raising the input black point clips/darkens everything below it; a value sitting
+    // at the new black maps to 0, and a midtone darkens (its normalized fraction drops).
+    Levels lv;
+    lv.setInputBlack(0.25f);
+    PE_CHECK_NEAR(lv.mapChannel(0.25f), 0.0f);  // at the new black -> 0
+    PE_CHECK_NEAR(lv.mapChannel(0.1f), 0.0f);   // below the new black -> clamped to 0
+    // 0.5 -> (0.5-0.25)/(1-0.25) = 1/3, less than the unadjusted 0.5.
+    PE_CHECK(lv.mapChannel(0.5f) < 0.5f);
+    PE_CHECK_NEAR(lv.mapChannel(0.5f), 1.0f / 3.0f);
+}
+
+PE_TEST(adjustment_levels_gamma_brightens_midtones) {
+    // Gamma > 1 lifts midtones (pow with exponent < 1) while leaving the endpoints fixed.
+    Levels lv;
+    lv.setGamma(2.0f);
+    PE_CHECK(lv.mapChannel(0.5f) > 0.5f);      // midtone brightened
+    PE_CHECK_NEAR(lv.mapChannel(0.0f), 0.0f);  // black endpoint fixed
+    PE_CHECK_NEAR(lv.mapChannel(1.0f), 1.0f);  // white endpoint fixed
+    // Gamma is clamped to the sane range; a stray non-positive value can't divide by
+    // zero or emit NaN — it behaves as the floor (0.1), still a valid mapping.
+    Levels bad;
+    bad.setGamma(0.0f);
+    const float v = bad.mapChannel(0.5f);
+    PE_CHECK(std::isfinite(v));
+    PE_CHECK(v >= 0.0f && v <= 1.0f);
+}
+
+PE_TEST(adjustment_levels_output_range_compresses) {
+    // Narrowing the output range maps [0,1] into [outBlack,outWhite]: the endpoints
+    // move in and full contrast is compressed.
+    Levels lv;
+    lv.setOutputBlack(0.2f);
+    lv.setOutputWhite(0.8f);
+    PE_CHECK_NEAR(lv.mapChannel(0.0f), 0.2f);  // black lifts to outBlack
+    PE_CHECK_NEAR(lv.mapChannel(1.0f), 0.8f);  // white drops to outWhite
+    PE_CHECK_NEAR(lv.mapChannel(0.5f), 0.5f);  // midpoint -> 0.2 + 0.5*0.6
+}
+
+PE_TEST(adjustment_levels_degenerate_input_range_is_safe) {
+    // inWhite <= inBlack would divide by zero in the naive formula; the guard turns it
+    // into a hard threshold and never emits NaN.
+    Levels lv;
+    lv.setInputBlack(0.6f);
+    lv.setInputWhite(0.6f);
+    PE_CHECK(std::isfinite(lv.mapChannel(0.3f)));
+    PE_CHECK_NEAR(lv.mapChannel(0.3f), 0.0f);  // below the threshold -> 0
+    PE_CHECK_NEAR(lv.mapChannel(0.9f), 1.0f);  // at/above the threshold -> 1
+}
+
+PE_TEST(adjustment_levels_undo_restores) {
+    // Applying Levels destructively to a layer is one reversible undo step.
+    auto doc = Document::createBlank(Size{16, 16}, ColorMode::RGB, BitDepth::U8);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 16, 16}, Rgba8{128, 128, 128, 255});
+
+    Levels lv;
+    lv.setInputBlack(0.25f);  // a clearly visible darkening
+    auto cmd = applyAdjustment(*doc, base, lv);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(pl->tiles().pixel(8, 8).r < 128);  // shadows darkened
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(8, 8).r, static_cast<uint8_t>(128));  // exact restore
+}
+
 PE_TEST(adjustment_curves_identity_and_map) {
     Curves identity;  // default straight line
     PE_CHECK_NEAR(identity.evalCurve(0.42f), 0.42f);
