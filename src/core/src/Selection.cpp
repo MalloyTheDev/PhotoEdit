@@ -325,7 +325,11 @@ void chamferThreshold(PixelBuffer& mask, int radius, bool grow) {
 void gaussianMask(PixelBuffer& mask, float sigma) {
     const int w = mask.width();
     const int h = mask.height();
-    const int radius = std::max(1, static_cast<int>(std::ceil(sigma * 3.0f)));
+    // Bound the kernel radius: the separable passes are O(w*h*radius), and with the feather sigma
+    // clamped to 1000 the naive radius (~3*sigma) reaches ~3000, which over a 16 MP region is a
+    // multi-second uninterruptible hang. Cap the work — the Gaussian tail past here is negligible.
+    constexpr int kMaxGaussianRadius = 256;
+    const int radius = std::clamp(static_cast<int>(std::ceil(sigma * 3.0f)), 1, kMaxGaussianRadius);
     std::vector<float> kernel(static_cast<std::size_t>(2 * radius + 1));
     const float inv2s2 = 1.0f / (2.0f * sigma * sigma);
     float sum = 0.0f;
@@ -377,7 +381,13 @@ void Selection::grow(int radius) {
     // un-materialized exterior reads as unselected via toMask.
     const Rect region = expandRect(bounds, r);
     if (region.isEmpty()) return;
-    if (static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) return;
+    // Funnel through rejectFill so the tile-count and coord-range caps apply too — a thin/extreme-
+    // aspect region can pass the area cap yet exceed kMaxSelectionTiles, and loadMask would then
+    // silently discard the whole selection. Plus the tighter refine area cap.
+    if (rejectFill(region) ||
+        static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) {
+        return;
+    }
     PixelBuffer mask = toMask(region);
     if (mask.isEmpty()) return;
     chamferThreshold(mask, r, /*grow=*/true);
@@ -395,7 +405,13 @@ void Selection::shrink(int radius) {
     // coincides with the canvas boundary, so a canvas-filling selection still contracts inward.
     const Rect region = expandRect(bounds, r);
     if (region.isEmpty()) return;
-    if (static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) return;
+    // Funnel through rejectFill so the tile-count and coord-range caps apply too — a thin/extreme-
+    // aspect region can pass the area cap yet exceed kMaxSelectionTiles, and loadMask would then
+    // silently discard the whole selection. Plus the tighter refine area cap.
+    if (rejectFill(region) ||
+        static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) {
+        return;
+    }
     PixelBuffer mask = toMask(region);
     if (mask.isEmpty()) return;
     chamferThreshold(mask, r, /*grow=*/false);
@@ -413,7 +429,13 @@ void Selection::feather(float radius, Rect canvas) {
     if (bounds.isEmpty()) return;
     const Rect region = expandRect(bounds, margin).intersected(canvas);
     if (region.isEmpty()) return;
-    if (static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) return;
+    // Funnel through rejectFill so the tile-count and coord-range caps apply too — a thin/extreme-
+    // aspect region can pass the area cap yet exceed kMaxSelectionTiles, and loadMask would then
+    // silently discard the whole selection. Plus the tighter refine area cap.
+    if (rejectFill(region) ||
+        static_cast<int64_t>(region.width) * region.height > kMaxRefinePixels) {
+        return;
+    }
     PixelBuffer mask = toMask(region);
     if (mask.isEmpty()) return;
     gaussianMask(mask, sigma);
@@ -466,8 +488,11 @@ Selection magicWandSelection(const PixelBuffer& image, int seedX, int seedY, int
     const int w = image.width();
     const int h = image.height();
     if (image.isEmpty() || seedX < 0 || seedX >= w || seedY < 0 || seedY >= h) return sel;
-    // Bound the flood's working memory (visited + mask) the same way fills are bounded.
-    if (static_cast<int64_t>(w) * static_cast<int64_t>(h) > kMaxSelectionPixels) return sel;
+    // Bound the flood's working memory (visited + mask) the same way fills are bounded. rejectFill
+    // adds the tile-count + coord-range caps on top of the pixel cap: an extreme aspect ratio (e.g.
+    // 64M x 1) passes the pixel cap but exceeds kMaxSelectionTiles, so loadMask would discard the
+    // result anyway — bail before running the whole O(pixels) flood + allocations.
+    if (rejectFill(Rect{0, 0, w, h})) return sel;
 
     const int tol = std::clamp(tolerance, 0, 255);
     const Rgba8 seed = image.at(seedX, seedY);

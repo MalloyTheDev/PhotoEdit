@@ -343,3 +343,15 @@ PE_TEST(selection_feather_tiny_sigma_is_safe) {
     PE_CHECK(s.active());                                 // not NaN-wiped into deselection
     PE_CHECK_EQ(static_cast<int>(s.value(15, 15)), 255);  // interior intact
 }
+
+PE_TEST(magic_wand_rejects_extreme_aspect_image) {
+    // 1 x 1048833 passes the pixel cap (~1M < 64M) but spans >4096 tile rows, so loadMask would
+    // discard any result. magicWand now funnels through rejectFill and bails up front — no crash,
+    // no full O(pixels) flood, and an inactive (empty) selection.
+    PixelBuffer img(1, 1'048'833, Rgba8{255, 0, 0, 255});
+    const Selection sel = magicWandSelection(img, 0, 0, 10);
+    PE_CHECK(!sel.active());
+    // A normal small image still floods correctly (the funnel didn't over-reject).
+    PixelBuffer ok(8, 8, Rgba8{255, 0, 0, 255});
+    PE_CHECK(magicWandSelection(ok, 0, 0, 10).active());
+}
