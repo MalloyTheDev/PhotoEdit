@@ -19,6 +19,14 @@ namespace pe {
 // viewport plus panning margin; tune per the performance RAM budget (M2+).
 inline constexpr std::size_t kDefaultDisplayCacheTiles = 512;
 
+// Default output-pixel cap for renderRegionScaled (~4 MP). The scaled path never
+// allocates the full-res region — only the (downsampled) output plus four float
+// accumulators of the same pixel count — so this bounds its peak working set (~80
+// MB here). Comfortably below the per-call composite budget
+// (kMaxCompositeImagePixels) so the downscaled raster always fits a single eager
+// allocation; callers wanting sharper zoom-out previews may pass a larger value.
+inline constexpr int kDefaultDisplayMaxOutputPixels = 4'000'000;
+
 // Software (CPU) display-tile cache + dirty-tile compositing pipeline. It observes
 // the document, marks the tiles overlapping each change dirty, and recomposites
 // ONLY dirty/uncached tiles when a region is rendered — so cost scales with the
@@ -51,6 +59,26 @@ public:
     // region.
     [[nodiscard]] PixelBuffer renderRegion(Rect docRect);
 
+    // Composite a document region for display at a bounded output resolution.
+    //
+    // If `docRegion` fits both the per-call composite budget and `maxOutputPixels`,
+    // this is exactly `renderRegion(docRegion)` (same fast path, same tile cache,
+    // byte-identical result — no regression). Otherwise it composites at an integer
+    // downscale factor s = ceil(sqrt(area / maxOutputPixels)) and returns a
+    // ceil(w/s) x ceil(h/s) buffer that box-averages the region. This lets an
+    // EXTREME zoom-out — where the visible region alone exceeds the compositor's
+    // budget — still produce a (downsampled) image instead of blanking.
+    //
+    // Memory is bounded by `maxOutputPixels`: the full-res region is NEVER
+    // materialized. Tiles are composited one at a time and box-accumulated into the
+    // output, and the scaled pass does NOT touch the display-tile cache (it would
+    // otherwise thrash the LRU on a one-off zoom-out). Returns an empty buffer for an
+    // empty region, a non-positive cap, or a per-dimension extent over
+    // kMaxCanvasDimension. `maxOutputPixels` is itself clamped to the composite
+    // budget so the output raster always fits one allocation.
+    [[nodiscard]] PixelBuffer renderRegionScaled(
+        Rect docRegion, int maxOutputPixels = kDefaultDisplayMaxOutputPixels);
+
     void onDocumentChanged(const Document&, const DocumentChange&) override;
 
     // Diagnostics / tuning.
@@ -70,6 +98,10 @@ private:
 
     const CachedTile& ensureTile(TileCoord c);  // composite if dirty/missing
     void evictToBudget() noexcept;
+
+    // Composite one tile straight into `scratch_` WITHOUT caching it (used by the
+    // scaled path so a zoom-out pass does not pollute/thrash the display-tile LRU).
+    void compositeTileUncached(TileCoord c);
 
     Document& doc_;
     LruList lru_;
