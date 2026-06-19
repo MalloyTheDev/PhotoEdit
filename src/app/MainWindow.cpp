@@ -50,8 +50,10 @@
 
 #include <cmath>
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace pe::app {
@@ -257,6 +259,72 @@ void MainWindow::buildMenuBar() {
             if (layers_ != nullptr) layers_->ungroupSelected();
         });
         ungroupAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+G")));
+
+        // New Adjustment Layer: a non-destructive layer that transforms the composite beneath it at
+        // render time. Added on top of the stack as one undo step;
+        // visibility/opacity/blend/reorder/ delete all work through the existing layer commands,
+        // and editing its parameters arrives next.
+        layerMenu->addSeparator();
+        auto* adjMenu = layerMenu->addMenu(QStringLiteral("New Adjustment Layer"));
+        using AdjFactory = std::unique_ptr<pe::Adjustment> (*)();
+        const std::pair<const char*, AdjFactory> adjTypes[] = {
+            {"Brightness/Contrast",
+             []() -> std::unique_ptr<pe::Adjustment> {
+                 return std::make_unique<pe::BrightnessContrast>();
+             }},
+            {"Levels",
+             []() -> std::unique_ptr<pe::Adjustment> { return std::make_unique<pe::Levels>(); }},
+            {"Curves",
+             []() -> std::unique_ptr<pe::Adjustment> { return std::make_unique<pe::Curves>(); }},
+            {"Exposure",
+             []() -> std::unique_ptr<pe::Adjustment> { return std::make_unique<pe::Exposure>(); }},
+            {"Vibrance",
+             []() -> std::unique_ptr<pe::Adjustment> { return std::make_unique<pe::Vibrance>(); }},
+            {"Hue/Saturation",
+             []() -> std::unique_ptr<pe::Adjustment> {
+                 return std::make_unique<pe::HueSaturation>();
+             }},
+            {"Color Balance",
+             []() -> std::unique_ptr<pe::Adjustment> {
+                 return std::make_unique<pe::ColorBalance>();
+             }},
+            {"Black & White",
+             []() -> std::unique_ptr<pe::Adjustment> {
+                 return std::make_unique<pe::BlackAndWhite>();
+             }},
+            {"Photo Filter",
+             []() -> std::unique_ptr<pe::Adjustment> {
+                 return std::make_unique<pe::PhotoFilter>();
+             }},
+            {"Channel Mixer",
+             []() -> std::unique_ptr<pe::Adjustment> {
+                 return std::make_unique<pe::ChannelMixer>();
+             }},
+            {"Invert",
+             []() -> std::unique_ptr<pe::Adjustment> { return std::make_unique<pe::Invert>(); }},
+            {"Posterize",
+             []() -> std::unique_ptr<pe::Adjustment> { return std::make_unique<pe::Posterize>(); }},
+            {"Threshold",
+             []() -> std::unique_ptr<pe::Adjustment> { return std::make_unique<pe::Threshold>(); }},
+            {"Gradient Map",
+             []() -> std::unique_ptr<pe::Adjustment> {
+                 return std::make_unique<pe::GradientMap>();
+             }},
+            {"Selective Color",
+             []() -> std::unique_ptr<pe::Adjustment> {
+                 return std::make_unique<pe::SelectiveColor>();
+             }},
+        };
+        for (const auto& [label, make] : adjTypes) {
+            adjMenu->addAction(QString::fromUtf8(label), this, [this, label, make] {
+                if (doc_ == nullptr) return;
+                auto layer = std::make_unique<pe::AdjustmentLayer>(make(), std::string(label));
+                const pe::LayerId id = layer->id();
+                doc_->history().push(
+                    std::make_unique<pe::AddLayerCommand>(std::move(layer), doc_->topLevelCount()));
+                doc_->setActiveLayer(id);
+            });
+        }
     }
     auto* selMenu = menuBar()->addMenu(QStringLiteral("&Select"));
     selMenu->addAction(QStringLiteral("Select All"), this, [this]() {
