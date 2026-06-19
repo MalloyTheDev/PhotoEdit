@@ -413,14 +413,16 @@ DocumentChange SetSelectionCommand::execute(Document& doc) {
         oldSel_ = doc.selection();  // capture the prior selection once, for undo
         captured_ = true;
     }
+    // Mutate the selection, then let History notify the returned Selection change ONCE. (Don't also
+    // call touchSelection() — that would self-notify Selection a second time for the same change.
+    // CropCommand, by contrast, returns LayerStructure and legitimately self-notifies Selection on
+    // top, because those are two distinct kinds it must broadcast.)
     doc.editableSelection() = newSel_;
-    doc.touchSelection();
     return DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer};
 }
 
 DocumentChange SetSelectionCommand::undo(Document& doc) {
     doc.editableSelection() = oldSel_;
-    doc.touchSelection();
     return DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer};
 }
 
