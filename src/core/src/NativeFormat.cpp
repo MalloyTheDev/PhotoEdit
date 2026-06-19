@@ -1,14 +1,21 @@
 #include "pe/core/NativeFormat.hpp"
 
+#include "pe/core/Adjustment.hpp"
+#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/BlendMode.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/GroupLayer.hpp"
 #include "pe/core/Mask.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/SolidColorLayer.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #ifdef PHOTOEDIT_HAVE_ZLIB
 #include <zlib.h>
@@ -18,16 +25,22 @@ namespace pe {
 
 namespace {
 
-constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '4'};
-constexpr std::uint32_t kVersion = 4;
+// Magic is "PEDOC" + a version digit. v5 adds adjustment & solid-color layer records; the reader
+// still accepts v4 files (they only ever contained pixel/group layers, which read identically).
+constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '5'};
+constexpr std::uint32_t kVersion = 5;
+constexpr std::uint32_t kMinReadVersion = 4;          // oldest format this reader accepts
 constexpr std::int64_t kMaxLayerPixels = 64'000'000;  // per-layer content cap
 constexpr std::uint32_t kMaxLayers = 100'000;
 constexpr std::uint32_t kMaxNameBytes = 65'536;
 constexpr int kMaxGroupDepth = 256;  // cap nesting so a hostile file can't blow the stack
+constexpr std::uint32_t kMaxCurvePoints = 1024;  // bound a Curves adjustment's control-point count
 
 // Layer kind discriminators written to the stream.
 constexpr std::uint8_t kKindPixel = 0;
 constexpr std::uint8_t kKindGroup = 1;
+constexpr std::uint8_t kKindAdjustment = 2;
+constexpr std::uint8_t kKindSolid = 3;
 
 // --- little-endian byte writer ---
 class Writer {
@@ -125,10 +138,311 @@ bool zlibInflate(std::span<const std::byte> in, std::vector<std::byte>& out) {
 }
 #endif
 
-// Whether the format serializes this layer (Pixel and Group in v3; adjustment/fill/
-// text layers and embedded profiles round-trip later).
+// Whether the format serializes this layer. Pixel, Group, Adjustment, and SolidColor round-trip;
+// text layers and embedded profiles arrive later.
 [[nodiscard]] bool serializable(const Layer& layer) {
-    return layer.kind() == LayerKind::Group || dynamic_cast<const PixelLayer*>(&layer) != nullptr;
+    return layer.kind() == LayerKind::Group || layer.isAdjustment() ||
+           dynamic_cast<const SolidColorLayer*>(&layer) != nullptr ||
+           dynamic_cast<const PixelLayer*>(&layer) != nullptr;
+}
+
+// --- adjustment-layer parameters (v5) ---------------------------------------------------------
+// Serialized keyed by AdjustmentKind. The reader feeds every value back through the Adjustment
+// setters/ctors, which clamp/sanitize their inputs, so out-of-range params from a hostile file
+// produce a valid (clamped) adjustment rather than UB; non-finite floats are rejected outright.
+
+void writeColorF(Writer& w, Rgbaf c) {
+    w.f32(c.r);
+    w.f32(c.g);
+    w.f32(c.b);
+    w.f32(c.a);
+}
+
+void writeAdjustment(Writer& w, const Adjustment& adj) {
+    w.u8(static_cast<std::uint8_t>(adj.kind()));
+    switch (adj.kind()) {
+        case AdjustmentKind::BrightnessContrast: {
+            const auto& a = static_cast<const BrightnessContrast&>(adj);
+            w.f32(a.brightness());
+            w.f32(a.contrast());
+            break;
+        }
+        case AdjustmentKind::Levels: {
+            const auto& a = static_cast<const Levels&>(adj);
+            w.f32(a.inputBlack());
+            w.f32(a.inputWhite());
+            w.f32(a.gamma());
+            w.f32(a.outputBlack());
+            w.f32(a.outputWhite());
+            break;
+        }
+        case AdjustmentKind::Curves: {
+            const auto& a = static_cast<const Curves&>(adj);
+            const auto& pts = a.points();
+            w.u32(static_cast<std::uint32_t>(pts.size()));
+            for (const auto& p : pts) {
+                w.f32(p.first);
+                w.f32(p.second);
+            }
+            break;
+        }
+        case AdjustmentKind::Invert:
+            break;
+        case AdjustmentKind::Exposure: {
+            const auto& a = static_cast<const Exposure&>(adj);
+            w.f32(a.stops());
+            w.f32(a.offset());
+            w.f32(a.gamma());
+            break;
+        }
+        case AdjustmentKind::HueSaturation: {
+            const auto& a = static_cast<const HueSaturation&>(adj);
+            w.f32(a.hueShiftDegrees());
+            w.f32(a.saturationScale());
+            w.f32(a.lightness());
+            w.u8(a.colorize() ? 1 : 0);
+            w.f32(a.colorizeHue());
+            w.f32(a.colorizeSat());
+            break;
+        }
+        case AdjustmentKind::ChannelMixer: {
+            const auto& a = static_cast<const ChannelMixer&>(adj);
+            for (int o = 0; o < 3; ++o) {
+                for (int i = 0; i < 4; ++i) w.f32(a.coeff(o, i));
+            }
+            w.u8(a.monochrome() ? 1 : 0);
+            break;
+        }
+        case AdjustmentKind::GradientMap: {
+            const auto& a = static_cast<const GradientMap&>(adj);
+            writeColorF(w, a.color0());
+            writeColorF(w, a.color1());
+            w.u8(a.reverse() ? 1 : 0);
+            break;
+        }
+        case AdjustmentKind::Vibrance: {
+            const auto& a = static_cast<const Vibrance&>(adj);
+            w.f32(a.vibrance());
+            w.f32(a.saturation());
+            break;
+        }
+        case AdjustmentKind::ColorBalance: {
+            const auto& a = static_cast<const ColorBalance&>(adj);
+            for (int c = 0; c < 3; ++c) w.f32(a.shadow(c));
+            for (int c = 0; c < 3; ++c) w.f32(a.midtone(c));
+            for (int c = 0; c < 3; ++c) w.f32(a.highlight(c));
+            w.u8(a.preserveLuminosity() ? 1 : 0);
+            break;
+        }
+        case AdjustmentKind::BlackAndWhite: {
+            const auto& a = static_cast<const BlackAndWhite&>(adj);
+            for (int b = 0; b < BlackAndWhite::kBandCount; ++b) w.f32(a.band(b));
+            break;
+        }
+        case AdjustmentKind::PhotoFilter: {
+            const auto& a = static_cast<const PhotoFilter&>(adj);
+            writeColorF(w, a.color());
+            w.f32(a.density());
+            w.u8(a.preserveLuminosity() ? 1 : 0);
+            break;
+        }
+        case AdjustmentKind::Posterize: {
+            const auto& a = static_cast<const Posterize&>(adj);
+            w.i32(a.levels());
+            break;
+        }
+        case AdjustmentKind::Threshold: {
+            const auto& a = static_cast<const Threshold&>(adj);
+            w.f32(a.level());
+            break;
+        }
+        case AdjustmentKind::SelectiveColor: {
+            const auto& a = static_cast<const SelectiveColor&>(adj);
+            for (int rr = 0; rr < SelectiveColor::kRangeCount; ++rr) {
+                const auto cm = a.range(rr);
+                w.f32(cm.c);
+                w.f32(cm.m);
+                w.f32(cm.y);
+                w.f32(cm.k);
+            }
+            w.u8(a.relative() ? 1 : 0);
+            break;
+        }
+    }
+}
+
+// Read an adjustment record. Returns nullptr on truncation, an unknown kind, an over-cap Curves
+// point count, or any non-finite float (a valid file never writes those).
+std::unique_ptr<Adjustment> readAdjustment(Reader& r) {
+    const std::uint8_t kraw = r.u8();
+    if (!r.ok() || kraw > static_cast<std::uint8_t>(AdjustmentKind::SelectiveColor)) return nullptr;
+    const auto kind = static_cast<AdjustmentKind>(kraw);
+
+    bool finite = true;
+    const auto rf = [&]() -> float {
+        const float v = r.f32();
+        if (!std::isfinite(v)) finite = false;
+        return v;
+    };
+    const auto readColor = [&]() -> Rgbaf {
+        const float cr = rf();
+        const float cg = rf();
+        const float cb = rf();
+        const float ca = rf();
+        return Rgbaf{cr, cg, cb, ca};
+    };
+    const auto bad = [&]() { return !r.ok() || !finite; };
+
+    switch (kind) {
+        case AdjustmentKind::BrightnessContrast: {
+            const float b = rf();
+            const float c = rf();
+            if (bad()) return nullptr;
+            return std::make_unique<BrightnessContrast>(b, c);
+        }
+        case AdjustmentKind::Levels: {
+            const float ib = rf();
+            const float iw = rf();
+            const float g = rf();
+            const float ob = rf();
+            const float ow = rf();
+            if (bad()) return nullptr;
+            auto a = std::make_unique<Levels>();
+            a->setInputBlack(ib);
+            a->setInputWhite(iw);
+            a->setGamma(g);
+            a->setOutputBlack(ob);
+            a->setOutputWhite(ow);
+            return a;
+        }
+        case AdjustmentKind::Curves: {
+            const std::uint32_t n = r.u32();
+            if (!r.ok() || n > kMaxCurvePoints) return nullptr;
+            std::vector<std::pair<float, float>> pts;
+            pts.reserve(n);
+            for (std::uint32_t i = 0; i < n; ++i) {
+                const float x = rf();
+                const float y = rf();
+                pts.emplace_back(x, y);
+            }
+            if (bad()) return nullptr;
+            auto a = std::make_unique<Curves>();
+            a->setPoints(std::move(pts));  // sanitizes (sorts / x-monotonic)
+            return a;
+        }
+        case AdjustmentKind::Invert:
+            return std::make_unique<Invert>();
+        case AdjustmentKind::Exposure: {
+            const float s = rf();
+            const float o = rf();
+            const float g = rf();
+            if (bad()) return nullptr;
+            return std::make_unique<Exposure>(s, o, g);
+        }
+        case AdjustmentKind::HueSaturation: {
+            const float hue = rf();
+            const float sat = rf();
+            const float light = rf();
+            const std::uint8_t col = r.u8();
+            const float chue = rf();
+            const float csat = rf();
+            if (bad() || col > 1) return nullptr;
+            auto a = std::make_unique<HueSaturation>();
+            a->setHueShiftDegrees(hue);
+            a->setSaturationScale(sat);
+            a->setLightness(light);
+            a->setColorize(col != 0, chue, csat);
+            return a;
+        }
+        case AdjustmentKind::ChannelMixer: {
+            float m[3][4];
+            for (auto& row : m) {
+                for (float& v : row) v = rf();
+            }
+            const std::uint8_t mono = r.u8();
+            if (bad() || mono > 1) return nullptr;
+            auto a = std::make_unique<ChannelMixer>();
+            for (int o = 0; o < 3; ++o) a->setRow(o, m[o][0], m[o][1], m[o][2], m[o][3]);
+            a->setMonochrome(mono != 0);
+            return a;
+        }
+        case AdjustmentKind::GradientMap: {
+            const Rgbaf c0 = readColor();
+            const Rgbaf c1 = readColor();
+            const std::uint8_t rev = r.u8();
+            if (bad() || rev > 1) return nullptr;
+            auto a = std::make_unique<GradientMap>(c0, c1);
+            a->setReverse(rev != 0);
+            return a;
+        }
+        case AdjustmentKind::Vibrance: {
+            const float v = rf();
+            const float s = rf();
+            if (bad()) return nullptr;
+            return std::make_unique<Vibrance>(v, s);
+        }
+        case AdjustmentKind::ColorBalance: {
+            float sh[3];
+            float mid[3];
+            float hi[3];
+            for (float& v : sh) v = rf();
+            for (float& v : mid) v = rf();
+            for (float& v : hi) v = rf();
+            const std::uint8_t pl = r.u8();
+            if (bad() || pl > 1) return nullptr;
+            auto a = std::make_unique<ColorBalance>();
+            a->setShadows(sh[0], sh[1], sh[2]);
+            a->setMidtones(mid[0], mid[1], mid[2]);
+            a->setHighlights(hi[0], hi[1], hi[2]);
+            a->setPreserveLuminosity(pl != 0);
+            return a;
+        }
+        case AdjustmentKind::BlackAndWhite: {
+            float bands[BlackAndWhite::kBandCount];
+            for (float& v : bands) v = rf();
+            if (bad()) return nullptr;
+            auto a = std::make_unique<BlackAndWhite>();
+            for (int b = 0; b < BlackAndWhite::kBandCount; ++b) a->setBand(b, bands[b]);
+            return a;
+        }
+        case AdjustmentKind::PhotoFilter: {
+            const Rgbaf c = readColor();
+            const float density = rf();
+            const std::uint8_t pl = r.u8();
+            if (bad() || pl > 1) return nullptr;
+            auto a = std::make_unique<PhotoFilter>(c, density);
+            a->setPreserveLuminosity(pl != 0);
+            return a;
+        }
+        case AdjustmentKind::Posterize: {
+            const std::int32_t levels = r.i32();
+            if (!r.ok()) return nullptr;
+            return std::make_unique<Posterize>(levels);  // setLevels clamps to [2,255]
+        }
+        case AdjustmentKind::Threshold: {
+            const float level = rf();
+            if (bad()) return nullptr;
+            return std::make_unique<Threshold>(level);
+        }
+        case AdjustmentKind::SelectiveColor: {
+            SelectiveColor::Cmyk ranges[SelectiveColor::kRangeCount];
+            for (auto& cm : ranges) {
+                cm.c = rf();
+                cm.m = rf();
+                cm.y = rf();
+                cm.k = rf();
+            }
+            const std::uint8_t rel = r.u8();
+            if (bad() || rel > 1) return nullptr;
+            auto a = std::make_unique<SelectiveColor>();
+            for (int rr = 0; rr < SelectiveColor::kRangeCount; ++rr) {
+                a->setRange(rr, ranges[rr].c, ranges[rr].m, ranges[rr].y, ranges[rr].k);
+            }
+            a->setRelative(rel != 0);
+            return a;
+        }
+    }
+    return nullptr;
 }
 
 // Write a length-flagged byte block: zlib-compressed when that is smaller (and zlib is
@@ -260,7 +574,13 @@ bool readContentRect(Reader& r, int canvasW, int canvasH, std::int32_t& cx, std:
 
 void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active, BitDepth depth) {
     const bool isGroup = layer.kind() == LayerKind::Group;
-    w.u8(isGroup ? kKindGroup : kKindPixel);
+    const bool isAdjustment = layer.isAdjustment();
+    const auto* solid = dynamic_cast<const SolidColorLayer*>(&layer);
+    const std::uint8_t kindByte = isGroup            ? kKindGroup
+                                  : isAdjustment     ? kKindAdjustment
+                                  : solid != nullptr ? kKindSolid
+                                                     : kKindPixel;
+    w.u8(kindByte);
     w.u8(layer.visible() ? 1 : 0);
     w.f32(layer.opacity());
     w.u8(static_cast<std::uint8_t>(layer.blendMode()));
@@ -306,6 +626,27 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
         return;
     }
 
+    if (isAdjustment) {
+        writeAdjustment(w, static_cast<const AdjustmentLayer&>(layer).adjustment());
+        return;
+    }
+
+    if (solid != nullptr) {
+        const Rgba8 c = solid->color();
+        w.u8(c.r);
+        w.u8(c.g);
+        w.u8(c.b);
+        w.u8(c.a);
+        // Clamp the fill rect to the canvas so it round-trips through readContentRect (which
+        // rejects off-canvas rects); the part outside the canvas isn't visible anyway.
+        const Rect b = solid->bounds().intersected(canvasBounds);
+        w.i32(b.x);
+        w.i32(b.y);
+        w.i32(b.width);
+        w.i32(b.height);
+        return;
+    }
+
     // Pixel layer: serialize the store matching the document's bit depth (the active
     // store; the others are empty). `depth` is the document depth, which every pixel
     // layer shares (createBlank/AddLayer seed layers at the document depth) — the reader
@@ -348,7 +689,7 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
     const std::uint8_t blendRaw = r.u8();
     const std::uint8_t activeFlag = r.u8();
     const std::uint32_t nameLen = r.u32();
-    if (!r.ok() || kind > kKindGroup || blendRaw >= static_cast<std::uint8_t>(BlendMode::Count) ||
+    if (!r.ok() || kind > kKindSolid || blendRaw >= static_cast<std::uint8_t>(BlendMode::Count) ||
         nameLen > kMaxNameBytes) {
         return nullptr;
     }
@@ -405,6 +746,29 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
             group->addChild(std::move(child));
         }
         layer = std::move(group);
+    } else if (kind == kKindAdjustment) {
+        auto adj = readAdjustment(r);
+        if (adj == nullptr) return nullptr;
+        layer = std::make_unique<AdjustmentLayer>(std::move(adj), std::move(name));
+    } else if (kind == kKindSolid) {
+        const std::uint8_t cr = r.u8();
+        const std::uint8_t cg = r.u8();
+        const std::uint8_t cb = r.u8();
+        const std::uint8_t ca = r.u8();
+        const std::int32_t bx = r.i32();
+        const std::int32_t by = r.i32();
+        const std::int32_t bw = r.i32();
+        const std::int32_t bh = r.i32();
+        // Validate against the canvas (the writer clamps to it). No pixel cap: a solid fill is
+        // procedural (stores only the rect), so a full-canvas rect is fine even past
+        // kMaxLayerPixels.
+        if (!r.ok() || bw < 0 || bh < 0 || bx < 0 || by < 0 ||
+            static_cast<std::int64_t>(bx) + bw > canvasW ||
+            static_cast<std::int64_t>(by) + bh > canvasH) {
+            return nullptr;
+        }
+        layer = std::make_unique<SolidColorLayer>(Rgba8{cr, cg, cb, ca}, Rect{bx, by, bw, bh},
+                                                  std::move(name));
     } else {
         auto pl = std::make_unique<PixelLayer>(std::move(name), depth);
         std::int32_t cx = 0;
@@ -472,10 +836,13 @@ std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data,
     Reader r(data);
 
     char magic[6] = {};
-    if (!r.read(magic, sizeof(magic)) || std::memcmp(magic, kMagic, sizeof(kMagic)) != 0) {
+    // Check the 5-char "PEDOC" prefix; the 6th byte is the version digit, redundant with the u32
+    // version below (which is authoritative and gates the accepted range).
+    if (!r.read(magic, sizeof(magic)) || std::memcmp(magic, kMagic, 5) != 0) {
         return nullptr;
     }
-    if (r.u32() != kVersion) return nullptr;
+    const std::uint32_t ver = r.u32();
+    if (!r.ok() || ver < kMinReadVersion || ver > kVersion) return nullptr;
 
     const std::int32_t canvasW = r.i32();
     const std::int32_t canvasH = r.i32();
