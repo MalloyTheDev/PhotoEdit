@@ -439,6 +439,7 @@ void MainWindow::buildToolBar() {
             QString tip = QString::fromUtf8(def.label);
             if (!shortcut.isEmpty()) tip += QStringLiteral("  (%1)").arg(shortcut);
             if (def.tool == Tool::Dodge) tip += QStringLiteral("  —  hold Alt to Burn (darken)");
+            if (def.tool == Tool::Blur) tip += QStringLiteral("  —  hold Alt to Sharpen");
             if (def.tool == Tool::Clone) tip += QStringLiteral("  —  Alt-click to set the source");
             if (!wired) tip += QStringLiteral("  — coming soon");
             a->setToolTip(tip);

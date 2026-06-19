@@ -1,5 +1,6 @@
 #include "pe/core/Brush.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/Filter.hpp"
 #include "pe/core/PaintToolController.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
@@ -28,6 +29,18 @@ BrushSettings hardBrush(float diameter, float opacity) {
     b.flow = 1.0f;
     b.spacing = 0.25f;
     return b;
+}
+
+// Fill a 64x64 doc with a black|white edge at x=32, then gaussian-blur the whole layer so the edge
+// becomes a smooth ramp with genuine curvature on both sides — a "soft edge" for the Sharpen brush
+// to crisp back up. Leaves the doc with empty history (the setup blur is not pushed).
+void makeSoftEdge(Document& doc) {
+    const LayerId base = doc.activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc.findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 32, 64}, Rgba8{0, 0, 0, 255});
+    pl->tiles().fillRect(Rect{32, 0, 32, 64}, Rgba8{255, 255, 255, 255});
+    auto soft = applyFilter(doc, base, GaussianBlurFilter(3.0f));
+    soft->execute(doc);  // apply directly; do NOT push, so each test starts with an empty history
 }
 }  // namespace
 
@@ -474,6 +487,95 @@ PE_TEST(controller_blur_mode_softens_edge) {
 
     doc->history().undo();
     PE_CHECK_EQ(pl->tiles().pixel(31, 32).r, static_cast<uint8_t>(0));  // one undo step restores it
+}
+
+PE_TEST(sharpen_increases_contrast_and_undo_restores) {
+    // A soft (gaussian-blurred) black|white edge at x=32. A Sharpen stroke across it must increase
+    // local contrast: the darker side near the edge gets darker and the lighter side gets lighter
+    // (the unsharp overshoot), so the edge is crisper than the smooth ramp it started from.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    makeSoftEdge(*doc);
+
+    const Rgba8 darkBefore = pl->tiles().pixel(30, 32);   // soft edge, just left of center
+    const Rgba8 lightBefore = pl->tiles().pixel(34, 32);  // soft edge, just right of center
+    const Rgba8 farLeft = pl->tiles().pixel(2, 32);       // well outside the brushed band
+    PE_CHECK(darkBefore.r > 0 && darkBefore.r < 255);     // genuinely soft, not pure black/white
+    PE_CHECK(lightBefore.r > 0 && lightBefore.r < 255);
+
+    std::vector<StrokePoint> pts = {{{32, 8}, 1.0f}, {{32, 56}, 1.0f}};  // drag down the edge
+    auto cmd = sharpenStroke(*doc, base, hardBrush(20, 1.0f), pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    // After: contrast across the edge widened — the darker side dropped, the lighter side rose.
+    PE_CHECK(pl->tiles().pixel(30, 32).r < darkBefore.r);
+    PE_CHECK(pl->tiles().pixel(34, 32).r > lightBefore.r);
+    PE_CHECK_EQ(pl->tiles().pixel(2, 32), farLeft);  // far from the stroke: unchanged
+
+    doc->history().undo();  // exact restore: the soft edge returns
+    PE_CHECK_EQ(pl->tiles().pixel(30, 32), darkBefore);
+    PE_CHECK_EQ(pl->tiles().pixel(34, 32), lightBefore);
+}
+
+PE_TEST(sharpen_honors_selection) {
+    // The same soft edge with only the left half selected. A sharpen stroke across the edge must
+    // affect only inside the selection; pixels outside it keep their exact value.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    makeSoftEdge(*doc);
+
+    const Rgba8 insideBefore = pl->tiles().pixel(30, 32);
+    const Rgba8 outsideBefore = pl->tiles().pixel(34, 32);
+
+    Selection sel;
+    sel.selectRect(Rect{0, 0, 32, 64});  // only the left half is writable
+    std::vector<StrokePoint> pts = {{{32, 8}, 1.0f}, {{32, 56}, 1.0f}};
+    auto cmd = sharpenStroke(*doc, base, hardBrush(20, 1.0f), pts, &sel);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    PE_CHECK(pl->tiles().pixel(30, 32).r < insideBefore.r);  // inside selection -> sharpened
+    PE_CHECK_EQ(pl->tiles().pixel(34, 32), outsideBefore);   // outside selection -> untouched
+}
+
+PE_TEST(sharpen_empty_stroke_deposits_nothing) {
+    // A sharpen stroke whose path is empty (or off-canvas) has no coverage, so no command results.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{128, 128, 128, 255});
+
+    std::vector<StrokePoint> empty;
+    PE_CHECK(sharpenStroke(*doc, base, hardBrush(16, 1.0f), empty) == nullptr);
+
+    // A finite-but-absurd off-canvas point also yields no coverage -> nullptr (no allocation
+    // blowup).
+    std::vector<StrokePoint> absurd = {{{1e30f, 1e30f}, 1.0f}};
+    PE_CHECK(sharpenStroke(*doc, base, hardBrush(16, 1.0f), absurd) == nullptr);
+}
+
+PE_TEST(controller_sharpen_mode_increases_contrast) {
+    // Drive Sharpen through PaintToolController (the path the Blur tool uses with Alt): begin/end
+    // over a soft edge crisps it, and it commits exactly one undoable command.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    makeSoftEdge(*doc);
+
+    const Rgba8 darkBefore = pl->tiles().pixel(30, 32);
+
+    PaintToolController c;
+    c.setBrush(hardBrush(24, 1.0f));
+    c.setMode(PaintToolController::Mode::Sharpen);
+    PE_CHECK(c.begin(*doc, StrokePoint{{32, 32}, 1.0f}));
+    PE_CHECK(c.end(*doc));
+    PE_CHECK(pl->tiles().pixel(30, 32).r < darkBefore.r);  // local contrast boosted at the edge
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(30, 32), darkBefore);  // one undo step restores it
 }
 
 PE_TEST(clone_preserves_superwhite_on_f32) {
