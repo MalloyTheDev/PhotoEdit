@@ -420,6 +420,8 @@ void MainWindow::buildToolBar() {
                 kind = OptKind::Brush;  // size/opacity drive the brush footprint + strength
             } else if (std::string_view(def.icon) == "move") {
                 kind = OptKind::Move;
+            } else if (def.tool == Tool::Wand) {
+                kind = OptKind::Wand;  // tolerance drives the magic-wand flood
             }
             connect(a, &QAction::triggered, this, [this, tool, label, wired, kind] {
                 canvas_->setTool(tool);
@@ -507,6 +509,22 @@ void MainWindow::buildOptionsBar() {
     moveOptAction_ = optionsBar_->addWidget(moveOptions_);
     moveOptAction_->setVisible(false);
 
+    // Magic-wand options — per-channel tolerance for the flood; shown only for the Wand tool.
+    wandOptions_ = new QWidget(optionsBar_);
+    auto* wl = new QHBoxLayout(wandOptions_);
+    wl->setContentsMargins(0, 0, 0, 0);
+    wl->setSpacing(6);
+    wl->addWidget(new QLabel(QStringLiteral("Tolerance"), wandOptions_));
+    wandTolSpin_ = new QSpinBox(wandOptions_);
+    wandTolSpin_->setRange(0, 255);
+    wandTolSpin_->setValue(32);
+    wl->addWidget(wandTolSpin_);
+    wandOptAction_ = optionsBar_->addWidget(wandOptions_);
+    wandOptAction_->setVisible(false);
+
+    connect(wandTolSpin_, &QSpinBox::valueChanged, this,
+            [this](int v) { canvas_->setWandTolerance(v); });
+
     // Right-aligned utility icons (echoing the reference's top-bar actions).
     auto* rspacer = new QWidget(optionsBar_);
     rspacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -548,6 +566,7 @@ void MainWindow::updateOptionsBar(OptKind kind, const QString& toolName) {
     // via their wrapping action, so hiding the widget alone leaves a gap/ghost.
     if (brushOptAction_ != nullptr) brushOptAction_->setVisible(kind == OptKind::Brush);
     if (moveOptAction_ != nullptr) moveOptAction_->setVisible(kind == OptKind::Move);
+    if (wandOptAction_ != nullptr) wandOptAction_->setVisible(kind == OptKind::Wand);
 }
 
 void MainWindow::refreshDocTab() {
