@@ -7,6 +7,20 @@
 
 using namespace pe;
 
+namespace {
+// Counts the DocumentChange kinds an observer receives, to assert notification hygiene.
+struct CountingObserver : DocumentObserver {
+    int selection = 0;
+    int structure = 0;
+    int total = 0;
+    void onDocumentChanged(const Document&, const DocumentChange& c) override {
+        ++total;
+        if (c.kind == DocumentChange::Kind::Selection) ++selection;
+        if (c.kind == DocumentChange::Kind::LayerStructure) ++structure;
+    }
+};
+}  // namespace
+
 PE_TEST(setselection_apply_undo_redo_roundtrip) {
     auto doc = Document::createBlank(Size{64, 64});
     PE_CHECK(!doc->selection().active());  // inactive (whole canvas editable) by default
@@ -42,4 +56,41 @@ PE_TEST(setselection_large_canvas_no_truncation) {
 
     doc->history().redo();
     PE_CHECK_EQ(static_cast<int>(doc->selection().value(5050, 5050)), 255);
+}
+
+PE_TEST(setselection_notifies_selection_exactly_once) {
+    // Each SetSelectionCommand push must broadcast exactly ONE Selection change. It used to fire
+    // two (a self-notify via touchSelection AND the change History broadcasts), making every
+    // selection edit recompute the marching-ants bounds twice.
+    auto doc = Document::createBlank(Size{64, 64});
+    CountingObserver obs;
+    doc->addObserver(&obs);
+
+    Selection sel;
+    sel.selectRect(Rect{8, 8, 16, 16});
+    doc->history().push(std::make_unique<SetSelectionCommand>(sel));
+    PE_CHECK_EQ(obs.selection, 1);  // not 2
+
+    doc->history().undo();
+    PE_CHECK_EQ(obs.selection, 2);  // one more for the undo (still exactly one per push)
+
+    doc->removeObserver(&obs);
+}
+
+PE_TEST(crop_still_notifies_both_selection_and_structure) {
+    // Guards the distinction the SetSelectionCommand fix relies on: CropCommand returns a
+    // LayerStructure change AND self-notifies Selection (it shifts the selection with the canvas),
+    // so it must still broadcast BOTH kinds — its touchSelection() is load-bearing, not redundant.
+    auto doc = Document::createBlank(Size{64, 64});
+    Selection sel;
+    sel.selectRect(Rect{10, 10, 40, 40});
+    doc->editableSelection() = sel;  // set directly (no notify) so the counter starts clean
+
+    CountingObserver obs;
+    doc->addObserver(&obs);
+    doc->history().push(
+        std::make_unique<CropCommand>(Rect{8, 8, 40, 40}));  // origin offset -> shift
+    PE_CHECK(obs.selection >= 1);  // selection tracked the crop (Selection notify)
+    PE_CHECK(obs.structure >= 1);  // canvas resized (LayerStructure notify)
+    doc->removeObserver(&obs);
 }
