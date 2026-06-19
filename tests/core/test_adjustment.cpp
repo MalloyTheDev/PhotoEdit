@@ -305,13 +305,65 @@ PE_TEST(adjustment_vibrance_boosts_saturation) {
     PE_CHECK_NEAR(gray.g, 0.5f);
 }
 
+PE_TEST(adjustment_color_balance_identity_is_noop) {
+    // All sliders at 0 must be an exact no-op (even with luminosity preservation on,
+    // which is the default): newLum == origLum so the rescale factor is exactly 1.
+    ColorBalance cb;  // shadows/midtones/highlights all zero, preserveLum default on
+    Rgbaf out = applyOne(cb, Rgbaf{0.2f, 0.6f, 0.9f, 1.0f});
+    PE_CHECK_NEAR(out.r, 0.2f);
+    PE_CHECK_NEAR(out.g, 0.6f);
+    PE_CHECK_NEAR(out.b, 0.9f);
+}
+
 PE_TEST(adjustment_color_balance_midtone_red) {
     ColorBalance cb;
     cb.setPreserveLuminosity(false);
     cb.setMidtones(0.5f, 0.0f, 0.0f);  // push midtones toward red
     Rgbaf out = applyOne(cb, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});
     PE_CHECK_NEAR(out.r, 0.75f);  // 0.5 + 0.5*1.0(midW)*0.5
+    // The Cyan-Red slider only touches red; green and blue are left alone.
     PE_CHECK_NEAR(out.g, 0.5f);
+    PE_CHECK_NEAR(out.b, 0.5f);
+}
+
+PE_TEST(adjustment_color_balance_attenuated_near_black_and_white) {
+    // The midtone shift is windowed to peak at mid-gray and fall off toward the
+    // endpoints: a near-black and a near-white pixel move far less than a mid-gray one
+    // for the same +Red push. (Luminosity preservation off to read the raw shift.)
+    ColorBalance cb;
+    cb.setPreserveLuminosity(false);
+    cb.setMidtones(0.5f, 0.0f, 0.0f);
+
+    const float midGain = applyOne(cb, Rgbaf{0.5f, 0.5f, 0.5f, 1.0f}).r - 0.5f;
+    const float darkGain = applyOne(cb, Rgbaf{0.05f, 0.05f, 0.05f, 1.0f}).r - 0.05f;
+    const float lightGain = applyOne(cb, Rgbaf{0.95f, 0.95f, 0.95f, 1.0f}).r - 0.95f;
+
+    PE_CHECK(midGain > 0.0f);    // mid-gray red is raised
+    PE_CHECK(darkGain >= 0.0f);  // never goes the wrong way
+    PE_CHECK(lightGain >= 0.0f);
+    PE_CHECK(darkGain < midGain * 0.25f);   // shadows barely touched (midW->0 near 0)
+    PE_CHECK(lightGain < midGain * 0.25f);  // highlights barely touched (midW->0 near 1)
+}
+
+PE_TEST(adjustment_color_balance_undo_restores) {
+    // A destructive Color Balance on a U8 layer is one reversible undo step that
+    // restores the original pixels exactly (selection-gating inherited via applyAdjustment).
+    auto doc = Document::createBlank(Size{16, 16}, ColorMode::RGB, BitDepth::U8);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 16, 16}, Rgba8{128, 128, 128, 255});
+
+    ColorBalance cb;
+    cb.setMidtones(0.6f, 0.0f, 0.0f);  // a clearly visible warm push on the midtones
+    auto cmd = applyAdjustment(*doc, base, cb);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(pl->tiles().pixel(8, 8).r > 128);  // midtone red raised
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(8, 8).r, static_cast<uint8_t>(128));  // exact restore
+    PE_CHECK_EQ(pl->tiles().pixel(8, 8).g, static_cast<uint8_t>(128));
+    PE_CHECK_EQ(pl->tiles().pixel(8, 8).b, static_cast<uint8_t>(128));
 }
 
 PE_TEST(adjustment_black_and_white_grays_and_weights) {
