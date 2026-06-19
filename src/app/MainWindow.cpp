@@ -916,12 +916,15 @@ void MainWindow::editAdjustmentLayer(pe::LayerId id) {
             params = {{QStringLiteral("Hue"), -180.0, 180.0, a.hueShiftDegrees(), 0},
                       {QStringLiteral("Saturation"), 0.0, 2.0, a.saturationScale(), 2},
                       {QStringLiteral("Lightness"), -1.0, 1.0, a.lightness(), 2}};
-            build = [f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
-                auto h = std::make_unique<pe::HueSaturation>();
+            // Seed from a clone so parameters the dialog doesn't surface (colorize) are preserved.
+            std::shared_ptr<const pe::Adjustment> base = a.clone();
+            build = [base, f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                auto out = base->clone();
+                auto* h = static_cast<pe::HueSaturation*>(out.get());
                 h->setHueShiftDegrees(f(v[0]));
                 h->setSaturationScale(f(v[1]));
                 h->setLightness(f(v[2]));
-                return h;
+                return out;
             };
             break;
         }
@@ -931,10 +934,13 @@ void MainWindow::editAdjustmentLayer(pe::LayerId id) {
             params = {{QStringLiteral("Cyan / Red"), -1.0, 1.0, a.midtone(0), 2},
                       {QStringLiteral("Magenta / Green"), -1.0, 1.0, a.midtone(1), 2},
                       {QStringLiteral("Yellow / Blue"), -1.0, 1.0, a.midtone(2), 2}};
-            build = [f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
-                auto c = std::make_unique<pe::ColorBalance>();
-                c->setMidtones(f(v[0]), f(v[1]), f(v[2]));
-                return c;
+            // Seed from a clone so the shadows/highlights ranges and preserve-luminosity (which the
+            // midtones-only dialog doesn't surface) survive the edit.
+            std::shared_ptr<const pe::Adjustment> base = a.clone();
+            build = [base, f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                auto out = base->clone();
+                static_cast<pe::ColorBalance*>(out.get())->setMidtones(f(v[0]), f(v[1]), f(v[2]));
+                return out;
             };
             break;
         }
