@@ -11,6 +11,7 @@ using namespace pe;
 
 namespace {
 constexpr Rgba8 kRed{255, 0, 0, 255};
+constexpr Rgba8 kBlue{0, 0, 255, 255};
 bool near8(Rgba8 a, Rgba8 b, int tol = 1) {
     auto d = [](uint8_t x, uint8_t y) {
         return std::abs(static_cast<int>(x) - static_cast<int>(y));
@@ -94,6 +95,92 @@ PE_TEST(renderer_huge_invalidate_drops_cache) {
     // drops the whole cache rather than growing the dirty set unbounded.
     r.invalidate(Rect{0, 0, 300000, 300000});
     PE_CHECK_EQ(r.cachedTileCount(), static_cast<std::size_t>(0));
+}
+
+// --- renderRegionScaled (display LOD for extreme zoom-out) ---
+
+PE_TEST(renderer_scaled_small_region_matches_renderRegion) {
+    // A region within the output cap must be byte-identical to renderRegion (no
+    // regression / same fast path).
+    auto doc = Document::createBlank(Size{512, 512});
+    auto layer = std::make_unique<SolidColorLayer>(kRed, Rect{0, 0, 256, 512});  // left half red
+    doc->history().push(std::make_unique<AddLayerCommand>(std::move(layer), doc->topLevelCount()));
+
+    CanvasRenderer r(*doc);
+    PixelBuffer ref = r.renderRegion(doc->canvasBounds());
+    PixelBuffer scaled = r.renderRegionScaled(doc->canvasBounds());
+    PE_CHECK_EQ(scaled.width(), ref.width());
+    PE_CHECK_EQ(scaled.height(), ref.height());
+    bool identical = !ref.isEmpty() && !scaled.isEmpty();
+    for (int y = 0; y < ref.height() && identical; y += 37) {
+        for (int x = 0; x < ref.width() && identical; x += 37) {
+            if (scaled.at(x, y) != ref.at(x, y)) identical = false;
+        }
+    }
+    PE_CHECK(identical);
+}
+
+PE_TEST(renderer_scaled_over_budget_region_is_nonempty_and_bounded) {
+    // 9000x9000 == 81 MP, above the 64 MP composite budget: renderRegion blanks,
+    // but renderRegionScaled returns a bounded, correctly-sized downscale.
+    auto doc = Document::createBlank(Size{9000, 9000});
+    CanvasRenderer r(*doc);
+
+    PE_CHECK(r.renderRegion(doc->canvasBounds()).isEmpty());  // the old behavior
+
+    constexpr int kCap = 4'000'000;
+    PixelBuffer img = r.renderRegionScaled(doc->canvasBounds(), kCap);
+    PE_CHECK(!img.isEmpty());
+    // Output area within the cap, and an integer downscale of the region.
+    PE_CHECK(static_cast<int64_t>(img.width()) * img.height() <= kCap);
+    PE_CHECK(img.width() > 0 && img.width() < 9000);
+    PE_CHECK(img.height() > 0 && img.height() < 9000);
+    // s = ceil(sqrt(81e6 / 4e6)) = 5  ->  ceil(9000/5) = 1800 per side.
+    PE_CHECK_EQ(img.width(), 1800);
+    PE_CHECK_EQ(img.height(), 1800);
+}
+
+PE_TEST(renderer_scaled_solid_canvas_downsamples_to_that_color) {
+    // A solid-red huge canvas must downsample to (approximately) red everywhere.
+    auto doc = Document::createBlank(Size{9000, 9000});
+    auto layer = std::make_unique<SolidColorLayer>(kRed, doc->canvasBounds());
+    doc->history().push(std::make_unique<AddLayerCommand>(std::move(layer), doc->topLevelCount()));
+
+    CanvasRenderer r(*doc);
+    PixelBuffer img = r.renderRegionScaled(doc->canvasBounds());
+    PE_CHECK(!img.isEmpty());
+    PE_CHECK(near8(img.at(0, 0), kRed));
+    PE_CHECK(near8(img.at(img.width() / 2, img.height() / 2), kRed));
+    PE_CHECK(near8(img.at(img.width() - 1, img.height() - 1), kRed));
+}
+
+PE_TEST(renderer_scaled_half_canvas_shows_both_colors) {
+    // Red left half, blue right half of a 9000x9000 over-budget canvas. The downscale
+    // must preserve both colors in the correct halves. The 4500 split is a multiple
+    // of the downscale factor (s=5), so no bin straddles the seam.
+    auto doc = Document::createBlank(Size{9000, 9000});
+    auto red = std::make_unique<SolidColorLayer>(kRed, Rect{0, 0, 4500, 9000});
+    auto blue = std::make_unique<SolidColorLayer>(kBlue, Rect{4500, 0, 4500, 9000});
+    doc->history().push(std::make_unique<AddLayerCommand>(std::move(red), doc->topLevelCount()));
+    doc->history().push(std::make_unique<AddLayerCommand>(std::move(blue), doc->topLevelCount()));
+
+    CanvasRenderer r(*doc);
+    PixelBuffer img = r.renderRegionScaled(doc->canvasBounds(), 4'000'000);
+    PE_CHECK(!img.isEmpty());
+    const int mid = img.width() / 2;  // == 900, the red/blue seam at s=5
+    PE_CHECK(near8(img.at(0, img.height() / 2), kRed));
+    PE_CHECK(near8(img.at(mid / 2, img.height() / 2), kRed));
+    PE_CHECK(near8(img.at(mid + mid / 2, img.height() / 2), kBlue));
+    PE_CHECK(near8(img.at(img.width() - 1, img.height() / 2), kBlue));
+}
+
+PE_TEST(renderer_scaled_rejects_degenerate_inputs) {
+    auto doc = Document::createBlank(Size{512, 512});
+    CanvasRenderer r(*doc);
+    PE_CHECK(r.renderRegionScaled(Rect{}).isEmpty());                   // empty region
+    PE_CHECK(r.renderRegionScaled(doc->canvasBounds(), 0).isEmpty());   // non-positive cap
+    PE_CHECK(r.renderRegionScaled(doc->canvasBounds(), -1).isEmpty());  // negative cap
+    PE_CHECK(r.renderRegionScaled(Rect{0, 0, kMaxCanvasDimension + 1, 1}).isEmpty());  // too wide
 }
 
 PE_TEST(renderer_undo_restores_pixels) {

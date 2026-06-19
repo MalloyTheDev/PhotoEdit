@@ -3,7 +3,9 @@
 #include "pe/core/Compositor.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 
 namespace pe {
 
@@ -62,6 +64,12 @@ void CanvasRenderer::evictToBudget() noexcept {
     }
 }
 
+void CanvasRenderer::compositeTileUncached(TileCoord c) {
+    std::fill(scratch_.begin(), scratch_.end(), Rgbaf{});
+    compositeStack(doc_.topLevelLayers(), c, scratch_, 0);
+    ++recompositeCount_;
+}
+
 const CanvasRenderer::CachedTile& CanvasRenderer::ensureTile(TileCoord c) {
     const Key key = keyOf(c);
     auto idxIt = index_.find(key);
@@ -73,8 +81,7 @@ const CanvasRenderer::CachedTile& CanvasRenderer::ensureTile(TileCoord c) {
         return idxIt->second->second;
     }
 
-    std::fill(scratch_.begin(), scratch_.end(), Rgbaf{});
-    compositeStack(doc_.topLevelLayers(), c, scratch_, 0);
+    compositeTileUncached(c);  // fills scratch_, bumps recompositeCount_
 
     CachedTile tile;
     for (std::size_t i = 0; i < static_cast<std::size_t>(kTilePixels); ++i) {
@@ -82,7 +89,6 @@ const CanvasRenderer::CachedTile& CanvasRenderer::ensureTile(TileCoord c) {
         tile.px[i] = toRgba8(scratch_[i]);
     }
     dirty_.erase(key);
-    ++recompositeCount_;
 
     if (cached) {
         idxIt->second->second = std::move(tile);
@@ -123,6 +129,103 @@ PixelBuffer CanvasRenderer::renderRegion(Rect docRect) {
                                     static_cast<std::size_t>(lx)]);
                 }
             }
+        }
+    }
+    return out;
+}
+
+PixelBuffer CanvasRenderer::renderRegionScaled(Rect docRegion, int maxOutputPixels) {
+    if (docRegion.isEmpty() || maxOutputPixels <= 0) return PixelBuffer{};
+    // Same per-dimension extent guard as renderRegion: a thin, enormous rect would
+    // otherwise iterate a huge tile column even at a small output size.
+    if (docRegion.width > kMaxCanvasDimension || docRegion.height > kMaxCanvasDimension) {
+        return PixelBuffer{};
+    }
+
+    // Clamp the output cap to the composite budget so the output raster (and its
+    // accumulators) always fit a single eager allocation within engine limits.
+    const int64_t cap = std::min<int64_t>(maxOutputPixels, kMaxCompositeImagePixels);
+    const int64_t area =
+        static_cast<int64_t>(docRegion.width) * static_cast<int64_t>(docRegion.height);
+
+    // Fast path: the region already fits the output cap (hence the composite budget,
+    // since cap <= kMaxCompositeImagePixels). Behave exactly as renderRegion — same
+    // tile cache, byte-identical result.
+    if (area <= cap) return renderRegion(docRegion);
+
+    // Otherwise downscale by an integer factor so the OUTPUT raster is <= cap. s is
+    // the smallest factor with area / s^2 <= cap; bump it until the ceil-rounded
+    // output also fits (the +1 from ceil can nudge a tight fit just over the cap).
+    auto ceilDiv = [](int a, int d) { return (a + d - 1) / d; };
+    int s = static_cast<int>(
+        std::ceil(std::sqrt(static_cast<double>(area) / static_cast<double>(cap))));
+    if (s < 2) s = 2;  // area > cap guarantees a real downscale
+    int ow = ceilDiv(docRegion.width, s);
+    int oh = ceilDiv(docRegion.height, s);
+    while (static_cast<int64_t>(ow) * oh > cap) {
+        ++s;
+        ow = ceilDiv(docRegion.width, s);
+        oh = ceilDiv(docRegion.height, s);
+    }
+
+    // Box-average accumulators in premultiplied float (averaging straight-alpha over
+    // transparent pixels would bias color toward black). One bin per output pixel,
+    // so the working set is bounded by cap (four floats/bin). The full-res region is
+    // NEVER materialized — tiles are composited and accumulated one at a time. Per-bin
+    // sample COUNT is derived from geometry (below), avoiding a fifth accumulator.
+    const std::size_t outCount = static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh);
+    std::vector<float> sumR(outCount, 0.0f);
+    std::vector<float> sumG(outCount, 0.0f);
+    std::vector<float> sumB(outCount, 0.0f);
+    std::vector<float> sumA(outCount, 0.0f);
+
+    const TileSpan span = tilesForRect(docRegion);
+    for (int row = span.rowBegin; row < span.rowEnd; ++row) {
+        for (int col = span.colBegin; col < span.colEnd; ++col) {
+            const TileCoord coord{col, row};
+            const Rect tb = tileBounds(coord);
+            const Rect vis = tb.intersected(docRegion);
+            if (vis.isEmpty()) continue;
+            compositeTileUncached(coord);  // float result in scratch_, no caching
+            for (int y = vis.top(); y < vis.bottom(); ++y) {
+                const int ly = y - tb.top();
+                const int oy = (y - docRegion.top()) / s;
+                for (int x = vis.left(); x < vis.right(); ++x) {
+                    const int lx = x - tb.left();
+                    const int ox = (x - docRegion.left()) / s;
+                    const std::size_t bin =
+                        static_cast<std::size_t>(oy) * static_cast<std::size_t>(ow) +
+                        static_cast<std::size_t>(ox);
+                    const Rgbaf& c = scratch_[static_cast<std::size_t>(ly) * kTileSize +
+                                              static_cast<std::size_t>(lx)];
+                    sumR[bin] += c.r * c.a;  // premultiplied
+                    sumG[bin] += c.g * c.a;
+                    sumB[bin] += c.b * c.a;
+                    sumA[bin] += c.a;
+                }
+            }
+        }
+    }
+
+    PixelBuffer out(ow, oh, Rgba8{});
+    for (int oy = 0; oy < oh; ++oy) {
+        // Source rows this output row covers (clamped to the region's height).
+        const int srcH = std::min((oy + 1) * s, docRegion.height) - oy * s;
+        for (int ox = 0; ox < ow; ++ox) {
+            const int srcW = std::min((ox + 1) * s, docRegion.width) - ox * s;
+            const std::size_t bin = static_cast<std::size_t>(oy) * static_cast<std::size_t>(ow) +
+                                    static_cast<std::size_t>(ox);
+            const double n = static_cast<double>(srcW) * static_cast<double>(srcH);
+            Rgbaf px{};
+            if (n > 0.0) {
+                px.a = static_cast<float>(static_cast<double>(sumA[bin]) / n);
+                if (sumA[bin] > 0.0f) {  // un-premultiply to straight alpha
+                    px.r = sumR[bin] / sumA[bin];
+                    px.g = sumG[bin] / sumA[bin];
+                    px.b = sumB[bin] / sumA[bin];
+                }
+            }
+            out.set(ox, oy, toRgba8(px));
         }
     }
     return out;
