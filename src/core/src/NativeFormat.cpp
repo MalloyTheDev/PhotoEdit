@@ -335,8 +335,12 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
 // Sets activeId/haveActive if a record carries the active flag.
 std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth depth,
                                  LayerId& activeId, bool& haveActive, int depthGuard,
-                                 std::int64_t& budget) {
+                                 std::int64_t& budget, std::int64_t& nodeCount) {
     if (depthGuard > kMaxGroupDepth) return nullptr;
+    // Global node cap across the WHOLE tree: the childCount/topCount checks are per-level only, so
+    // without this a crafted file could declare ~kMaxLayers groups each with ~kMaxLayers (zero-
+    // content) children — millions of layer objects, none charging the byte budget — and OOM.
+    if (++nodeCount > kMaxLayers) return nullptr;
 
     const std::uint8_t kind = r.u8();
     const bool visible = r.u8() != 0;
@@ -395,8 +399,8 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
         if (!r.ok() || childCount > kMaxLayers) return nullptr;
         group->setIsolated(isolated != 0);
         for (std::uint32_t i = 0; i < childCount; ++i) {
-            auto child =
-                readLayer(r, canvasW, canvasH, depth, activeId, haveActive, depthGuard + 1, budget);
+            auto child = readLayer(r, canvasW, canvasH, depth, activeId, haveActive, depthGuard + 1,
+                                   budget, nodeCount);
             if (child == nullptr) return nullptr;
             group->addChild(std::move(child));
         }
@@ -501,8 +505,10 @@ std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data,
     // non-negative). Every pixel/mask block read decrements it before allocating, so a
     // bomb or many-layer file is rejected rather than driven to bad_alloc.
     std::int64_t budget = maxTotalContentBytes < 0 ? 0 : maxTotalContentBytes;
+    std::int64_t nodeCount = 0;  // total layers across the whole tree (global cap, not per-level)
     for (std::uint32_t i = 0; i < topCount; ++i) {
-        auto layer = readLayer(r, canvasW, canvasH, depth, activeId, haveActive, 0, budget);
+        auto layer =
+            readLayer(r, canvasW, canvasH, depth, activeId, haveActive, 0, budget, nodeCount);
         if (layer == nullptr) return nullptr;
         doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(layer));
     }
