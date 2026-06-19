@@ -50,6 +50,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -325,6 +326,18 @@ void MainWindow::buildMenuBar() {
                 doc_->setActiveLayer(id);
             });
         }
+        // Edit the active adjustment layer's parameters (also reachable by double-clicking its
+        // row).
+        layerMenu->addAction(QStringLiteral("Edit Adjustment..."), this, [this] {
+            if (doc_ == nullptr) return;
+            const pe::Layer* a = doc_->findLayer(doc_->activeLayer());
+            if (a != nullptr && a->isAdjustment()) {
+                editAdjustmentLayer(doc_->activeLayer());
+            } else {
+                statusBar()->showMessage(QStringLiteral("Select an adjustment layer to edit."),
+                                         4000);
+            }
+        });
     }
     auto* selMenu = menuBar()->addMenu(QStringLiteral("&Select"));
     selMenu->addAction(QStringLiteral("Select All"), this, [this]() {
@@ -831,6 +844,143 @@ void MainWindow::onAddText(const QPointF& docPos) {
     }
 }
 
+void MainWindow::editAdjustmentLayer(pe::LayerId id) {
+    if (doc_ == nullptr) return;
+    pe::Layer* layer = doc_->findLayer(id);
+    if (layer == nullptr || !layer->isAdjustment()) return;
+    const pe::Adjustment& adj = static_cast<pe::AdjustmentLayer*>(layer)->adjustment();
+
+    // Per-type: the dialog parameters seeded from the layer's CURRENT values, plus a builder that
+    // turns slider values back into a fresh Adjustment. Slider-friendly types only; others fall
+    // through to an informational message.
+    using Builder = std::function<std::unique_ptr<pe::Adjustment>(const std::vector<double>&)>;
+    QString title;
+    std::vector<EffectDialog::Param> params;
+    Builder build;
+    const auto f = [](double v) { return static_cast<float>(v); };
+
+    switch (adj.kind()) {
+        case pe::AdjustmentKind::BrightnessContrast: {
+            const auto& a = static_cast<const pe::BrightnessContrast&>(adj);
+            title = QStringLiteral("Brightness/Contrast");
+            params = {{QStringLiteral("Brightness"), -1.0, 1.0, a.brightness(), 2},
+                      {QStringLiteral("Contrast"), -1.0, 1.0, a.contrast(), 2}};
+            build = [f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                return std::make_unique<pe::BrightnessContrast>(f(v[0]), f(v[1]));
+            };
+            break;
+        }
+        case pe::AdjustmentKind::Levels: {
+            const auto& a = static_cast<const pe::Levels&>(adj);
+            title = QStringLiteral("Levels");
+            params = {{QStringLiteral("Input Black"), 0.0, 1.0, a.inputBlack(), 2},
+                      {QStringLiteral("Input White"), 0.0, 1.0, a.inputWhite(), 2},
+                      {QStringLiteral("Gamma"), 0.1, 9.99, a.gamma(), 2},
+                      {QStringLiteral("Output Black"), 0.0, 1.0, a.outputBlack(), 2},
+                      {QStringLiteral("Output White"), 0.0, 1.0, a.outputWhite(), 2}};
+            build = [f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                auto l = std::make_unique<pe::Levels>();
+                l->setInputBlack(f(v[0]));
+                l->setInputWhite(f(v[1]));
+                l->setGamma(f(v[2]));
+                l->setOutputBlack(f(v[3]));
+                l->setOutputWhite(f(v[4]));
+                return l;
+            };
+            break;
+        }
+        case pe::AdjustmentKind::Exposure: {
+            const auto& a = static_cast<const pe::Exposure&>(adj);
+            title = QStringLiteral("Exposure");
+            params = {{QStringLiteral("Exposure (stops)"), -5.0, 5.0, a.stops(), 2},
+                      {QStringLiteral("Offset"), -0.5, 0.5, a.offset(), 3},
+                      {QStringLiteral("Gamma"), 0.1, 5.0, a.gamma(), 2}};
+            build = [f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                return std::make_unique<pe::Exposure>(f(v[0]), f(v[1]), f(v[2]));
+            };
+            break;
+        }
+        case pe::AdjustmentKind::Vibrance: {
+            const auto& a = static_cast<const pe::Vibrance&>(adj);
+            title = QStringLiteral("Vibrance");
+            params = {{QStringLiteral("Vibrance"), -1.0, 1.0, a.vibrance(), 2},
+                      {QStringLiteral("Saturation"), -1.0, 1.0, a.saturation(), 2}};
+            build = [f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                return std::make_unique<pe::Vibrance>(f(v[0]), f(v[1]));
+            };
+            break;
+        }
+        case pe::AdjustmentKind::HueSaturation: {
+            const auto& a = static_cast<const pe::HueSaturation&>(adj);
+            title = QStringLiteral("Hue/Saturation");
+            params = {{QStringLiteral("Hue"), -180.0, 180.0, a.hueShiftDegrees(), 0},
+                      {QStringLiteral("Saturation"), 0.0, 2.0, a.saturationScale(), 2},
+                      {QStringLiteral("Lightness"), -1.0, 1.0, a.lightness(), 2}};
+            // Seed from a clone so parameters the dialog doesn't surface (colorize) are preserved.
+            std::shared_ptr<const pe::Adjustment> base = a.clone();
+            build = [base, f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                auto out = base->clone();
+                auto* h = static_cast<pe::HueSaturation*>(out.get());
+                h->setHueShiftDegrees(f(v[0]));
+                h->setSaturationScale(f(v[1]));
+                h->setLightness(f(v[2]));
+                return out;
+            };
+            break;
+        }
+        case pe::AdjustmentKind::ColorBalance: {
+            const auto& a = static_cast<const pe::ColorBalance&>(adj);
+            title = QStringLiteral("Color Balance (Midtones)");
+            params = {{QStringLiteral("Cyan / Red"), -1.0, 1.0, a.midtone(0), 2},
+                      {QStringLiteral("Magenta / Green"), -1.0, 1.0, a.midtone(1), 2},
+                      {QStringLiteral("Yellow / Blue"), -1.0, 1.0, a.midtone(2), 2}};
+            // Seed from a clone so the shadows/highlights ranges and preserve-luminosity (which the
+            // midtones-only dialog doesn't surface) survive the edit.
+            std::shared_ptr<const pe::Adjustment> base = a.clone();
+            build = [base, f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                auto out = base->clone();
+                static_cast<pe::ColorBalance*>(out.get())->setMidtones(f(v[0]), f(v[1]), f(v[2]));
+                return out;
+            };
+            break;
+        }
+        case pe::AdjustmentKind::Posterize: {
+            const auto& a = static_cast<const pe::Posterize&>(adj);
+            title = QStringLiteral("Posterize");
+            params = {{QStringLiteral("Levels"), 2.0, 255.0, static_cast<double>(a.levels()), 0}};
+            build = [](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                return std::make_unique<pe::Posterize>(static_cast<int>(std::lround(v[0])));
+            };
+            break;
+        }
+        case pe::AdjustmentKind::Threshold: {
+            const auto& a = static_cast<const pe::Threshold&>(adj);
+            title = QStringLiteral("Threshold");
+            params = {{QStringLiteral("Level"), 0.0, 1.0, a.level(), 2}};
+            build = [f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                return std::make_unique<pe::Threshold>(f(v[0]));
+            };
+            break;
+        }
+        default:
+            QMessageBox::information(this, QStringLiteral("Edit Adjustment"),
+                                     QStringLiteral("Editing “%1” isn't supported yet.")
+                                         .arg(QString::fromStdString(adj.name())));
+            return;
+    }
+
+    // Drive the shared live-preview dialog: each value change swaps a fresh Adjustment onto this
+    // layer via an EditAdjustmentCommand (its execute==undo==swap pairs cleanly with the dialog's
+    // revert-then-reapply flow), and OK commits exactly one undoable EditAdjustmentCommand.
+    EffectDialog dlg(
+        this, title, std::move(params),
+        [id, build](const std::vector<double>& v) -> std::unique_ptr<pe::Command> {
+            return std::make_unique<pe::EditAdjustmentCommand>(id, build(v));
+        },
+        doc_.get(), [this] { canvas_->reloadImage(); });
+    dlg.exec();
+}
+
 void MainWindow::exportDocumentAs() {
     if (doc_ == nullptr) return;
 
@@ -949,6 +1099,7 @@ void MainWindow::buildDockPanels() {
     };
 
     layers_ = new LayersPanel();
+    connect(layers_, &LayersPanel::editAdjustmentRequested, this, &MainWindow::editAdjustmentLayer);
     history_ = new HistoryPanel();
     colorPanel_ = new ColorPanel();
     properties_ = new PropertiesPanel();

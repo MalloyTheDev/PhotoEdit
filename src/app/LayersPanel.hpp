@@ -53,6 +53,11 @@ public:
     void groupSelected();
     void ungroupSelected();
 
+signals:
+    // Emitted when the user double-clicks an adjustment-layer row; MainWindow opens the
+    // parameter dialog. (The panel owns the selection but not the adjustment dialogs.)
+    void editAdjustmentRequested(pe::LayerId id);
+
 private:
     void rebuild();             // repopulate the tree from the model
     void syncActiveControls();  // reflect the active layer into blend/opacity
@@ -82,7 +87,8 @@ private:
 
     void onRowChanged();
     void onSelectionChanged();
-    void onItemChanged(QTreeWidgetItem* item, int column);  // visibility checkbox
+    void onItemChanged(QTreeWidgetItem* item, int column);        // visibility checkbox
+    void onItemDoubleClicked(QTreeWidgetItem* item, int column);  // adjustment-layer edit
     void onItemExpanded(QTreeWidgetItem* item);
     void onItemCollapsed(QTreeWidgetItem* item);
     void onBlendChanged(int index);

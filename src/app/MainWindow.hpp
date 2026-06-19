@@ -2,6 +2,8 @@
 
 #include "Theme.hpp"
 
+#include "pe/core/Layer.hpp"  // pe::LayerId
+
 #include <QMainWindow>
 #include <QString>
 
@@ -63,6 +65,10 @@ private:
     void undo();
     void redo();
     void onAddText(const QPointF& docPos);  // Type tool: prompt + rasterize + stamp text
+    // Open the live-preview parameter dialog for an adjustment layer (double-click in the Layers
+    // panel, or Layer▸Edit Adjustment). Commits one EditAdjustmentCommand on OK; a no-op for a
+    // non-adjustment layer or a type without an editor yet.
+    void editAdjustmentLayer(pe::LayerId id);
     bool writeTo(const QString& path);
     void setDocument(std::unique_ptr<pe::Document> doc, QString path);
     void refreshTitle();

@@ -81,6 +81,7 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     connect(tree_, &QTreeWidget::currentItemChanged, this, &LayersPanel::onRowChanged);
     connect(tree_, &QTreeWidget::itemSelectionChanged, this, &LayersPanel::onSelectionChanged);
     connect(tree_, &QTreeWidget::itemChanged, this, &LayersPanel::onItemChanged);
+    connect(tree_, &QTreeWidget::itemDoubleClicked, this, &LayersPanel::onItemDoubleClicked);
     connect(tree_, &QTreeWidget::itemExpanded, this, &LayersPanel::onItemExpanded);
     connect(tree_, &QTreeWidget::itemCollapsed, this, &LayersPanel::onItemCollapsed);
     connect(blend_, &QComboBox::currentIndexChanged, this, &LayersPanel::onBlendChanged);
@@ -435,6 +436,14 @@ void LayersPanel::onItemChanged(QTreeWidgetItem* item, int /*column*/) {
     if (l == nullptr) return;
     const bool want = item->checkState(0) == Qt::Checked;
     if (l->visible() != want) push(std::make_unique<pe::SetVisibilityCommand>(id, want));
+}
+
+void LayersPanel::onItemDoubleClicked(QTreeWidgetItem* item, int /*column*/) {
+    if (doc_ == nullptr || item == nullptr) return;
+    const pe::LayerId id = idOf(item);
+    const pe::Layer* l = doc_->findLayer(id);
+    // Double-clicking an adjustment-layer row opens its parameter dialog (MainWindow handles it).
+    if (l != nullptr && l->isAdjustment()) emit editAdjustmentRequested(id);
 }
 
 void LayersPanel::onItemExpanded(QTreeWidgetItem* item) {
