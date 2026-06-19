@@ -222,3 +222,20 @@ PE_TEST(renderer_undo_restores_pixels) {
     img = r.renderRegion(doc->canvasBounds());
     PE_CHECK_EQ(img.at(0, 0), (Rgba8{0, 0, 0, 0}));  // back to transparent
 }
+
+PE_TEST(renderer_rejects_far_offset_origin_without_overflow) {
+    // A far-offset rect passes the width/height/area caps but x+width (Rect::right) and
+    // col*kTileSize (tilesForRect) would signed-overflow int = UB. Both render methods must reject
+    // it safely.
+    auto doc = Document::createBlank(Size{256, 256});
+    CanvasRenderer r(*doc);
+    const Rect farX{2'000'000'000, 0, 64, 64};  // x near INT_MAX, small extent
+    const Rect farY{0, 2'000'000'000, 64, 64};
+    PE_CHECK(r.renderRegion(farX).isEmpty());
+    PE_CHECK(r.renderRegion(farY).isEmpty());
+    PE_CHECK(r.renderRegion(Rect{-2'000'000'000, 0, 64, 64}).isEmpty());
+    PE_CHECK(r.renderRegionScaled(farX, 4096).isEmpty());
+    PE_CHECK(r.renderRegionScaled(farY, 4096).isEmpty());
+    // A normal region still renders (guard didn't over-reject).
+    PE_CHECK(!r.renderRegion(doc->canvasBounds()).isEmpty());
+}

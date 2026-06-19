@@ -6,6 +6,12 @@ namespace pe {
 
 void History::push(std::unique_ptr<Command> cmd) {
     if (!cmd) return;
+    // If the saved point lies on the redo branch we're about to discard (i.e. ahead of the current
+    // head, after one or more undos), it can never be returned to — mark it unreachable so
+    // isAtSavedState() doesn't later report a false "clean" when the new branch happens to reach
+    // the same depth. Without this, undo×N then a fresh edit back up to the saved depth would
+    // wrongly look saved and the app would skip its save-on-close prompt (silent data loss).
+    if (savedDepth_ > static_cast<std::ptrdiff_t>(done_.size())) savedDepth_ = -1;
     const DocumentChange change = cmd->execute(*doc_);
     done_.push_back(std::move(cmd));
     undone_.clear();  // a new edit invalidates the redo branch

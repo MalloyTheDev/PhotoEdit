@@ -108,6 +108,12 @@ PixelBuffer CanvasRenderer::renderRegion(Rect docRect) {
     if (docRect.width > kMaxCanvasDimension || docRect.height > kMaxCanvasDimension) {
         return PixelBuffer{};
     }
+    // Also bound the ORIGIN: width/height alone don't stop a far-offset rect whose right()/bottom()
+    // (x+width) or tilesForRect (col*kTileSize) would signed-overflow int (UB). Mirrors Filter.cpp.
+    if (docRect.x > kMaxCanvasDimension || docRect.x < -kMaxCanvasDimension ||
+        docRect.y > kMaxCanvasDimension || docRect.y < -kMaxCanvasDimension) {
+        return PixelBuffer{};
+    }
     const int64_t area = static_cast<int64_t>(docRect.width) * static_cast<int64_t>(docRect.height);
     if (area > kMaxCompositeImagePixels) return PixelBuffer{};
 
@@ -139,6 +145,11 @@ PixelBuffer CanvasRenderer::renderRegionScaled(Rect docRegion, int maxOutputPixe
     // Same per-dimension extent guard as renderRegion: a thin, enormous rect would
     // otherwise iterate a huge tile column even at a small output size.
     if (docRegion.width > kMaxCanvasDimension || docRegion.height > kMaxCanvasDimension) {
+        return PixelBuffer{};
+    }
+    // Bound the origin too (x+width / col*kTileSize would otherwise signed-overflow int = UB).
+    if (docRegion.x > kMaxCanvasDimension || docRegion.x < -kMaxCanvasDimension ||
+        docRegion.y > kMaxCanvasDimension || docRegion.y < -kMaxCanvasDimension) {
         return PixelBuffer{};
     }
 

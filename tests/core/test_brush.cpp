@@ -329,6 +329,21 @@ PE_TEST(clone_stroke_empty_source_deposits_nothing) {
     PE_CHECK(cloneStroke(*doc, base, hardBrush(8, 1.0f), pts, 0, 0) == nullptr);
 }
 
+PE_TEST(clone_stroke_extreme_offset_is_safe) {
+    // cloneStroke is a public engine entry; a huge offset must not signed-overflow the int sample
+    // coordinate baseX+lx-cloneOffX (UB). The int64 range-gate reads transparent off-canvas, so the
+    // stroke deposits nothing — and ASan/UBSan must stay quiet.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{255, 0, 0, 255});
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    PE_CHECK(cloneStroke(*doc, base, hardBrush(8, 1.0f), pts, 2'000'000'000, 2'000'000'000) ==
+             nullptr);
+    PE_CHECK(cloneStroke(*doc, base, hardBrush(8, 1.0f), pts, -2'000'000'000, -2'000'000'000) ==
+             nullptr);
+}
+
 PE_TEST(controller_clone_no_feedback_on_overlapping_drag) {
     // Drive Clone through the controller (begin/extend/end). A left->right drag with a small
     // offset over a narrow source stripe must NOT smear: each painted pixel samples the PRE-STROKE

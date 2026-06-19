@@ -4,6 +4,7 @@
 #include "pe/core/Document.hpp"
 #include "pe/core/History.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -28,9 +29,23 @@ std::unique_ptr<PaintCommand> PaintToolController::buildStroke(Document& doc) co
         case Mode::Clone: {
             if (!cloneSourceValid_ || points_.empty()) return nullptr;  // no source anchor set
             // Lock the source->dest offset to the stroke's first point (sampled every rebuild from
-            // points_[0], so it is stable across extend()).
-            const int offX = static_cast<int>(std::lround(points_[0].pos.x)) - cloneSource_.x;
-            const int offY = static_cast<int>(std::lround(points_[0].pos.y)) - cloneSource_.y;
+            // points_[0], so it is stable across extend()). Validate + clamp the (untrusted,
+            // possibly tablet-garbage) first point before the float->int conversion: a non-finite
+            // or huge value would make lround out-of-range (float->int UB) and overflow the offset
+            // subtraction.
+            const double fx = points_[0].pos.x;
+            const double fy = points_[0].pos.y;
+            if (!std::isfinite(fx) || !std::isfinite(fy)) return nullptr;
+            constexpr double kBound = static_cast<double>(kMaxCanvasDimension);
+            const int px = static_cast<int>(std::lround(std::clamp(fx, -kBound, kBound)));
+            const int py = static_cast<int>(std::lround(std::clamp(fy, -kBound, kBound)));
+            // Clamp the anchor to the canvas range too (setCloneSource doesn't), so the offset
+            // subtraction can't signed-overflow even via a direct, non-UI caller: both operands are
+            // now within +/-kMaxCanvasDimension, so the difference fits comfortably in int.
+            const int csx = std::clamp(cloneSource_.x, -kMaxCanvasDimension, kMaxCanvasDimension);
+            const int csy = std::clamp(cloneSource_.y, -kMaxCanvasDimension, kMaxCanvasDimension);
+            const int offX = px - csx;
+            const int offY = py - csy;
             return cloneStroke(doc, layer_, brush_, points_, offX, offY, selection_);
         }
         case Mode::Brush:

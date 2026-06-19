@@ -189,6 +189,31 @@ PE_TEST(history_saved_marker_dirty_tracking) {
     PE_CHECK(!doc->isDirty());
 }
 
+PE_TEST(history_saved_marker_invalidated_by_diverged_branch) {
+    // Regression: the saved point must NOT be reported clean once it lies on a redo branch that a
+    // fresh edit discarded. save -> undo -> new edit(s) reaching the same depth is a DIFFERENT
+    // document and must read dirty (else the app skips its save-on-close prompt = silent data
+    // loss).
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.5f));
+    doc->history().markSaved();  // saved at depth 1
+    PE_CHECK(!doc->isDirty());
+
+    doc->history().undo();  // depth 0 (saved point is now ahead, on the redo branch)
+    PE_CHECK(doc->isDirty());
+    doc->history().push(
+        std::make_unique<SetOpacityCommand>(base, 0.9f));  // discards the redo branch
+    // Back at depth 1, but it's a different command than the saved one — must be dirty, not clean.
+    PE_CHECK(doc->isDirty());
+
+    // And it stays dirty even if more edits return to/around the old saved depth.
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.8f));
+    PE_CHECK(doc->isDirty());
+    doc->history().undo();
+    PE_CHECK(doc->isDirty());
+}
+
 PE_TEST(history_limit_trims_oldest) {
     auto doc = Document::createBlank(Size{16, 16});
     doc->history().setLimit(2);

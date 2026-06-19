@@ -104,11 +104,23 @@ void boxBlur(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int
 
 void gaussianBlur(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, float sigma) {
     if (w <= 0 || h <= 0) return;
-    if (sigma <= 0.0f) {
+    // Reject non-positive AND non-finite sigma (the old `sigma <= 0` test let NaN/Inf through,
+    // since NaN compares false — then `(int)ceil(3*sigma)` is an out-of-range float->int conversion
+    // = UB).
+    if (!(sigma > 0.0f) || !std::isfinite(sigma)) {
         copyImage(src, dst);
         return;
     }
-    const int radius = std::max(1, static_cast<int>(std::ceil(3.0f * sigma)));
+    // Cap the kernel radius inside the engine (not just in the UI): an enormous finite sigma would
+    // otherwise overflow `2*radius+1` and turn the separable convolution into an O(w*h*radius) DoS.
+    // unsharpMask forwards its radius here as sigma, so this one cap covers both kernels.
+    constexpr int kMaxKernelRadius = 1024;
+    // Clamp in the FLOAT domain BEFORE the int cast: for a huge sigma, ceil(3*sigma) (e.g. 3e9)
+    // is itself out of int range, so casting first — then clamping — would be the very UB we guard.
+    const float wantRadius = std::ceil(3.0f * sigma);
+    const int radius = wantRadius >= static_cast<float>(kMaxKernelRadius)
+                           ? kMaxKernelRadius
+                           : std::max(1, static_cast<int>(wantRadius));
     std::vector<float> kernel(static_cast<std::size_t>(2 * radius + 1));
     const float twoSigmaSq = 2.0f * sigma * sigma;
     float sum = 0.0f;
