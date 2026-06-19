@@ -4,29 +4,36 @@
 
 #include <QWidget>
 
+#include <cstddef>
 #include <memory>
+#include <set>
+#include <span>
+#include <vector>
 
 class QComboBox;
 class QIcon;
-class QListWidget;
-class QListWidgetItem;
+class QTreeWidget;
+class QTreeWidgetItem;
 class QPushButton;
 class QSpinBox;
 
 namespace pe {
 class Command;
-}
+class Layer;
+}  // namespace pe
 
 namespace pe::app {
 
-// The Layers dock: presents the document's top-level layer stack (top layer first,
-// as in every layered editor) and edits it through undoable commands — visibility,
-// opacity, blend mode, add, duplicate, delete, and reorder. Nested groups, masks,
-// thumbnails, and drag-reorder arrive later.
+// The Layers dock: presents the document's layer tree (top layer first, as in every
+// layered editor) with groups shown as expandable parents, and edits it through
+// undoable commands — visibility, opacity, blend mode, add, duplicate, delete,
+// reorder, and group / ungroup. Per-layer property edits (visibility/opacity/blend)
+// work at any depth; add / duplicate / delete / reorder operate on the top level in
+// this version (nested reordering and drag-drop arrive with the engine commands for it).
 //
 // It observes the document, so external edits (undo/redo, file loads, structural
-// changes from anywhere) keep the panel in sync. All mutations go through
-// History, so the canvas (also an observer) recomposites automatically.
+// changes from anywhere) keep the panel in sync. All mutations go through History,
+// so the canvas (also an observer) recomposites automatically.
 class LayersPanel : public QWidget, public pe::DocumentObserver {
     Q_OBJECT
 
@@ -40,21 +47,43 @@ public:
 
     void onDocumentChanged(const pe::Document&, const pe::DocumentChange&) override;
 
+    // Group the multi-selected top-level layers into a new group; dissolve the active
+    // top-level group. Both are safe no-ops when the selection doesn't qualify.
+    // MainWindow wires the Layer▸Group (Ctrl+G) / Ungroup (Ctrl+Shift+G) actions here.
+    void groupSelected();
+    void ungroupSelected();
+
 private:
-    void rebuild();             // repopulate the list from the model
+    void rebuild();             // repopulate the tree from the model
     void syncActiveControls();  // reflect the active layer into blend/opacity
     void updateButtons();       // enable/disable per current selection
-    void selectActiveInList();  // highlight the row matching the active layer
-    [[nodiscard]] pe::LayerId selectedLayer() const;
-    // A small preview of one top-level layer (composited alone), for the row icon.
-    [[nodiscard]] QIcon layerThumbnail(std::size_t engineIndex) const;
+    void selectActiveInTree();  // make the active layer the current item
+    // Build the items for one level (recursing into groups). `siblings` is the engine
+    // span owning the layers at this level; items are added top-first.
+    void addLevel(QTreeWidgetItem* parentItem,
+                  std::span<const std::unique_ptr<pe::Layer>> siblings);
+    [[nodiscard]] QTreeWidgetItem* itemForId(pe::LayerId id) const;  // depth-first lookup
+
+    [[nodiscard]] pe::LayerId selectedLayer() const;  // the current (active) item's id
+    // Ids of the multi-selection that are top-level layers (the only ones groupable here).
+    [[nodiscard]] std::vector<pe::LayerId> selectedTopLevelIds() const;
+    // True iff there is a selection and every selected item is a top-level sibling.
+    [[nodiscard]] bool selectionAllTopLevel() const;
+
+    // A small preview of one layer (composited alone), for the row icon; groups get a
+    // folder glyph. `siblings`/`index` give the engine slot to composite.
+    [[nodiscard]] QIcon layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> siblings,
+                                       std::size_t index) const;
+    [[nodiscard]] QIcon groupIcon() const;
     // Refresh just one layer's row icon after a pixel edit (the paint hot path),
-    // instead of rebuilding the whole list. Falls back to rebuild() if the layer is
-    // not a top-level row (e.g. unknown id, or nested in a group).
+    // instead of rebuilding the whole tree. Falls back to rebuild() if not found.
     void updateLayerThumbnail(pe::LayerId id);
 
     void onRowChanged();
-    void onItemChanged(QListWidgetItem* item);  // visibility checkbox
+    void onSelectionChanged();
+    void onItemChanged(QTreeWidgetItem* item, int column);  // visibility checkbox
+    void onItemExpanded(QTreeWidgetItem* item);
+    void onItemCollapsed(QTreeWidgetItem* item);
     void onBlendChanged(int index);
     void onOpacityEdited();
     void onAdd();
@@ -70,12 +99,18 @@ private:
 
     QComboBox* blend_ = nullptr;
     QSpinBox* opacity_ = nullptr;
-    QListWidget* list_ = nullptr;
+    QTreeWidget* tree_ = nullptr;
     QPushButton* addBtn_ = nullptr;
     QPushButton* dupBtn_ = nullptr;
     QPushButton* delBtn_ = nullptr;
+    QPushButton* groupBtn_ = nullptr;
+    QPushButton* ungroupBtn_ = nullptr;
     QPushButton* upBtn_ = nullptr;
     QPushButton* downBtn_ = nullptr;
+
+    // Groups the user has collapsed (by id). Everything else defaults to expanded so a
+    // rebuild after an edit does not fold the tree back up. Survives rebuilds.
+    std::set<pe::LayerId> collapsed_;
 };
 
 }  // namespace pe::app

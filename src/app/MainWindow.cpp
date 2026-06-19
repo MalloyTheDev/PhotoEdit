@@ -247,7 +247,17 @@ void MainWindow::buildMenuBar() {
                 applyInstant(pe::applyAdjustment(*doc_, doc_->activeLayer(), pe::Invert{}, sel()));
         });
     }
-    menuBar()->addMenu(QStringLiteral("&Layer"));
+    {
+        auto* layerMenu = menuBar()->addMenu(QStringLiteral("&Layer"));
+        QAction* groupAct = layerMenu->addAction(QStringLiteral("&Group Layers"), this, [this] {
+            if (layers_ != nullptr) layers_->groupSelected();
+        });
+        groupAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+G")));
+        QAction* ungroupAct = layerMenu->addAction(QStringLiteral("&Ungroup Layers"), this, [this] {
+            if (layers_ != nullptr) layers_->ungroupSelected();
+        });
+        ungroupAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+G")));
+    }
     auto* selMenu = menuBar()->addMenu(QStringLiteral("&Select"));
     selMenu->addAction(QStringLiteral("Select All"), this, [this]() {
         if (doc_) {
