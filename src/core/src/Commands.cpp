@@ -47,8 +47,13 @@ Selection translatedSelection(const Selection& sel, int dx, int dy) {
     if (!sel.active()) return sel;
     const Rect bounds = sel.tightBounds();
     if (bounds.isEmpty()) return sel;  // active but no coverage: nothing to move
+    const PixelBuffer mask = sel.toMask(bounds);
+    // toMask returns empty when the bounding box exceeds the selection cap (a sparse selection
+    // can have a huge bbox but tiny coverage). Don't translate via a mask round-trip in that case
+    // — loading an empty mask would silently deactivate the selection; keep it as-is instead.
+    if (mask.isEmpty()) return sel;
     Selection out;
-    out.loadMask(sel.toMask(bounds), bounds.left() + dx, bounds.top() + dy);
+    out.loadMask(mask, bounds.left() + dx, bounds.top() + dy);
     return out;
 }
 

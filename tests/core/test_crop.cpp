@@ -124,6 +124,22 @@ PE_TEST(crop_leaves_inactive_selection_inactive) {
     PE_CHECK(!doc->selection().active());
 }
 
+PE_TEST(crop_preserves_sparse_selection_with_huge_bbox) {
+    // A sparse selection (tiny coverage, far-apart rects) can have a bounding box that exceeds the
+    // toMask cap. A crop must not silently deactivate it via an empty mask round-trip — it is kept
+    // as-is (untranslated) rather than dropped.
+    auto doc = Document::createBlank(Size{64, 64});
+    doc->editableSelection().selectRect(Rect{0, 0, 16, 16});
+    doc->editableSelection().addRect(Rect{100000, 100000, 16, 16});  // bbox ~100016^2 > 64 MP cap
+    PE_CHECK(doc->selection().active());
+
+    doc->history().push(std::make_unique<CropCommand>(Rect{10, 8, 30, 30}));
+    PE_CHECK(doc->selection().active());  // preserved, not silently dropped
+
+    doc->history().undo();
+    PE_CHECK(doc->selection().active());
+}
+
 PE_TEST(crop_refuses_when_content_exceeds_move_budget) {
     // A layer whose content exceeds the per-layer move budget can't be shifted; rather than
     // resize the canvas and leave content unmoved (half-cropped), the crop must be a no-op.
