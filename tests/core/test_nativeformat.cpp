@@ -1,7 +1,10 @@
+#include "pe/core/Adjustment.hpp"
+#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/GroupLayer.hpp"
 #include "pe/core/NativeFormat.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/SolidColorLayer.hpp"
 #include "pe_test.hpp"
 
 #include <cstddef>
@@ -80,6 +83,115 @@ PE_TEST(native_format_empty_layer_roundtrip) {
     PE_CHECK(loaded != nullptr);
     PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(1));
     PE_CHECK_EQ(asPixel(*loaded, 0)->tiles().pixel(0, 0), (Rgba8{0, 0, 0, 0}));
+}
+
+PE_TEST(native_format_roundtrip_adjustment_layer) {
+    // An adjustment layer (non-destructive) must survive save/load with its parameters — the
+    // data-loss gap this fixes. Use Levels (non-default params via the new getters).
+    auto doc = Document::createBlank(Size{16, 16});
+    auto lv = std::make_unique<Levels>();
+    lv->setInputBlack(0.2f);
+    lv->setGamma(2.5f);
+    lv->setOutputWhite(0.8f);
+    auto adj = std::make_unique<AdjustmentLayer>(std::move(lv), "My Levels");
+    adj->setOpacity(0.75f);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(adj));
+
+    auto loaded = deserializeDocument(serializeDocument(*doc));
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(2));
+    const Layer* l = loaded->topLevelLayers()[1].get();
+    PE_CHECK(l != nullptr && l->isAdjustment());
+    PE_CHECK_EQ(l->name(), std::string("My Levels"));
+    PE_CHECK_NEAR(l->opacity(), 0.75f);
+    const auto& a = static_cast<const AdjustmentLayer*>(l)->adjustment();
+    PE_CHECK(a.kind() == AdjustmentKind::Levels);
+    const auto& lvl = static_cast<const Levels&>(a);
+    PE_CHECK_NEAR(lvl.inputBlack(), 0.2f);
+    PE_CHECK_NEAR(lvl.gamma(), 2.5f);
+    PE_CHECK_NEAR(lvl.outputWhite(), 0.8f);
+}
+
+PE_TEST(native_format_roundtrip_solid_color_layer) {
+    auto doc = Document::createBlank(Size{32, 32});
+    doc->cmdInsertTopLevel(
+        doc->topLevelCount(),
+        std::make_unique<SolidColorLayer>(Rgba8{10, 20, 30, 200}, Rect{4, 5, 16, 12}, "Fill"));
+
+    auto loaded = deserializeDocument(serializeDocument(*doc));
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(2));
+    const auto* s = dynamic_cast<const SolidColorLayer*>(loaded->topLevelLayers()[1].get());
+    PE_CHECK(s != nullptr);
+    PE_CHECK_EQ(s->color(), (Rgba8{10, 20, 30, 200}));
+    PE_CHECK_EQ(s->bounds(), (Rect{4, 5, 16, 12}));
+}
+
+PE_TEST(native_format_roundtrip_all_adjustment_kinds) {
+    // Every serialized AdjustmentKind survives the round-trip with the right kind tag.
+    auto doc = Document::createBlank(Size{8, 8});
+    std::vector<std::unique_ptr<Adjustment>> kinds;
+    kinds.push_back(std::make_unique<BrightnessContrast>(0.3f, -0.2f));
+    kinds.push_back(std::make_unique<Curves>());
+    kinds.push_back(std::make_unique<Invert>());
+    kinds.push_back(std::make_unique<Exposure>(1.0f, 0.1f, 1.2f));
+    kinds.push_back(std::make_unique<HueSaturation>());
+    kinds.push_back(std::make_unique<ChannelMixer>());
+    kinds.push_back(std::make_unique<GradientMap>());
+    kinds.push_back(std::make_unique<Vibrance>(0.4f, -0.3f));
+    kinds.push_back(std::make_unique<ColorBalance>());
+    kinds.push_back(std::make_unique<BlackAndWhite>());
+    kinds.push_back(std::make_unique<PhotoFilter>());
+    kinds.push_back(std::make_unique<Posterize>(6));
+    kinds.push_back(std::make_unique<Threshold>(0.4f));
+    kinds.push_back(std::make_unique<SelectiveColor>());
+    std::vector<AdjustmentKind> expected;
+    for (auto& k : kinds) {
+        expected.push_back(k->kind());
+        doc->cmdInsertTopLevel(doc->topLevelCount(),
+                               std::make_unique<AdjustmentLayer>(std::move(k), "adj"));
+    }
+
+    auto loaded = deserializeDocument(serializeDocument(*doc));
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK_EQ(loaded->topLevelCount(), expected.size() + 1);  // +1 base pixel layer
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        const Layer* l = loaded->topLevelLayers()[i + 1].get();
+        PE_CHECK(l->isAdjustment());
+        PE_CHECK(static_cast<const AdjustmentLayer*>(l)->adjustment().kind() == expected[i]);
+    }
+}
+
+PE_TEST(native_format_accepts_legacy_v4) {
+    // A v4 file (no adjustment/solid records) must still load: patch the version digit + field
+    // of a pixel-only v5 blob down to 4 and confirm the reader accepts it.
+    auto doc = Document::createBlank(Size{16, 16});
+    std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK(blob.size() > 10);
+    blob[5] = std::byte{'4'};  // magic digit "PEDOC4"
+    blob[6] = std::byte{4};    // version u32 little-endian = 4
+    blob[7] = std::byte{0};
+    blob[8] = std::byte{0};
+    blob[9] = std::byte{0};
+    auto loaded = deserializeDocument(blob);
+    PE_CHECK(loaded != nullptr);
+    PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(1));
+    // And an unsupported future version is rejected.
+    blob[6] = std::byte{99};
+    PE_CHECK(deserializeDocument(blob) == nullptr);
+}
+
+PE_TEST(native_format_rejects_bad_adjustment_kind) {
+    // An Invert adjustment record ends with its AdjustmentKind byte (Invert writes no params), so
+    // it's the blob's last byte. Corrupting it to an out-of-range kind must be rejected (no UB).
+    auto doc = Document::createBlank(Size{8, 8});
+    doc->cmdInsertTopLevel(doc->topLevelCount(),
+                           std::make_unique<AdjustmentLayer>(std::make_unique<Invert>(), "inv"));
+    std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK(deserializeDocument(blob) != nullptr);  // valid as-is
+    PE_CHECK_EQ(static_cast<int>(blob.back()), 3);   // Invert kind tag
+    blob.back() = std::byte{0xFF};                   // invalid AdjustmentKind
+    PE_CHECK(deserializeDocument(blob) == nullptr);  // rejected, no UB
 }
 
 PE_TEST(native_format_rejects_off_canvas_content_rect) {

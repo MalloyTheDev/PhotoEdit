@@ -231,6 +231,8 @@ public:
     }
     [[nodiscard]] float hueShiftDegrees() const noexcept { return hueShift_; }
     [[nodiscard]] float saturationScale() const noexcept { return satScale_; }
+    [[nodiscard]] float colorizeHue() const noexcept { return colorizeHue_; }
+    [[nodiscard]] float colorizeSat() const noexcept { return colorizeSat_; }
     [[nodiscard]] float lightness() const noexcept { return lightness_; }
     [[nodiscard]] bool colorize() const noexcept { return colorize_; }
 
@@ -265,6 +267,11 @@ public:
         m_[out][3] = constant;
     }
     void setMonochrome(bool on) noexcept { mono_ = on; }
+    // Read one matrix coefficient: out in 0..2 (R/G/B output row), in in 0..3 (R,G,B,constant).
+    [[nodiscard]] float coeff(int out, int in) const noexcept {
+        return (out < 0 || out > 2 || in < 0 || in > 3) ? 0.0f : m_[out][in];
+    }
+    [[nodiscard]] bool monochrome() const noexcept { return mono_; }
 
     [[nodiscard]] AdjustmentKind kind() const noexcept override {
         return AdjustmentKind::ChannelMixer;
@@ -352,6 +359,9 @@ public:
         color1_ = c1;
     }
     void setReverse(bool r) noexcept { reverse_ = r; }
+    [[nodiscard]] Rgbaf color0() const noexcept { return color0_; }
+    [[nodiscard]] Rgbaf color1() const noexcept { return color1_; }
+    [[nodiscard]] bool reverse() const noexcept { return reverse_; }
 
     [[nodiscard]] AdjustmentKind kind() const noexcept override {
         return AdjustmentKind::GradientMap;
@@ -413,6 +423,9 @@ public:
     void setColor(Rgbaf c) noexcept { color_ = sanitizeColor(c); }
     void setDensity(float d) noexcept { density_ = clamp01(d); }
     void setPreserveLuminosity(bool on) noexcept { preserveLum_ = on; }
+    [[nodiscard]] Rgbaf color() const noexcept { return color_; }
+    [[nodiscard]] float density() const noexcept { return density_; }
+    [[nodiscard]] bool preserveLuminosity() const noexcept { return preserveLum_; }
 
     [[nodiscard]] AdjustmentKind kind() const noexcept override {
         return AdjustmentKind::PhotoFilter;
