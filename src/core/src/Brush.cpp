@@ -161,8 +161,20 @@ std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& st
                     // and composite over the destination at the brush coverage.
                     const int lx = static_cast<int>(idx % static_cast<std::size_t>(kTileSize));
                     const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
-                    const Rgbaf srcF =
-                        toFloat(store.pixel(baseX + lx - cloneOffX, baseY + ly - cloneOffY));
+                    // Compute the source coordinate in int64 and gate its range: cloneStroke is a
+                    // public engine entry callable directly with an arbitrary offset, so
+                    // baseX+lx-cloneOffX must not be allowed to signed-overflow int. Outside a sane
+                    // bound the source has no content anyway, so read transparent.
+                    constexpr int64_t kCloneSampleBound = 1 << 26;  // ~67M, well within int
+                    const int64_t sx =
+                        static_cast<int64_t>(baseX) + lx - static_cast<int64_t>(cloneOffX);
+                    const int64_t sy =
+                        static_cast<int64_t>(baseY) + ly - static_cast<int64_t>(cloneOffY);
+                    Rgbaf srcF{};
+                    if (sx > -kCloneSampleBound && sx < kCloneSampleBound &&
+                        sy > -kCloneSampleBound && sy < kCloneSampleBound) {
+                        srcF = toFloat(store.pixel(static_cast<int>(sx), static_cast<int>(sy)));
+                    }
                     if (blendMode == BlendMode::Normal) {
                         // Straight-alpha source-over WITHOUT clamping the source/backdrop RGB, so
                         // cloning faithfully reproduces HDR/super-white values on an F32 layer

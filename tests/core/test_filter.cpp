@@ -5,6 +5,8 @@
 #include "pe/core/Selection.hpp"
 #include "pe_test.hpp"
 
+#include <cmath>
+#include <limits>
 #include <vector>
 
 using namespace pe;
@@ -29,6 +31,24 @@ PE_TEST(filter_gaussian_zero_sigma_is_identity) {
     std::vector<Rgbaf> dst(src.size());
     gaussianBlur(src, dst, 4, 1, 0.0f);
     for (std::size_t i = 0; i < src.size(); ++i) PE_CHECK_NEAR(dst[i].r, src[i].r);
+}
+
+PE_TEST(filter_gaussian_nonfinite_or_huge_sigma_is_safe) {
+    // NaN/Inf sigma must never reach the (int)ceil(3*sigma) conversion (out-of-range float->int =
+    // UB; the old `sigma <= 0` test let them through). A huge finite sigma must not overflow
+    // 2*radius+1 or run unbounded — the radius is capped inside the kernel.
+    auto src = grayRow({0.0f, 1.0f, 0.0f, 1.0f, 0.0f});
+    std::vector<Rgbaf> dst(src.size());
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    gaussianBlur(src, dst, 5, 1, nan);  // -> identity copy
+    for (std::size_t i = 0; i < src.size(); ++i) PE_CHECK_NEAR(dst[i].r, src[i].r);
+    gaussianBlur(src, dst, 5, 1, inf);  // -> identity copy
+    for (std::size_t i = 0; i < src.size(); ++i) PE_CHECK_NEAR(dst[i].r, src[i].r);
+    gaussianBlur(src, dst, 5, 1, 1e9f);  // huge finite: bounded radius, terminates, stays finite
+    for (const Rgbaf& p : dst) PE_CHECK(std::isfinite(p.r));
+    unsharpMask(src, dst, 5, 1, inf, 1.0f, 0.0f);  // radius forwarded as sigma -> safe
+    for (const Rgbaf& p : dst) PE_CHECK(std::isfinite(p.r));
 }
 
 PE_TEST(filter_box_radius_zero_is_identity) {
