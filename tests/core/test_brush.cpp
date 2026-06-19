@@ -591,3 +591,142 @@ PE_TEST(clone_preserves_superwhite_on_f32) {
     doc->history().push(std::move(cmd));
     PE_CHECK(pl->tilesF().pixel(20, 16).r > 3.5f);  // HDR value preserved, not clamped to 1.0
 }
+
+// ---- Spot Healing brush ----
+
+PE_TEST(heal_removes_blemish_on_uniform_background) {
+    // A solid red field with a small green blemish. Healing over the blemish must dissolve it into
+    // the surrounding red; pixels far from the stroke are untouched; undo restores the green
+    // exactly.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{220, 30, 30, 255});  // red field
+    pl->tiles().fillRect(Rect{28, 28, 8, 8}, Rgba8{30, 220, 30, 255});  // green blemish
+    const Rgba8 blemishBefore = pl->tiles().pixel(32, 32);
+    const Rgba8 farBefore = pl->tiles().pixel(2, 2);
+    PE_CHECK_EQ(blemishBefore.g, static_cast<uint8_t>(220));  // genuinely green to start
+
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};  // one dab centred on the blemish
+    auto cmd = healStroke(*doc, base, hardBrush(20, 1.0f), pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    // After: the blemish centre now reads like the surrounding red (green gone, red restored).
+    const Rgba8 healed = pl->tiles().pixel(32, 32);
+    PE_CHECK(healed.r > 180);
+    PE_CHECK(healed.g < 80);
+    PE_CHECK_EQ(pl->tiles().pixel(2, 2), farBefore);  // far from the stroke: unchanged
+
+    doc->history().undo();  // exact restore: the blemish returns
+    PE_CHECK_EQ(pl->tiles().pixel(32, 32), blemishBefore);
+}
+
+PE_TEST(heal_follows_surrounding_gradient) {
+    // A horizontal gray ramp with a black blemish square. Healing must fill the hole by
+    // interpolating the surrounding gradient (a harmonic fill of a near-linear boundary), NOT a
+    // flat average: the filled value rises left-to-right across the patch and the centre lands near
+    // the local ramp.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    for (int x = 0; x < 64; ++x) {
+        const auto v = static_cast<uint8_t>(std::min(255, x * 4));  // ramp 0..252
+        pl->tiles().fillRect(Rect{x, 0, 1, 64}, Rgba8{v, v, v, 255});
+    }
+    pl->tiles().fillRect(Rect{28, 28, 8, 8}, Rgba8{0, 0, 0, 255});  // black blemish on the ramp
+    PE_CHECK_EQ(pl->tiles().pixel(32, 32).r, static_cast<uint8_t>(0));
+
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    auto cmd = healStroke(*doc, base, hardBrush(20, 1.0f), pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    const int leftR = pl->tiles().pixel(29, 32).r;
+    const int midR = pl->tiles().pixel(32, 32).r;
+    const int rightR = pl->tiles().pixel(35, 32).r;
+    PE_CHECK(midR > 100 && midR < 160);  // ~ the local ramp value (~128), not the black it replaced
+    PE_CHECK(leftR < rightR);  // the fill follows the gradient (darker left, lighter right)
+}
+
+PE_TEST(heal_honors_selection) {
+    // A blemish that sits OUTSIDE an active selection cannot be healed: every painted pixel is
+    // gated back to its original, so the stroke deposits nothing (nullptr).
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{220, 30, 30, 255});
+    pl->tiles().fillRect(Rect{44, 28, 8, 8}, Rgba8{30, 220, 30, 255});  // blemish on the right
+
+    Selection sel;
+    sel.selectRect(Rect{0, 0, 16, 64});  // only the far-left strip is writable (not the blemish)
+    std::vector<StrokePoint> pts = {{{48, 32}, 1.0f}};
+    PE_CHECK(healStroke(*doc, base, hardBrush(20, 1.0f), pts, &sel) == nullptr);
+    PE_CHECK_EQ(pl->tiles().pixel(48, 32).g, static_cast<uint8_t>(220));  // blemish untouched
+
+    // With the blemish inside the selection it heals normally.
+    Selection sel2;
+    sel2.selectRect(Rect{32, 0, 32, 64});  // right half writable (contains the blemish)
+    auto cmd = healStroke(*doc, base, hardBrush(20, 1.0f), pts, &sel2);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(pl->tiles().pixel(48, 32).g < 80);  // healed
+}
+
+PE_TEST(heal_empty_or_oversize_stroke_deposits_nothing) {
+    // No coverage (empty / off-canvas path) and a non-pixel target produce no command, and a brush
+    // so large its inflated region exceeds the heal budget bails out instead of allocating.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{128, 128, 128, 255});
+
+    std::vector<StrokePoint> empty;
+    PE_CHECK(healStroke(*doc, base, hardBrush(16, 1.0f), empty) == nullptr);
+    std::vector<StrokePoint> absurd = {{{1e30f, 1e30f}, 1.0f}};
+    PE_CHECK(healStroke(*doc, base, hardBrush(16, 1.0f), absurd) == nullptr);
+
+    // A huge brush on a large canvas: the inflated region is over the heal budget -> nullptr.
+    auto big = Document::createBlank(Size{2000, 2000});
+    const LayerId bigBase = big->activeLayer();
+    std::vector<StrokePoint> center = {{{1000, 1000}, 1.0f}};
+    PE_CHECK(healStroke(*big, bigBase, hardBrush(1800, 1.0f), center) == nullptr);
+}
+
+PE_TEST(heal_on_16bit_layer) {
+    // The region bake is depth-generic: healing a blemish on a 16-bit layer dissolves it just the
+    // same (the float solve writes back into the U16 store).
+    auto doc = Document::createBlank(Size{64, 64}, ColorMode::RGB, BitDepth::U16);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles16().fillRect(Rect{0, 0, 64, 64}, Rgba16{56000, 8000, 8000, 65535});  // red field
+    pl->tiles16().fillRect(Rect{28, 28, 8, 8}, Rgba16{8000, 56000, 8000, 65535});  // green blemish
+
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    auto cmd = healStroke(*doc, base, hardBrush(20, 1.0f), pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(pl->tiles16().pixel(32, 32).r > 40000);  // healed back toward red
+    PE_CHECK(pl->tiles16().pixel(32, 32).g < 24000);
+}
+
+PE_TEST(controller_heal_mode_removes_blemish) {
+    // Drive Heal through PaintToolController (the path the Spot Healing tool uses): begin/end over
+    // a blemish dissolves it and commits exactly one undoable command.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{220, 30, 30, 255});
+    pl->tiles().fillRect(Rect{28, 28, 8, 8}, Rgba8{30, 220, 30, 255});
+
+    PaintToolController c;
+    c.setBrush(hardBrush(24, 1.0f));
+    c.setMode(PaintToolController::Mode::Heal);
+    PE_CHECK(c.begin(*doc, StrokePoint{{32, 32}, 1.0f}));
+    PE_CHECK(c.end(*doc));
+    PE_CHECK(pl->tiles().pixel(32, 32).g < 80);  // blemish dissolved
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(32, 32).g,
+                static_cast<uint8_t>(220));  // one undo step restores it
+}

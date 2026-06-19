@@ -424,6 +424,136 @@ std::unique_ptr<PaintCommand> sharpenStroke(Document& doc, LayerId layerId, cons
         selection);
 }
 
+// ---- Spot Healing brush ----
+// See Brush.hpp. The painted pixels are refilled by a bounded Gauss-Seidel solve of Laplace's
+// equation with the surrounding (unpainted) pixels as the Dirichlet boundary, run in premultiplied
+// alpha. kMaxHealRegionPixels bounds the inflated region so both the working memory and the
+// iteration cost stay bounded (a brush too large to heal returns nullptr, like an over-budget
+// bake).
+constexpr int64_t kMaxHealRegionPixels = 2'000'000;
+
+std::unique_ptr<PaintCommand> healStroke(Document& doc, LayerId layerId, const BrushSettings& in,
+                                         std::span<const StrokePoint> points,
+                                         const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    if (points.empty()) return nullptr;
+
+    const float opacity = clamp01(in.opacity);
+    const CoverageMap cov = buildCoverage(in, points);
+    const Rect spot = coverageBounds(cov);
+    if (spot.isEmpty()) return nullptr;  // empty / no-coverage stroke heals nothing
+
+    // Inflate the spot to include a ring of surrounding source pixels (the diffusion boundary),
+    // clamped to the canvas. The margin grows with the spot so a bigger hole gets a bigger ring.
+    const int maxDim = std::max(spot.width, spot.height);
+    const int margin = std::clamp(maxDim / 5 + 3, 3, 48);
+    const Rect region =
+        Rect{spot.x - margin, spot.y - margin, spot.width + 2 * margin, spot.height + 2 * margin}
+            .intersected(doc.canvasBounds());
+    if (region.isEmpty()) return nullptr;  // spot entirely off-canvas
+    const int64_t area = static_cast<int64_t>(region.width) * static_cast<int64_t>(region.height);
+    if (area > kMaxHealRegionPixels) return nullptr;  // brush too large to heal
+
+    const int left = region.left();
+    const int top = region.top();
+    // Iterations scale with the spot size (boundary info propagates ~1px per sweep) but are capped,
+    // so a large spot stays bounded — it under-fills toward the surrounding mean, never garbage.
+    const int iterations = std::clamp(maxDim / 2 + 8, 8, 64);
+
+    return bakePixelEditRegion(
+        doc, layerId, "Spot Healing Brush", region,
+        [&cov, opacity, left, top, iterations](std::span<Rgbaf> img, int w, int h) {
+            const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+            std::vector<float> heal(n, 0.0f);      // brush coverage (capped at opacity) per pixel
+            std::vector<std::uint8_t> hole(n, 0);  // 1 = painted pixel to refill (unknown)
+            std::vector<Rgbaf> p(n);               // premultiplied working buffer for the solve
+
+            // Premultiply, and accumulate the mean of the surrounding (known) pixels.
+            Rgbaf knownSum{};
+            int64_t knownCount = 0;
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const std::size_t i =
+                        static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                        static_cast<std::size_t>(x);
+                    const Rgbaf& o = img[i];
+                    p[i] = Rgbaf{o.a * o.r, o.a * o.g, o.a * o.b, o.a};  // premultiply
+                    const float c = std::min(coverageAt(cov, left + x, top + y), opacity);
+                    heal[i] = c;
+                    if (c > 0.0f) {
+                        hole[i] = 1;
+                    } else {
+                        knownSum.r += p[i].r;
+                        knownSum.g += p[i].g;
+                        knownSum.b += p[i].b;
+                        knownSum.a += p[i].a;
+                        ++knownCount;
+                    }
+                }
+            }
+            if (knownCount == 0) return;  // no surrounding context: leave the pixels untouched
+            const float invK = 1.0f / static_cast<float>(knownCount);
+            const Rgbaf mean{knownSum.r * invK, knownSum.g * invK, knownSum.b * invK,
+                             knownSum.a * invK};
+            for (std::size_t i = 0; i < n; ++i) {
+                if (hole[i] != 0) p[i] = mean;  // seed the hole with the surrounding mean
+            }
+
+            // Gauss-Seidel relaxation: each hole pixel relaxes to the mean of its 4-neighbours
+            // (known neighbours hold the fixed boundary value). Alternate scan direction per sweep.
+            for (int it = 0; it < iterations; ++it) {
+                const bool fwd = (it & 1) == 0;
+                for (int yy = 0; yy < h; ++yy) {
+                    const int y = fwd ? yy : (h - 1 - yy);
+                    for (int xx = 0; xx < w; ++xx) {
+                        const int x = fwd ? xx : (w - 1 - xx);
+                        const std::size_t i =
+                            static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                            static_cast<std::size_t>(x);
+                        if (hole[i] == 0) continue;
+                        Rgbaf acc{};
+                        int cnt = 0;
+                        const auto add = [&](std::size_t j) {
+                            acc.r += p[j].r;
+                            acc.g += p[j].g;
+                            acc.b += p[j].b;
+                            acc.a += p[j].a;
+                            ++cnt;
+                        };
+                        if (x > 0) add(i - 1);
+                        if (x < w - 1) add(i + 1);
+                        if (y > 0) add(i - static_cast<std::size_t>(w));
+                        if (y < h - 1) add(i + static_cast<std::size_t>(w));
+                        if (cnt > 0) {
+                            const float inv = 1.0f / static_cast<float>(cnt);
+                            p[i] = Rgbaf{acc.r * inv, acc.g * inv, acc.b * inv, acc.a * inv};
+                        }
+                    }
+                }
+            }
+
+            // Unpremultiply each filled pixel and blend the original toward it by the brush
+            // coverage.
+            for (std::size_t i = 0; i < n; ++i) {
+                if (hole[i] == 0) continue;
+                const Rgbaf& pm = p[i];
+                const float fa = clamp01(pm.a);
+                Rgbaf fill{0.0f, 0.0f, 0.0f, fa};
+                if (pm.a > 1e-4f) {
+                    fill.r = clamp01(pm.r / pm.a);
+                    fill.g = clamp01(pm.g / pm.a);
+                    fill.b = clamp01(pm.b / pm.a);
+                }
+                const Rgbaf o = img[i];
+                const float c = heal[i];
+                img[i] = Rgbaf{o.r + (fill.r - o.r) * c, o.g + (fill.g - o.g) * c,
+                               o.b + (fill.b - o.b) * c, o.a + (fill.a - o.a) * c};
+            }
+        },
+        selection);
+}
+
 PaintCommand::PaintCommand(LayerId layer, Rect dirtyRect, std::vector<Delta> deltas,
                            std::string name)
     : layer_(layer),
