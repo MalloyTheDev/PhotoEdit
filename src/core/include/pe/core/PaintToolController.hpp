@@ -32,7 +32,7 @@ class PaintCommand;
 // docs/systems/09-tool-system.md.
 class PaintToolController {
 public:
-    enum class Mode { Brush, Eraser, Dodge, Burn, Clone };
+    enum class Mode { Brush, Eraser, Dodge, Burn, Clone, Blur };
 
     PaintToolController() = default;
     // Out-of-line so unique_ptr<PaintCommand> only needs a forward declaration here.

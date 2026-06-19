@@ -386,6 +386,96 @@ PE_TEST(clone_on_16bit_layer) {
     PE_CHECK(px.r > 55000 && px.g < 2000 && px.a > 60000);  // cloned 16-bit red
 }
 
+PE_TEST(blur_softens_hard_edge_and_undo_restores) {
+    // A hard black|white vertical edge at x=32. A blur stroke across it must soften the edge:
+    // pixels right at the boundary pick up intermediate gray values that did not exist before.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 32, 64}, Rgba8{0, 0, 0, 255});         // left half black
+    pl->tiles().fillRect(Rect{32, 0, 32, 64}, Rgba8{255, 255, 255, 255});  // right half white
+
+    // Before: every pixel is pure black or pure white (a hard edge, no intermediate values).
+    PE_CHECK_EQ(pl->tiles().pixel(31, 32).r, static_cast<uint8_t>(0));
+    PE_CHECK_EQ(pl->tiles().pixel(32, 32).r, static_cast<uint8_t>(255));
+    const Rgba8 farLeft = pl->tiles().pixel(2, 32);  // well outside the brushed band
+
+    std::vector<StrokePoint> pts = {{{32, 8}, 1.0f}, {{32, 56}, 1.0f}};  // drag down the edge
+    auto cmd = blurStroke(*doc, base, hardBrush(20, 1.0f), pts);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    // After: a pixel just left of the edge is lightened above black, just right is darkened below
+    // white — i.e. intermediate gray appeared where the edge used to be crisp.
+    const int leftR = pl->tiles().pixel(31, 32).r;
+    const int rightR = pl->tiles().pixel(32, 32).r;
+    PE_CHECK(leftR > 0 && leftR < 255);
+    PE_CHECK(rightR > 0 && rightR < 255);
+    PE_CHECK_EQ(pl->tiles().pixel(2, 32), farLeft);  // far from the stroke: unchanged
+
+    doc->history().undo();  // exact restore: the edge is hard again
+    PE_CHECK_EQ(pl->tiles().pixel(31, 32).r, static_cast<uint8_t>(0));
+    PE_CHECK_EQ(pl->tiles().pixel(32, 32).r, static_cast<uint8_t>(255));
+}
+
+PE_TEST(blur_honors_selection) {
+    // A hard black|white edge with only the left half selected. A blur stroke across the edge must
+    // soften only inside the selection; pixels outside it stay exactly black or white.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 32, 64}, Rgba8{0, 0, 0, 255});
+    pl->tiles().fillRect(Rect{32, 0, 32, 64}, Rgba8{255, 255, 255, 255});
+
+    Selection sel;
+    sel.selectRect(Rect{0, 0, 32, 64});  // only the left (black) half is writable
+    std::vector<StrokePoint> pts = {{{32, 8}, 1.0f}, {{32, 56}, 1.0f}};
+    auto cmd = blurStroke(*doc, base, hardBrush(20, 1.0f), pts, &sel);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    PE_CHECK(pl->tiles().pixel(31, 32).r > 0);  // inside selection -> softened
+    PE_CHECK_EQ(pl->tiles().pixel(40, 32).r,
+                static_cast<uint8_t>(255));  // outside -> untouched white
+}
+
+PE_TEST(blur_empty_stroke_deposits_nothing) {
+    // A blur stroke whose path is empty (or off-canvas) has no coverage, so no command is produced.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{128, 128, 128, 255});
+
+    std::vector<StrokePoint> empty;
+    PE_CHECK(blurStroke(*doc, base, hardBrush(16, 1.0f), empty) == nullptr);
+
+    // A finite-but-absurd off-canvas point also yields no coverage -> nullptr (no allocation
+    // blowup).
+    std::vector<StrokePoint> absurd = {{{1e30f, 1e30f}, 1.0f}};
+    PE_CHECK(blurStroke(*doc, base, hardBrush(16, 1.0f), absurd) == nullptr);
+}
+
+PE_TEST(controller_blur_mode_softens_edge) {
+    // Drive Blur through PaintToolController (the path the Blur tool uses): begin/end across a hard
+    // edge softens it, and it commits exactly one undoable command.
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 32, 64}, Rgba8{0, 0, 0, 255});
+    pl->tiles().fillRect(Rect{32, 0, 32, 64}, Rgba8{255, 255, 255, 255});
+
+    PaintToolController c;
+    c.setBrush(hardBrush(24, 1.0f));
+    c.setMode(PaintToolController::Mode::Blur);
+    PE_CHECK(c.begin(*doc, StrokePoint{{32, 32}, 1.0f}));
+    PE_CHECK(c.end(*doc));
+    const int leftR = pl->tiles().pixel(31, 32).r;
+    PE_CHECK(leftR > 0 && leftR < 255);  // softened at the edge
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(31, 32).r, static_cast<uint8_t>(0));  // one undo step restores it
+}
+
 PE_TEST(clone_preserves_superwhite_on_f32) {
     // Cloning an HDR (>1.0) source onto a transparent F32 layer must reproduce the value, not clip
     // it to 1.0 (Clone uses an unclamped straight-alpha composite for Normal blend).

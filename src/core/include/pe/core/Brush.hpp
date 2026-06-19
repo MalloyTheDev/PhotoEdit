@@ -137,4 +137,16 @@ private:
                                                         int offsetX, int offsetY,
                                                         const Selection* selection = nullptr);
 
+// Blur brush: locally blurs the EXISTING pixels under the stroke, weighted by brush coverage.
+// Unlike the per-pixel ops above, blurring needs a neighborhood, so this runs ONE region bake over
+// the stroke's bounding box (the same reversible tile-delta machinery as destructive filters): the
+// region is gaussian-blurred once and each pixel is lerped from its original toward its blurred
+// value by its accumulated brush coverage (capped at the stroke opacity). Honors the selection
+// (effective strength is brushCoverage * selectionCoverage). Returns nullptr if not a pixel layer,
+// the stroke has no coverage, or the bounding region is over the engine's per-op budget.
+[[nodiscard]] std::unique_ptr<PaintCommand> blurStroke(Document& doc, LayerId layerId,
+                                                       const BrushSettings& settings,
+                                                       std::span<const StrokePoint> points,
+                                                       const Selection* selection = nullptr);
+
 }  // namespace pe

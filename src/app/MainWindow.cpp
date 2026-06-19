@@ -403,7 +403,7 @@ void MainWindow::buildToolBar() {
          {"eraser", "Eraser", Tool::Eraser, "E"},
          {"blend", "Gradient", Tool::Gradient, "G"},
          {"paint-bucket", "Paint Bucket", Tool::Bucket, ""}},
-        {{"droplet", "Blur", Tool::Inactive, ""}, {"sun", "Dodge", Tool::Dodge, "O"}},
+        {{"droplet", "Blur", Tool::Blur, ""}, {"sun", "Dodge", Tool::Dodge, "O"}},
         {{"pen-tool", "Pen", Tool::Inactive, "P"},
          {"type", "Type", Tool::Type, "T"},
          {"mouse-pointer-2", "Path Selection", Tool::Inactive, "A"},
@@ -434,7 +434,7 @@ void MainWindow::buildToolBar() {
             const QString label = QString::fromUtf8(def.label);
             OptKind kind = OptKind::None;
             if (def.tool == Tool::Brush || def.tool == Tool::Eraser || def.tool == Tool::Dodge ||
-                def.tool == Tool::Clone) {
+                def.tool == Tool::Clone || def.tool == Tool::Blur) {
                 kind = OptKind::Brush;  // size/opacity drive the brush footprint + strength
             } else if (std::string_view(def.icon) == "move") {
                 kind = OptKind::Move;

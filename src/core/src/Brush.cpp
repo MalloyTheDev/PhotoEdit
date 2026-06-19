@@ -2,6 +2,7 @@
 
 #include "pe/core/BlendMode.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/Filter.hpp"  // gaussianBlur kernel + bakePixelEditRegion (Blur brush)
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
 
@@ -9,6 +10,7 @@
 #include <cmath>
 #include <map>
 #include <utility>
+#include <vector>
 
 namespace pe {
 
@@ -200,19 +202,13 @@ std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& st
     return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), std::move(name));
 }
 
-std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const BrushSettings& in,
-                                          Rgbaf color, std::span<const StrokePoint> points,
-                                          PaintOp op, std::string name, int cloneOffX,
-                                          int cloneOffY, const Selection* selection) {
-    Layer* layer = doc.findLayer(layerId);
-    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
-    if (points.empty()) return nullptr;
-    auto* pl = static_cast<PixelLayer*>(layer);
-
+// Rasterize a brush stroke (path of points + BrushSettings) into a per-tile coverage map. Shared by
+// every brush op (Paint/Erase/Dodge/Burn/Clone via flushStroke, and Blur via the region bake): the
+// coverage in [0,1] is the per-pixel brush footprint along the path, before any op-specific blend.
+CoverageMap buildCoverage(const BrushSettings& in, std::span<const StrokePoint> points) {
     float diameter = std::isfinite(in.diameter) ? in.diameter : 20.0f;
     diameter = std::clamp(diameter, 0.1f, kMaxBrushDiameter);
     const float hardness = clamp01(in.hardness);
-    const float opacity = clamp01(in.opacity);
     const float flow = clamp01(in.flow);
     const float spacing = std::max(0.01f, in.spacing);
     const float step = std::max(1.0f, spacing * diameter);
@@ -267,6 +263,20 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
         }
         distSinceLast += (segLen - consumed);
     }
+    return cov;
+}
+
+std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const BrushSettings& in,
+                                          Rgbaf color, std::span<const StrokePoint> points,
+                                          PaintOp op, std::string name, int cloneOffX,
+                                          int cloneOffY, const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    if (points.empty()) return nullptr;
+    auto* pl = static_cast<PixelLayer*>(layer);
+
+    const float opacity = clamp01(in.opacity);
+    const CoverageMap cov = buildCoverage(in, points);
 
     // Flush the accumulated coverage into native-depth tile deltas (one composite,
     // capped at opacity), editing the layer's store at its own bit depth.
@@ -284,7 +294,88 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
     }
 }
 
+// ---- Blur brush ----
+// The Blur brush cannot use the per-pixel flushStroke path because blurring needs a NEIGHBORHOOD.
+// Instead it rasterizes the stroke coverage (buildCoverage), takes the pixel-tight bounding box of
+// nonzero coverage, and runs ONE region bake (bakePixelEditRegion, the same reversible tile-delta
+// machinery behind destructive filters): the region is gaussian-blurred once and each pixel is
+// blended toward its blurred value by its accumulated brush coverage (capped at the stroke
+// opacity). The bake applies any active selection on top (lerp toward original by 1-coverage), so
+// the effective strength is brushCoverage * selectionCoverage — the selection is honored for free.
+
+// Fixed blur kernel for the brush (a small, soft local blur). Matches the task's sigma ~= 2.
+constexpr float kBlurSigma = 2.0f;
+
+// Pixel-tight bounding box (document space) of all nonzero coverage; empty if the stroke is empty.
+Rect coverageBounds(const CoverageMap& cov) {
+    Rect bb{};
+    for (const auto& [key, buf] : cov) {
+        const int baseX = key.first * kTileSize;
+        const int baseY = key.second * kTileSize;
+        for (int ly = 0; ly < kTileSize; ++ly) {
+            for (int lx = 0; lx < kTileSize; ++lx) {
+                if (buf[static_cast<std::size_t>(ly) * kTileSize + static_cast<std::size_t>(lx)] >
+                    0.0f) {
+                    const Rect px{baseX + lx, baseY + ly, 1, 1};
+                    bb = bb.united(px);
+                }
+            }
+        }
+    }
+    return bb;
+}
+
+// Look up the accumulated coverage at document-space (x, y); 0 outside touched tiles.
+float coverageAt(const CoverageMap& cov, int x, int y) {
+    const int col = floorDiv(x, kTileSize);
+    const int row = floorDiv(y, kTileSize);
+    const auto it = cov.find(CoverageKey{col, row});
+    if (it == cov.end()) return 0.0f;
+    const int lx = x - col * kTileSize;
+    const int ly = y - row * kTileSize;
+    return it->second[static_cast<std::size_t>(ly) * kTileSize + static_cast<std::size_t>(lx)];
+}
+
 }  // namespace
+
+std::unique_ptr<PaintCommand> blurStroke(Document& doc, LayerId layerId, const BrushSettings& in,
+                                         std::span<const StrokePoint> points,
+                                         const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    if (points.empty()) return nullptr;
+
+    const float opacity = clamp01(in.opacity);
+    const CoverageMap cov = buildCoverage(in, points);
+    const Rect bb = coverageBounds(cov);
+    if (bb.isEmpty()) return nullptr;  // empty / no-coverage stroke deposits nothing
+
+    // Blend each pixel toward its gaussian-blurred value by the brush coverage (capped at the
+    // stroke opacity). The store is at its pre-stroke (S0) state during the bake, so the blur is
+    // computed from the original pixels — no feedback across rebuilds of a live preview.
+    const int left = bb.left();
+    const int top = bb.top();
+    return bakePixelEditRegion(
+        doc, layerId, "Blur Brush", bb,
+        [&cov, opacity, left, top](std::span<Rgbaf> img, int w, int h) {
+            std::vector<Rgbaf> blurred(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+            gaussianBlur(img, blurred, w, h, kBlurSigma);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const float c = std::min(coverageAt(cov, left + x, top + y), opacity);
+                    if (c <= 0.0f) continue;
+                    const std::size_t i =
+                        static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                        static_cast<std::size_t>(x);
+                    const Rgbaf o = img[i];
+                    const Rgbaf b = blurred[i];
+                    img[i] = Rgbaf{o.r + (b.r - o.r) * c, o.g + (b.g - o.g) * c,
+                                   o.b + (b.b - o.b) * c, o.a + (b.a - o.a) * c};
+                }
+            }
+        },
+        selection);
+}
 
 PaintCommand::PaintCommand(LayerId layer, Rect dirtyRect, std::vector<Delta> deltas,
                            std::string name)

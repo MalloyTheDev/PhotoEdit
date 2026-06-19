@@ -55,6 +55,7 @@ public:
         Type,
         Dodge,  // tone brush (lighten); Alt during the stroke burns (darkens) instead
         Clone,  // clone stamp; Alt-click sets the source, then drag clones from it
+        Blur,   // blur brush; drag to locally soften existing pixels under the stroke
         Eyedropper,
         Inactive
     };
