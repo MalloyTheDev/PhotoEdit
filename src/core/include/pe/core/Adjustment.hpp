@@ -105,11 +105,28 @@ public:
     // is read-only and therefore safe for the future multithreaded compositor.
     Levels() { rebuild(); }
 
-    void setInputBlack(float v) { inBlack_ = clamp01(v), rebuild(); }
-    void setInputWhite(float v) { inWhite_ = clamp01(v), rebuild(); }
-    void setGamma(float g) { gamma_ = g, rebuild(); }
-    void setOutputBlack(float v) { outBlack_ = clamp01(v), rebuild(); }
-    void setOutputWhite(float v) { outWhite_ = clamp01(v), rebuild(); }
+    void setInputBlack(float v) {
+        inBlack_ = clamp01(v);
+        rebuild();
+    }
+    void setInputWhite(float v) {
+        inWhite_ = clamp01(v);
+        rebuild();
+    }
+    // Gamma is clamped to a sane range so a stray 0/negative can't divide by zero or
+    // emit NaN, and absurd values can't produce a degenerate LUT.
+    void setGamma(float g) {
+        gamma_ = std::clamp(g, kMinGamma, kMaxGamma);
+        rebuild();
+    }
+    void setOutputBlack(float v) {
+        outBlack_ = clamp01(v);
+        rebuild();
+    }
+    void setOutputWhite(float v) {
+        outWhite_ = clamp01(v);
+        rebuild();
+    }
 
     [[nodiscard]] AdjustmentKind kind() const noexcept override { return AdjustmentKind::Levels; }
     [[nodiscard]] std::string name() const override { return "Levels"; }
@@ -119,6 +136,9 @@ public:
     }
 
     [[nodiscard]] float mapChannel(float v) const noexcept;  // reference (analytic)
+
+    static constexpr float kMinGamma = 0.1f;
+    static constexpr float kMaxGamma = 9.99f;
 
 private:
     void rebuild();

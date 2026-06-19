@@ -183,6 +183,24 @@ void MainWindow::buildMenuBar() {
                               &doc_->selection());
                       });
         });
+        adj->addAction(QStringLiteral("Levels..."), this, [this, runEffect] {
+            runEffect(QStringLiteral("Levels"),
+                      {{QStringLiteral("Input Black"), 0.0, 1.0, 0.0, 2},
+                       {QStringLiteral("Input White"), 0.0, 1.0, 1.0, 2},
+                       {QStringLiteral("Gamma"), 0.1, 9.99, 1.0, 2},
+                       {QStringLiteral("Output Black"), 0.0, 1.0, 0.0, 2},
+                       {QStringLiteral("Output White"), 0.0, 1.0, 1.0, 2}},
+                      [this](const std::vector<double>& v) {
+                          pe::Levels lv;
+                          lv.setInputBlack(static_cast<float>(v[0]));
+                          lv.setInputWhite(static_cast<float>(v[1]));
+                          lv.setGamma(static_cast<float>(v[2]));
+                          lv.setOutputBlack(static_cast<float>(v[3]));
+                          lv.setOutputWhite(static_cast<float>(v[4]));
+                          return pe::applyAdjustment(*doc_, doc_->activeLayer(), lv,
+                                                     &doc_->selection());
+                      });
+        });
         adj->addAction(QStringLiteral("Vibrance..."), this, [this, runEffect] {
             runEffect(QStringLiteral("Vibrance"),
                       {{QStringLiteral("Vibrance"), -1.0, 1.0, 0.0, 2},
