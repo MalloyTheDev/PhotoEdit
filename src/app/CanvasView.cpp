@@ -4,6 +4,7 @@
 #include "pe/core/Brush.hpp"  // pe::PaintCommand (move-tool preview command)
 #include "pe/core/CanvasRenderer.hpp"
 #include "pe/core/Commands.hpp"
+#include "pe/core/Compositor.hpp"  // kMaxCompositeImagePixels (extreme-zoom-out downscale threshold)
 #include "pe/core/Document.hpp"
 #include "pe/core/Filter.hpp"  // pe::moveLayerContent
 #include "pe/core/PixelBuffer.hpp"
@@ -282,25 +283,42 @@ void CanvasView::paintEvent(QPaintEvent*) {
     painter.setRenderHint(QPainter::SmoothPixmapTransform, view_.zoom() < 1.0);
     painter.setTransform(toQTransform(view_.docToView()));
 
-    // Composite ONLY the visible canvas region through the tile cache: a huge canvas never
-    // overflows the whole-image composite budget, and panning recomposites just the
-    // newly-exposed tiles. (At extreme zoom-out, a >64 MP visible region exceeds the
-    // renderer's per-call budget and renderRegion returns empty — a known limitation pending
-    // mipmapped display; the canvas simply shows the pasteboard until zoomed back in.)
+    // Composite ONLY the visible canvas region: a huge canvas never composites the whole image,
+    // and panning recomposites just the newly-exposed tiles. Within the composite budget this goes
+    // through the LRU tile cache; beyond it (extreme zoom-out, a >64 MP visible region) we
+    // composite a bounded downscale sized to ~the viewport and stretch it to fill — so the canvas
+    // no longer blanks when fully zoomed out.
     const pe::Rect canvas{0, 0, cs.width, cs.height};
     const pe::Rect vis = view_.visibleDocRect(pe::Size{width(), height()}).intersected(canvas);
     if (!vis.isEmpty()) {
-        // Keep the cache at least as large as the visible tile span (plus a one-viewport pan
-        // margin) so no visible tile evicts another mid-frame — otherwise a zoomed-out view
-        // spanning more than the default budget would recomposite every tile every paint.
-        const std::size_t visTiles = static_cast<std::size_t>(pe::tilesForRect(vis).count());
-        renderer_->setCacheBudgetTiles(
-            std::max<std::size_t>(pe::kDefaultDisplayCacheTiles, visTiles * 2 + 16));
-        const pe::PixelBuffer buf = renderer_->renderRegion(vis);  // alive through drawImage
-        if (!buf.isEmpty()) {
-            const QImage img(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),
-                             buf.width() * 4, QImage::Format_RGBA8888);
-            painter.drawImage(QPointF(vis.x, vis.y), img);
+        const std::int64_t visArea =
+            static_cast<std::int64_t>(vis.width) * static_cast<std::int64_t>(vis.height);
+        if (visArea <= pe::kMaxCompositeImagePixels) {
+            // Keep the cache at least as large as the visible tile span (plus a one-viewport pan
+            // margin) so no visible tile evicts another mid-frame — otherwise a zoomed-out view
+            // spanning more than the default budget would recomposite every tile every paint.
+            const std::size_t visTiles = static_cast<std::size_t>(pe::tilesForRect(vis).count());
+            renderer_->setCacheBudgetTiles(
+                std::max<std::size_t>(pe::kDefaultDisplayCacheTiles, visTiles * 2 + 16));
+            const pe::PixelBuffer buf = renderer_->renderRegion(vis);  // alive through drawImage
+            if (!buf.isEmpty()) {
+                const QImage img(reinterpret_cast<const uchar*>(buf.data()), buf.width(),
+                                 buf.height(), buf.width() * 4, QImage::Format_RGBA8888);
+                painter.drawImage(QPointF(vis.x, vis.y), img);
+            }
+        } else {
+            // Over the composite budget: a cache-bypassing downscale bounded to the viewport's
+            // pixel count (no point compositing finer than the screen shows), drawn stretched to
+            // the visible doc rect. SmoothPixmapTransform (set above for zoom<1) smooths the
+            // upscale.
+            const int cap = std::max(1, width() * height());
+            const pe::PixelBuffer buf = renderer_->renderRegionScaled(vis, cap);
+            if (!buf.isEmpty()) {
+                const QImage img(reinterpret_cast<const uchar*>(buf.data()), buf.width(),
+                                 buf.height(), buf.width() * 4, QImage::Format_RGBA8888);
+                painter.drawImage(QRectF(vis.x, vis.y, vis.width, vis.height), img,
+                                  QRectF(img.rect()));
+            }
         }
     }
 
