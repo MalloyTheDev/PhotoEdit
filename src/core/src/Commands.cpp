@@ -6,6 +6,7 @@
 #include "pe/core/GroupLayer.hpp"  // recurse into groups for crop
 #include "pe/core/PixelLayer.hpp"  // contentBounds() on the concrete pixel layer
 
+#include <algorithm>
 #include <memory>
 #include <span>
 #include <utility>
@@ -159,6 +160,152 @@ DocumentChange ReorderLayerCommand::undo(Document& doc) {
     if (layer) region = layer->contentBounds();
     doc.cmdInsertTopLevel(oldIndex_, std::move(layer));
     return structureChange(region, layerId_);
+}
+
+// ------------------------------------------------------------- GroupLayers
+
+GroupLayersCommand::GroupLayersCommand(std::vector<LayerId> ids) : members_(std::move(ids)) {}
+
+DocumentChange GroupLayersCommand::execute(Document& doc) {
+    if (!validated_) {
+        validated_ = true;
+        // Validate: at least one id, every id a DISTINCT top-level sibling. (v1 groups
+        // top-level layers only; mixed-parent / nested / unknown / duplicate ids are
+        // rejected so the tree is never corrupted.) Collect (index, id) for the valid set.
+        std::vector<std::pair<std::size_t, LayerId>> indexed;
+        indexed.reserve(members_.size());
+        bool ok = !members_.empty();
+        for (LayerId id : members_) {
+            const std::size_t idx = doc.topLevelIndexOf(id);
+            if (idx == GroupLayer::npos) {
+                ok = false;  // not a top-level layer (unknown or nested)
+                break;
+            }
+            // Reject duplicates: the same id must not appear twice.
+            bool dup = false;
+            for (const auto& [i, existing] : indexed) {
+                if (existing == id) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) {
+                ok = false;
+                break;
+            }
+            indexed.emplace_back(idx, id);
+        }
+        if (!ok) {
+            noop_ = true;
+            return structureChange(Rect{}, kNoLayer);
+        }
+        // Order members by their current top-level index so the group preserves their
+        // relative stacking; the topmost (smallest index) is where the group is inserted.
+        std::sort(indexed.begin(), indexed.end());
+        members_.clear();
+        oldIndices_.clear();
+        members_.reserve(indexed.size());
+        oldIndices_.reserve(indexed.size());
+        for (const auto& [idx, id] : indexed) {
+            members_.push_back(id);
+            oldIndices_.push_back(idx);
+        }
+        insertIndex_ = oldIndices_.front();
+        prevActive_ = doc.activeLayer();
+        // Create the group shell once; it is reused across undo/redo so its id is stable.
+        ownedGroup_ = std::make_unique<GroupLayer>("Group");
+        groupId_ = ownedGroup_->id();
+    }
+    if (noop_) return structureChange(Rect{}, kNoLayer);
+
+    // Move each member out of the top level (highest index first so the remaining indices
+    // stay valid) and into the retained group shell. Re-add in member order afterwards so
+    // the group's children keep the requested relative stacking.
+    auto* group = static_cast<GroupLayer*>(ownedGroup_.get());
+    std::vector<std::unique_ptr<Layer>> taken(members_.size());
+    for (std::size_t k = members_.size(); k-- > 0;) {
+        taken[k] = doc.cmdRemoveTopLevel(members_[k]);
+    }
+    for (auto& layer : taken) group->addChild(std::move(layer));
+
+    const Rect region = group->contentBounds();
+    doc.cmdInsertTopLevel(insertIndex_, std::move(ownedGroup_));  // ownedGroup_ now empty
+    doc.setActiveLayer(groupId_);
+    return structureChange(region, groupId_);
+}
+
+DocumentChange GroupLayersCommand::undo(Document& doc) {
+    if (noop_) return structureChange(Rect{}, kNoLayer);
+
+    // Take the group back out (it still owns the members), then splice each member back to
+    // its exact original top-level index. Re-inserting in ascending original-index order
+    // reproduces the original flat layout exactly (lower slots are filled before higher ones).
+    ownedGroup_ = doc.cmdRemoveTopLevel(groupId_);
+    auto* group = static_cast<GroupLayer*>(ownedGroup_.get());
+    const Rect region = group->contentBounds();
+    for (std::size_t k = 0; k < members_.size(); ++k) {
+        doc.cmdInsertTopLevel(oldIndices_[k], group->removeChild(members_[k]));
+    }
+    // The group is now an empty shell held by the command; restore the prior active layer.
+    doc.setActiveLayer(prevActive_);
+    return structureChange(region, groupId_);
+}
+
+// --------------------------------------------------------------- Ungroup
+
+UngroupCommand::UngroupCommand(LayerId groupId) : groupId_(groupId) {}
+
+DocumentChange UngroupCommand::execute(Document& doc) {
+    if (!validated_) {
+        validated_ = true;
+        // Validate: a top-level GroupLayer. A non-group, unknown, or nested id is a no-op.
+        const std::size_t idx = doc.topLevelIndexOf(groupId_);
+        const Layer* g = doc.findLayer(groupId_);
+        if (idx == GroupLayer::npos || g == nullptr || g->kind() != LayerKind::Group) {
+            noop_ = true;
+            return structureChange(Rect{}, kNoLayer);
+        }
+        groupIndex_ = idx;
+        prevActive_ = doc.activeLayer();
+        childIds_.clear();
+        for (const auto& child : static_cast<const GroupLayer*>(g)->children()) {
+            if (child) childIds_.push_back(child->id());
+        }
+    }
+    if (noop_) return structureChange(Rect{}, kNoLayer);
+
+    // Take the group out (keeping its shell for undo) and splice its children into the top
+    // level at the group's slot, preserving order: inserting child k at groupIndex_ + k keeps
+    // top-to-bottom order since earlier children already occupy the lower slots.
+    ownedGroup_ = doc.cmdRemoveTopLevel(groupId_);
+    auto* group = static_cast<GroupLayer*>(ownedGroup_.get());
+    const Rect region = group->contentBounds();
+    for (std::size_t k = 0; k < childIds_.size(); ++k) {
+        doc.cmdInsertTopLevel(groupIndex_ + k, group->removeChild(childIds_[k]));
+    }
+    // If the dissolved group was active, the active id now dangles; clear it (the group is
+    // gone from the document). undo restores it.
+    if (doc.activeLayer() == groupId_) doc.setActiveLayer(kNoLayer);
+    return structureChange(region, groupId_);
+}
+
+DocumentChange UngroupCommand::undo(Document& doc) {
+    if (noop_) return structureChange(Rect{}, kNoLayer);
+
+    // Pull the children back out of the top level (highest slot first so indices stay valid)
+    // and return them to the retained group shell in their original order, then re-insert the
+    // rebuilt group at its slot. Same id, same children, same order.
+    auto* group = static_cast<GroupLayer*>(ownedGroup_.get());
+    std::vector<std::unique_ptr<Layer>> taken(childIds_.size());
+    for (std::size_t k = childIds_.size(); k-- > 0;) {
+        taken[k] = doc.cmdRemoveTopLevel(childIds_[k]);
+    }
+    for (auto& layer : taken) group->addChild(std::move(layer));
+
+    const Rect region = group->contentBounds();
+    doc.cmdInsertTopLevel(groupIndex_, std::move(ownedGroup_));  // ownedGroup_ now empty
+    doc.setActiveLayer(prevActive_);
+    return structureChange(region, groupId_);
 }
 
 // ----------------------------------------------------------- property edits

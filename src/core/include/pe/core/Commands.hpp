@@ -77,6 +77,57 @@ private:
     std::size_t oldIndex_ = 0;
 };
 
+// Group a set of existing top-level layers into a NEW GroupLayer, inserted at the
+// position of the topmost grouped layer with the layers as its children in their
+// prior relative order; the new group becomes active. Undo restores every layer to
+// its exact prior top-level position and removes the group. The actual Layer objects
+// are moved (never re-created), so their LayerIds — and any references to them —
+// survive the round-trip. v1 requires the ids be distinct top-level siblings; empty,
+// duplicate, unknown, or nested ids make the command a safe no-op.
+class GroupLayersCommand final : public Command {
+public:
+    explicit GroupLayersCommand(std::vector<LayerId> ids);
+    [[nodiscard]] std::string name() const override { return "Group Layers"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    std::vector<LayerId> members_;         // member ids, sorted by original index (ascending)
+    std::vector<std::size_t> oldIndices_;  // original top-level index of each member (ascending)
+    std::size_t insertIndex_ = 0;          // where the group goes (topmost member's index)
+    LayerId groupId_ = kNoLayer;           // the created group's id (stable across undo/redo)
+    LayerId prevActive_ = kNoLayer;        // active layer before grouping, restored on undo
+    // The empty group shell while undone (members spliced back to top level); reused on
+    // redo so the group keeps the same id and properties. Null while the group is live.
+    std::unique_ptr<Layer> ownedGroup_;
+    bool validated_ = false;  // input checked on first execute
+    bool noop_ = false;       // invalid/empty input: execute/undo do nothing
+};
+
+// Dissolve a GroupLayer: splice its children into the parent at the group's position
+// (preserving their order) and remove the now-empty group. Undo reconstructs the group
+// with the same id, the same children (moved back, ids intact) in order, and restores
+// the active layer. v1 dissolves top-level groups; a non-group / unknown / nested id is
+// a safe no-op.
+class UngroupCommand final : public Command {
+public:
+    explicit UngroupCommand(LayerId groupId);
+    [[nodiscard]] std::string name() const override { return "Ungroup Layers"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    LayerId groupId_;                // the group to dissolve
+    std::vector<LayerId> childIds_;  // its children, top-to-bottom, captured on first execute
+    std::size_t groupIndex_ = 0;     // the group's top-level index (children land here)
+    LayerId prevActive_ = kNoLayer;  // active layer before ungrouping, restored on undo
+    // The emptied group shell while dissolved (children spliced to top level); reused on undo
+    // so the rebuilt group keeps the same id and properties. Null while the group is live.
+    std::unique_ptr<Layer> ownedGroup_;
+    bool validated_ = false;  // input checked on first execute
+    bool noop_ = false;       // non-group / unknown id: execute/undo do nothing
+};
+
 // --- Property commands (work on any layer, including nested) ---
 
 class SetVisibilityCommand final : public Command {
