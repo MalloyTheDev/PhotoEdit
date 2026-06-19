@@ -306,6 +306,13 @@ std::unique_ptr<PaintCommand> buildStroke(Document& doc, LayerId layerId, const 
 // Fixed blur kernel for the brush (a small, soft local blur). Matches the task's sigma ~= 2.
 constexpr float kBlurSigma = 2.0f;
 
+// Fixed unsharp-mask parameters for the Sharpen brush (mirror of the Blur brush): a small radius,
+// a moderate amount, and no threshold so every detail is enhanced. A v1 strength tuned to give a
+// visible local contrast boost while the brush coverage/opacity still modulate it per pixel.
+constexpr float kSharpenRadius = 1.5f;
+constexpr float kSharpenAmount = 1.0f;
+constexpr float kSharpenThreshold = 0.0f;
+
 // Pixel-tight bounding box (document space) of all nonzero coverage; empty if the stroke is empty.
 Rect coverageBounds(const CoverageMap& cov) {
     Rect bb{};
@@ -371,6 +378,46 @@ std::unique_ptr<PaintCommand> blurStroke(Document& doc, LayerId layerId, const B
                     const Rgbaf b = blurred[i];
                     img[i] = Rgbaf{o.r + (b.r - o.r) * c, o.g + (b.g - o.g) * c,
                                    o.b + (b.b - o.b) * c, o.a + (b.a - o.a) * c};
+                }
+            }
+        },
+        selection);
+}
+
+std::unique_ptr<PaintCommand> sharpenStroke(Document& doc, LayerId layerId, const BrushSettings& in,
+                                            std::span<const StrokePoint> points,
+                                            const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    if (points.empty()) return nullptr;
+
+    const float opacity = clamp01(in.opacity);
+    const CoverageMap cov = buildCoverage(in, points);
+    const Rect bb = coverageBounds(cov);
+    if (bb.isEmpty()) return nullptr;  // empty / no-coverage stroke deposits nothing
+
+    // Mirror of blurStroke: blend each pixel toward its unsharp-masked value by the brush coverage
+    // (capped at the stroke opacity). The store is at its pre-stroke (S0) state during the bake, so
+    // the sharpened result is computed from the original pixels — no feedback across rebuilds of a
+    // live preview.
+    const int left = bb.left();
+    const int top = bb.top();
+    return bakePixelEditRegion(
+        doc, layerId, "Sharpen Brush", bb,
+        [&cov, opacity, left, top](std::span<Rgbaf> img, int w, int h) {
+            std::vector<Rgbaf> sharpened(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+            unsharpMask(img, sharpened, w, h, kSharpenRadius, kSharpenAmount, kSharpenThreshold);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const float c = std::min(coverageAt(cov, left + x, top + y), opacity);
+                    if (c <= 0.0f) continue;
+                    const std::size_t i =
+                        static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                        static_cast<std::size_t>(x);
+                    const Rgbaf o = img[i];
+                    const Rgbaf s = sharpened[i];
+                    img[i] = Rgbaf{o.r + (s.r - o.r) * c, o.g + (s.g - o.g) * c,
+                                   o.b + (s.b - o.b) * c, o.a + (s.a - o.a) * c};
                 }
             }
         },

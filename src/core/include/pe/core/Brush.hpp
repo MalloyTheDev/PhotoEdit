@@ -149,4 +149,16 @@ private:
                                                        std::span<const StrokePoint> points,
                                                        const Selection* selection = nullptr);
 
+// Sharpen brush: the mirror image of the Blur brush. It locally sharpens (unsharp mask) the
+// EXISTING pixels under the stroke, weighted by brush coverage. Like blurStroke it needs a
+// neighborhood, so it runs ONE region bake over the stroke's bounding box: the region is
+// unsharp-masked once and each pixel is lerped from its original toward its sharpened value by its
+// accumulated brush coverage (capped at the stroke opacity). Honors the selection (effective
+// strength is brushCoverage * selectionCoverage). Returns nullptr if not a pixel layer, the stroke
+// has no coverage, or the bounding region is over the engine's per-op budget.
+[[nodiscard]] std::unique_ptr<PaintCommand> sharpenStroke(Document& doc, LayerId layerId,
+                                                          const BrushSettings& settings,
+                                                          std::span<const StrokePoint> points,
+                                                          const Selection* selection = nullptr);
+
 }  // namespace pe

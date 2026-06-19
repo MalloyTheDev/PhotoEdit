@@ -408,6 +408,11 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
                                   ? pe::PaintToolController::Mode::Burn
                                   : pe::PaintToolController::Mode::Dodge);
             }
+            if (toolMode_ == Tool::Blur) {
+                tool_.setMode((e->modifiers() & Qt::AltModifier)
+                                  ? pe::PaintToolController::Mode::Sharpen
+                                  : pe::PaintToolController::Mode::Blur);
+            }
             if (tool_.begin(*doc_, sp, &doc_->selection())) {
                 if (renderer_ != nullptr) renderer_->invalidate(tool_.strokeDirtyBounds());
                 update();
@@ -558,6 +563,12 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         // stroke, the Photoshop convention — set per stroke since the modifier is read at press.
         tool_.setMode((e->modifiers() & Qt::AltModifier) ? pe::PaintToolController::Mode::Burn
                                                          : pe::PaintToolController::Mode::Dodge);
+    }
+    if (toolMode_ == Tool::Blur) {
+        // Alt temporarily switches the Blur tool to Sharpen for this stroke, mirroring the
+        // Dodge/Burn convention — set per stroke since the modifier is read at press.
+        tool_.setMode((e->modifiers() & Qt::AltModifier) ? pe::PaintToolController::Mode::Sharpen
+                                                         : pe::PaintToolController::Mode::Blur);
     }
     // Recover if a prior stroke never received its release (e.g. mouse capture was
     // stolen by a modal/Alt-Tab): drop the stale preview before starting fresh.

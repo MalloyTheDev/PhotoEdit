@@ -21,6 +21,8 @@ std::unique_ptr<PaintCommand> PaintToolController::buildStroke(Document& doc) co
             return burnStroke(doc, layer_, brush_, points_, selection_);
         case Mode::Blur:
             return blurStroke(doc, layer_, brush_, points_, selection_);
+        case Mode::Sharpen:
+            return sharpenStroke(doc, layer_, brush_, points_, selection_);
         case Mode::Clone: {
             if (!cloneSourceValid_ || points_.empty()) return nullptr;  // no source anchor set
             // Lock the source->dest offset to the stroke's first point (sampled every rebuild from
