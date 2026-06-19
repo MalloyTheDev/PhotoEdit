@@ -39,8 +39,13 @@ std::unique_ptr<PaintCommand> PaintToolController::buildStroke(Document& doc) co
             constexpr double kBound = static_cast<double>(kMaxCanvasDimension);
             const int px = static_cast<int>(std::lround(std::clamp(fx, -kBound, kBound)));
             const int py = static_cast<int>(std::lround(std::clamp(fy, -kBound, kBound)));
-            const int offX = px - cloneSource_.x;  // cloneSource_ is already canvas-bounded
-            const int offY = py - cloneSource_.y;
+            // Clamp the anchor to the canvas range too (setCloneSource doesn't), so the offset
+            // subtraction can't signed-overflow even via a direct, non-UI caller: both operands are
+            // now within +/-kMaxCanvasDimension, so the difference fits comfortably in int.
+            const int csx = std::clamp(cloneSource_.x, -kMaxCanvasDimension, kMaxCanvasDimension);
+            const int csy = std::clamp(cloneSource_.y, -kMaxCanvasDimension, kMaxCanvasDimension);
+            const int offX = px - csx;
+            const int offY = py - csy;
             return cloneStroke(doc, layer_, brush_, points_, offX, offY, selection_);
         }
         case Mode::Brush:
