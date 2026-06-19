@@ -20,6 +20,14 @@ bool near8(Rgba8 a, Rgba8 b, int tol = 1) {
     };
     return d(a.r, b.r) <= tol && d(a.g, b.g) <= tol && d(a.b, b.b) <= tol && d(a.a, b.a) <= tol;
 }
+
+// Counts the Profile-kind notifications an observer receives.
+struct ProfileCounter : DocumentObserver {
+    int profile = 0;
+    void onDocumentChanged(const Document&, const DocumentChange& c) override {
+        if (c.kind == DocumentChange::Kind::Profile) ++profile;
+    }
+};
 }  // namespace
 
 PE_TEST(assign_profile_tags_and_undoes) {
@@ -36,6 +44,26 @@ PE_TEST(assign_profile_tags_and_undoes) {
 
     doc->history().redo();
     PE_CHECK(doc->colorProfile() == srgb);  // re-tagged
+}
+
+PE_TEST(assign_profile_notifies_profile_exactly_once) {
+    // AssignProfileCommand used to notify Profile twice per push: cmdSetColorProfile self-notified
+    // AND the command returned a Profile change History broadcasts. cmdSetColorProfile is now a
+    // pure mutator, so each push/undo/redo broadcasts exactly one Profile notification.
+    auto doc = Document::createBlank(Size{8, 8});
+    ProfileCounter obs;
+    doc->addObserver(&obs);
+
+    auto srgb = ColorProfile::builtin(BuiltinSpace::sRGB);
+    doc->history().push(std::make_unique<AssignProfileCommand>(srgb));
+    PE_CHECK_EQ(obs.profile, 1);  // not 2
+    PE_CHECK(doc->colorProfile() == srgb);
+
+    doc->history().undo();
+    PE_CHECK_EQ(obs.profile, 2);  // one more for the undo
+    PE_CHECK(doc->colorProfile() == nullptr);
+
+    doc->removeObserver(&obs);
 }
 
 PE_TEST(assign_profile_replaces_previous) {

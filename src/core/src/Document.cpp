@@ -93,8 +93,11 @@ void Document::setActiveLayer(LayerId id) {
 }
 
 void Document::cmdSetColorProfile(ColorProfileRef profile) {
+    // Pure mutator (no self-notify), matching cmdInsertTopLevel/cmdSetCanvasSize: the calling
+    // command returns the DocumentChange and History notifies once. AssignProfileCommand returns a
+    // Profile change; ConvertProfileCommand returns a Pixels change (its recomposite is the
+    // appearance update).
     profile_ = std::move(profile);
-    notify(DocumentChange{DocumentChange::Kind::Profile, Rect{}, kNoLayer});
 }
 
 void Document::cmdSetCanvasSize(Size newSize) noexcept {

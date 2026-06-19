@@ -53,13 +53,17 @@ public:
 
     DocumentChange execute(Document& doc) override {
         for (auto& edit : edits_) edit->execute(doc);
-        doc.cmdSetColorProfile(to_);
+        doc.cmdSetColorProfile(
+            to_);  // pure mutator; the returned Pixels change is the notification
+        // The empty dirtyRegion makes the renderer invalidate the whole cache, so the converted
+        // pixels (and the re-tagged appearance) recomposite — no separate Profile notify needed.
         return DocumentChange{DocumentChange::Kind::Pixels, Rect{}, kNoLayer};
     }
 
     DocumentChange undo(Document& doc) override {
         for (auto it = edits_.rbegin(); it != edits_.rend(); ++it) (*it)->undo(doc);
-        doc.cmdSetColorProfile(from_);
+        doc.cmdSetColorProfile(
+            from_);  // pure mutator; the returned Pixels change is the notification
         return DocumentChange{DocumentChange::Kind::Pixels, Rect{}, kNoLayer};
     }
 
