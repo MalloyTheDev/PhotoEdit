@@ -173,13 +173,24 @@ PixelBuffer CanvasRenderer::renderRegionScaled(Rect docRegion, int maxOutputPixe
     // so the working set is bounded by cap (four floats/bin). The full-res region is
     // NEVER materialized — tiles are composited and accumulated one at a time. Per-bin
     // sample COUNT is derived from geometry (below), avoiding a fifth accumulator.
-    const std::size_t outCount = static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh);
-    std::vector<float> sumR(outCount, 0.0f);
-    std::vector<float> sumG(outCount, 0.0f);
-    std::vector<float> sumB(outCount, 0.0f);
-    std::vector<float> sumA(outCount, 0.0f);
-
+    // Bound compute: unlike renderRegion (area-capped at 64 MP), the scaled path drops the area cap
+    // to allow extreme zoom-out, so cap the SOURCE tile count instead — otherwise a near-max-extent
+    // region would composite millions of tiles. Beyond the cap, degrade to empty (show pasteboard).
+    constexpr int64_t kMaxScaledSourceTiles = 16384;  // ~1 GP of source; ~16x renderRegion's bound
     const TileSpan span = tilesForRect(docRegion);
+    const int64_t srcTiles = static_cast<int64_t>(span.rowEnd - span.rowBegin) *
+                             static_cast<int64_t>(span.colEnd - span.colBegin);
+    if (srcTiles > kMaxScaledSourceTiles) return PixelBuffer{};
+
+    // Box-average accumulators in DOUBLE: a bin can sum up to s*s unit-magnitude samples, which can
+    // exceed float32's 2^24 exact-integer limit at large downscale and silently saturate (dropping
+    // the running sum while the divisor keeps growing → the average collapses toward 0). double's
+    // 53-bit mantissa sums any reachable count exactly. Working set is still bounded by cap.
+    const std::size_t outCount = static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh);
+    std::vector<double> sumR(outCount, 0.0);
+    std::vector<double> sumG(outCount, 0.0);
+    std::vector<double> sumB(outCount, 0.0);
+    std::vector<double> sumA(outCount, 0.0);
     for (int row = span.rowBegin; row < span.rowEnd; ++row) {
         for (int col = span.colBegin; col < span.colEnd; ++col) {
             const TileCoord coord{col, row};
@@ -218,11 +229,11 @@ PixelBuffer CanvasRenderer::renderRegionScaled(Rect docRegion, int maxOutputPixe
             const double n = static_cast<double>(srcW) * static_cast<double>(srcH);
             Rgbaf px{};
             if (n > 0.0) {
-                px.a = static_cast<float>(static_cast<double>(sumA[bin]) / n);
-                if (sumA[bin] > 0.0f) {  // un-premultiply to straight alpha
-                    px.r = sumR[bin] / sumA[bin];
-                    px.g = sumG[bin] / sumA[bin];
-                    px.b = sumB[bin] / sumA[bin];
+                px.a = static_cast<float>(sumA[bin] / n);
+                if (sumA[bin] > 0.0) {  // un-premultiply to straight alpha
+                    px.r = static_cast<float>(sumR[bin] / sumA[bin]);
+                    px.g = static_cast<float>(sumG[bin] / sumA[bin]);
+                    px.b = static_cast<float>(sumB[bin] / sumA[bin]);
                 }
             }
             out.set(ox, oy, toRgba8(px));

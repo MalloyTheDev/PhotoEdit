@@ -183,6 +183,33 @@ PE_TEST(renderer_scaled_rejects_degenerate_inputs) {
     PE_CHECK(r.renderRegionScaled(Rect{0, 0, kMaxCanvasDimension + 1, 1}).isEmpty());  // too wide
 }
 
+PE_TEST(renderer_scaled_large_downscale_preserves_opacity) {
+    // Audit regression: at an extreme downscale a bin sums >2^24 unit-magnitude samples; a float32
+    // accumulator saturates and collapses the averaged ALPHA toward 0 (opaque content rendered
+    // semi-transparent). Double accumulators keep it exact. 9000x9000 solid red, cap=4 -> s=4500,
+    // ~20M samples/bin (> 2^24).
+    auto doc = Document::createBlank(Size{9000, 9000});
+    auto layer = std::make_unique<SolidColorLayer>(kRed, doc->canvasBounds());
+    doc->history().push(std::make_unique<AddLayerCommand>(std::move(layer), doc->topLevelCount()));
+    CanvasRenderer r(*doc);
+    PixelBuffer img = r.renderRegionScaled(doc->canvasBounds(), 4);  // tiny cap forces s=4500
+    PE_CHECK(!img.isEmpty());
+    PE_CHECK(near8(img.at(0, 0), kRed));  // color preserved
+    PE_CHECK_EQ(static_cast<int>(img.at(0, 0).a),
+                255);  // alpha NOT collapsed (would be ~211 in f32)
+}
+
+PE_TEST(renderer_scaled_caps_source_tile_compute) {
+    // Audit regression: the scaled path drops renderRegion's area cap (to allow zoom-out) but must
+    // still bound COMPUTE — a near-max-extent region would composite millions of tiles. Beyond the
+    // source-tile cap it degrades to empty rather than freezing.
+    auto doc = Document::createBlank(Size{40000, 40000});  // 157x157 = 24649 source tiles
+    CanvasRenderer r(*doc);
+    PE_CHECK(r.renderRegionScaled(doc->canvasBounds()).isEmpty());  // over the tile-compute cap
+    // A smaller over-budget region (within the tile cap) still renders.
+    PE_CHECK(!r.renderRegionScaled(Rect{0, 0, 9000, 9000}, 4'000'000).isEmpty());
+}
+
 PE_TEST(renderer_undo_restores_pixels) {
     auto doc = Document::createBlank(Size{256, 256});  // single tile
     CanvasRenderer r(*doc);
