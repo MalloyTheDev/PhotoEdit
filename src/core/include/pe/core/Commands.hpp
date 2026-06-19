@@ -168,8 +168,10 @@ private:
 
 // Crop the document to a document-space rectangle: the canvas shrinks to the rect's size and
 // every top-level pixel layer's content is shifted by -rect.topLeft, so the cropped region's
-// top-left becomes the new origin. One undoable step (canvas size + per-layer content shifts
-// reverse together). Built on moveLayerContent; the rect is clamped to the canvas on execute.
+// top-left becomes the new origin. The active selection is shifted by the same -rect.topLeft so
+// it tracks the cropped content. One undoable step (canvas size + per-layer content shifts +
+// selection reverse together). Built on moveLayerContent; the rect is clamped to the canvas on
+// execute.
 class CropCommand final : public Command {
 public:
     explicit CropCommand(Rect cropRect);
@@ -184,6 +186,7 @@ private:
     Size oldSize_{};
     bool captured_ = false;
     std::vector<std::unique_ptr<PaintCommand>> moves_;  // per-layer content shift to the origin
+    Selection oldSel_;  // selection before crop, captured on first execute, restored on undo
 };
 
 }  // namespace pe

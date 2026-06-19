@@ -39,6 +39,19 @@ void collectPixelLayers(std::span<const std::unique_ptr<Layer>> layers, std::vec
     }
 }
 
+// Return a copy of `sel` translated by (dx,dy). An inactive selection has no coverage to move,
+// so it is returned unchanged. toMask/loadMask guard the coordinate ranges, so a translation that
+// pushes the bounds negative / off-canvas never overflows or crashes (off-canvas coords are
+// permitted; out-of-range ones simply select nothing).
+Selection translatedSelection(const Selection& sel, int dx, int dy) {
+    if (!sel.active()) return sel;
+    const Rect bounds = sel.tightBounds();
+    if (bounds.isEmpty()) return sel;  // active but no coverage: nothing to move
+    Selection out;
+    out.loadMask(sel.toMask(bounds), bounds.left() + dx, bounds.top() + dy);
+    return out;
+}
+
 }  // namespace
 
 // ----------------------------------------------------------------- AddLayer
@@ -259,6 +272,7 @@ DocumentChange CropCommand::execute(Document& doc) {
     if (!captured_) {
         captured_ = true;
         oldSize_ = doc.canvasSize();
+        oldSel_ = doc.selection();  // snapshot for undo (once); shifted on every execute below
         const Rect eff = crop_.intersected(doc.canvasBounds());  // clamp to the canvas once
         if (eff.isEmpty()) {
             crop_ = Rect{};  // degenerate crop: the command is a no-op
@@ -296,6 +310,11 @@ DocumentChange CropCommand::execute(Document& doc) {
 
     for (auto& m : moves_) m->execute(doc);
     doc.cmdSetCanvasSize(Size{crop_.width, crop_.height});
+    // Shift the active selection by the same -origin so it tracks the cropped content. Recomputed
+    // from the captured original each time, so redo is exact (re-shifting an inactive sel is a
+    // no-op). Notify observers (marching ants) just as SetSelectionCommand does.
+    doc.editableSelection() = translatedSelection(oldSel_, -crop_.x, -crop_.y);
+    doc.touchSelection();
     return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
 }
 
@@ -305,6 +324,8 @@ DocumentChange CropCommand::undo(Document& doc) {
 
     doc.cmdSetCanvasSize(oldSize_);  // restore the canvas first
     for (auto it = moves_.rbegin(); it != moves_.rend(); ++it) (*it)->undo(doc);  // unshift
+    doc.editableSelection() = oldSel_;  // restore the exact pre-crop selection
+    doc.touchSelection();
     return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
 }
 
