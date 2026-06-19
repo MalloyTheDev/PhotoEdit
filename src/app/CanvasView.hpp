@@ -4,6 +4,7 @@
 #include "pe/core/PaintToolController.hpp"
 #include "pe/core/ViewTransform.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -75,6 +76,9 @@ public:
 
     // Background color (the Gradient tool's far stop; the foreground is the paint color).
     void setBackgroundColor(const QColor& c) { bgColor_ = c; }
+
+    // Magic Wand per-channel tolerance (clamped to [0,255]); driven by the options bar.
+    void setWandTolerance(int t) { wandTolerance_ = std::clamp(t, 0, 255); }
 
 signals:
     void zoomChanged(double percent);   // for the status-bar zoom readout
@@ -153,6 +157,7 @@ private:
     QPointF gradStartWidget_;
     QPointF gradEndWidget_;
     QColor bgColor_{255, 255, 255};  // gradient far stop (kept in sync by MainWindow)
+    int wandTolerance_ = 32;  // magic-wand per-channel tolerance (kept in sync by MainWindow)
 
     // Pixel-tight bounds of the committed selection, for the marching-ants outline. Cached
     // on selection change (and on setDocument) so paintEvent never scans the mask per frame.

@@ -47,7 +47,7 @@ private:
     void setTheme(ThemeId id);
 
     // Which contextual control group the options bar shows for the active tool.
-    enum class OptKind { None, Brush, Move };
+    enum class OptKind { None, Brush, Move, Wand };
     void updateOptionsBar(OptKind kind, const QString& toolName);
     void refreshDocTab();
     [[nodiscard]] QWidget* makeColorSwatches();
@@ -81,10 +81,13 @@ private:
     QLabel* optToolName_ = nullptr;       // options bar: active tool name
     QWidget* brushOptions_ = nullptr;     // options bar: brush size/opacity group
     QWidget* moveOptions_ = nullptr;      // options bar: move-tool group
+    QWidget* wandOptions_ = nullptr;      // options bar: magic-wand group
     QAction* brushOptAction_ = nullptr;   // toolbar action wrapping brushOptions_ (for show/hide)
     QAction* moveOptAction_ = nullptr;    // toolbar action wrapping moveOptions_
+    QAction* wandOptAction_ = nullptr;    // toolbar action wrapping wandOptions_
     QSpinBox* sizeSpin_ = nullptr;        // options bar: brush diameter
     QSpinBox* opacitySpinOpt_ = nullptr;  // options bar: brush opacity
+    QSpinBox* wandTolSpin_ = nullptr;     // options bar: magic-wand tolerance
     QLabel* docTab_ = nullptr;            // document tab strip above the canvas
     QToolButton* fgSwatch_ = nullptr;     // foreground color swatch (tool strip)
     QToolButton* bgSwatch_ = nullptr;     // background color swatch (tool strip)

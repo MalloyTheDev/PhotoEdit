@@ -481,10 +481,9 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
         const pe::PixelBuffer buf = doc_->compositeImage();  // sample the composited canvas
         if (!buf.isEmpty()) {
-            constexpr int kWandTolerance = 32;  // default per-channel tolerance (v1)
             pe::Selection sel =
                 pe::magicWandSelection(buf, static_cast<int>(std::lround(d.x)),
-                                       static_cast<int>(std::lround(d.y)), kWandTolerance);
+                                       static_cast<int>(std::lround(d.y)), wandTolerance_);
             if (sel.active()) doc_->history().push(std::make_unique<SetSelectionCommand>(sel));
         }
         return;
