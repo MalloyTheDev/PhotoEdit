@@ -104,8 +104,11 @@ public:
     [[nodiscard]] std::size_t topLevelIndexOf(LayerId id) const noexcept;
     // Active layer is session state: emits a change but is not undoable.
     void setActiveLayer(LayerId id);
-    // Replace the document's color profile (assign reinterprets; convert pairs this
-    // with a pixel transform). Emits a Profile change; the command pairs forward/inverse.
+    // Replace the document's color profile (assign reinterprets; convert pairs this with a pixel
+    // transform). A pure mutator — it does NOT notify (matching
+    // cmdInsertTopLevel/cmdSetCanvasSize); the command returns the DocumentChange so History
+    // notifies once (AssignProfileCommand returns Profile; ConvertProfileCommand returns Pixels,
+    // whose recomposite covers the appearance change).
     void cmdSetColorProfile(ColorProfileRef profile);
     // Resize the canvas (the document's pixel extent). Clamped to [1, kMaxCanvasDimension]
     // per dimension. Layer content is not moved here — CropCommand pairs this with per-layer
