@@ -3,6 +3,7 @@
 #include "pe/core/BlendMode.hpp"
 #include "pe/core/Commands.hpp"
 #include "pe/core/Compositor.hpp"
+#include "pe/core/GroupLayer.hpp"
 #include "pe/core/Layer.hpp"
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/PixelLayer.hpp"
@@ -12,25 +13,27 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
-#include <QListWidget>
-#include <QListWidgetItem>
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
+#include <QTreeWidgetItemIterator>
 #include <QVBoxLayout>
 
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <utility>
 
 namespace pe::app {
 
 namespace {
-// LayerId <-> QVariant for list-item payloads.
-[[nodiscard]] pe::LayerId idOf(const QListWidgetItem* item) {
+// LayerId <-> QVariant for tree-item payloads (id lives in column 0, UserRole).
+[[nodiscard]] pe::LayerId idOf(const QTreeWidgetItem* item) {
     return item == nullptr ? pe::kNoLayer
-                           : static_cast<pe::LayerId>(item->data(Qt::UserRole).toULongLong());
+                           : static_cast<pe::LayerId>(item->data(0, Qt::UserRole).toULongLong());
 }
 }  // namespace
 
@@ -50,26 +53,43 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     topRow->addWidget(opacity_);
     root->addLayout(topRow);
 
-    list_ = new QListWidget(this);
-    list_->setIconSize(QSize(26, 26));  // per-layer preview thumbnails
-    root->addWidget(list_, 1);
+    tree_ = new QTreeWidget(this);
+    tree_->setHeaderHidden(true);
+    tree_->setColumnCount(1);
+    tree_->setIconSize(QSize(26, 26));  // per-layer preview thumbnails
+    tree_->setIndentation(14);
+    tree_->setUniformRowHeights(true);
+    tree_->setSelectionMode(QAbstractItemView::ExtendedSelection);  // multi-select for Group
+    tree_->setExpandsOnDoubleClick(true);
+    root->addWidget(tree_, 1);
 
     auto* btnRow = new QHBoxLayout();
     addBtn_ = new QPushButton(QStringLiteral("Add"), this);
     dupBtn_ = new QPushButton(QStringLiteral("Dup"), this);
     delBtn_ = new QPushButton(QStringLiteral("Del"), this);
+    groupBtn_ = new QPushButton(QStringLiteral("Grp"), this);
+    ungroupBtn_ = new QPushButton(QStringLiteral("Ungrp"), this);
     upBtn_ = new QPushButton(QStringLiteral("▲"), this);
     downBtn_ = new QPushButton(QStringLiteral("▼"), this);
-    for (QPushButton* b : {addBtn_, dupBtn_, delBtn_, upBtn_, downBtn_}) btnRow->addWidget(b);
+    groupBtn_->setToolTip(QStringLiteral("Group selected layers (Ctrl+G)"));
+    ungroupBtn_->setToolTip(QStringLiteral("Ungroup the active group (Ctrl+Shift+G)"));
+    for (QPushButton* b : {addBtn_, dupBtn_, delBtn_, groupBtn_, ungroupBtn_, upBtn_, downBtn_}) {
+        btnRow->addWidget(b);
+    }
     root->addLayout(btnRow);
 
-    connect(list_, &QListWidget::currentRowChanged, this, &LayersPanel::onRowChanged);
-    connect(list_, &QListWidget::itemChanged, this, &LayersPanel::onItemChanged);
+    connect(tree_, &QTreeWidget::currentItemChanged, this, &LayersPanel::onRowChanged);
+    connect(tree_, &QTreeWidget::itemSelectionChanged, this, &LayersPanel::onSelectionChanged);
+    connect(tree_, &QTreeWidget::itemChanged, this, &LayersPanel::onItemChanged);
+    connect(tree_, &QTreeWidget::itemExpanded, this, &LayersPanel::onItemExpanded);
+    connect(tree_, &QTreeWidget::itemCollapsed, this, &LayersPanel::onItemCollapsed);
     connect(blend_, &QComboBox::currentIndexChanged, this, &LayersPanel::onBlendChanged);
     connect(opacity_, &QSpinBox::editingFinished, this, &LayersPanel::onOpacityEdited);
     connect(addBtn_, &QPushButton::clicked, this, &LayersPanel::onAdd);
     connect(dupBtn_, &QPushButton::clicked, this, &LayersPanel::onDuplicate);
     connect(delBtn_, &QPushButton::clicked, this, &LayersPanel::onDelete);
+    connect(groupBtn_, &QPushButton::clicked, this, &LayersPanel::groupSelected);
+    connect(ungroupBtn_, &QPushButton::clicked, this, &LayersPanel::ungroupSelected);
     connect(upBtn_, &QPushButton::clicked, this, &LayersPanel::onMoveUp);
     connect(downBtn_, &QPushButton::clicked, this, &LayersPanel::onMoveDown);
 
@@ -85,6 +105,7 @@ void LayersPanel::setDocument(pe::Document* doc) {
     if (doc_ != nullptr) doc_->removeObserver(this);
     doc_ = doc;
     if (doc_ != nullptr) doc_->addObserver(this);
+    collapsed_.clear();  // a different document: forget prior expand/collapse state
     rebuild();
 }
 
@@ -100,14 +121,19 @@ void LayersPanel::onDocumentChanged(const pe::Document&, const pe::DocumentChang
             updateLayerThumbnail(change.layer);
             break;
         case pe::DocumentChange::Kind::ActiveLayer:
-            updating_ = true;
-            selectActiveInList();
-            updating_ = false;
+            // Skip re-selection for an active change we ourselves just pushed from a row
+            // click — the tree selection is already correct, and re-selecting would
+            // collapse a multi-selection (see syncingActive_).
+            if (!syncingActive_) {
+                updating_ = true;
+                selectActiveInTree();
+                updating_ = false;
+            }
             syncActiveControls();
             updateButtons();
             break;
         default:
-            break;  // Pixels / DirtyState / Profile don't affect the layer list
+            break;  // DirtyState / Profile / Selection don't affect the layer tree
     }
 }
 
@@ -116,20 +142,62 @@ void LayersPanel::push(std::unique_ptr<pe::Command> cmd) {
 }
 
 pe::LayerId LayersPanel::selectedLayer() const {
-    return idOf(list_->currentItem());
+    return idOf(tree_->currentItem());
 }
 
-QIcon LayersPanel::layerThumbnail(std::size_t engineIndex) const {
+std::vector<pe::LayerId> LayersPanel::selectedTopLevelIds() const {
+    std::vector<pe::LayerId> ids;
+    if (doc_ == nullptr) return ids;
+    const QList<QTreeWidgetItem*> items = tree_->selectedItems();
+    ids.reserve(static_cast<std::size_t>(items.size()));
+    for (const QTreeWidgetItem* item : items) {
+        const pe::LayerId id = idOf(item);
+        if (id != pe::kNoLayer && doc_->topLevelIndexOf(id) != pe::GroupLayer::npos) {
+            ids.push_back(id);
+        }
+    }
+    return ids;
+}
+
+bool LayersPanel::selectionAllTopLevel() const {
+    if (doc_ == nullptr) return false;
+    const QList<QTreeWidgetItem*> items = tree_->selectedItems();
+    if (items.isEmpty()) return false;
+    for (const QTreeWidgetItem* item : items) {
+        if (doc_->topLevelIndexOf(idOf(item)) == pe::GroupLayer::npos) return false;
+    }
+    return true;
+}
+
+QIcon LayersPanel::groupIcon() const {
     constexpr int kThumb = 26;
-    if (doc_ == nullptr) return QIcon();
+    QPixmap pm(kThumb, kThumb);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    // A simple folder glyph (tab + body) drawn in code, so groups read as folders
+    // without a bundled asset and without compositing a potentially huge subtree.
+    const QColor body(150, 162, 178);
+    const QColor edge(40, 44, 52);
+    p.setPen(QPen(edge, 1));
+    p.setBrush(body.darker(115));
+    p.drawRect(QRectF(3.5, 7.5, 9.0, 3.0));  // back tab
+    p.setBrush(body);
+    p.drawRoundedRect(QRectF(2.5, 9.5, 21.0, 12.0), 2.0, 2.0);  // folder body
+    p.end();
+    return QIcon(pm);
+}
+
+QIcon LayersPanel::layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> siblings,
+                                  std::size_t index) const {
+    constexpr int kThumb = 26;
+    if (doc_ == nullptr || index >= siblings.size()) return QIcon();
     const pe::Rect bounds = doc_->canvasBounds();
     const std::int64_t area = static_cast<std::int64_t>(bounds.width) * bounds.height;
     if (area <= 0 || area > 4'000'000) return QIcon();  // bound preview-composite cost
-    const auto layers = doc_->topLevelLayers();
-    if (engineIndex >= layers.size()) return QIcon();
 
     // Composite this layer alone over the canvas, then fit it onto a small checker.
-    const pe::PixelBuffer buf = pe::compositeToImage(layers.subspan(engineIndex, 1), bounds);
+    const pe::PixelBuffer buf = pe::compositeToImage(siblings.subspan(index, 1), bounds);
     if (buf.isEmpty()) return QIcon();
     const QImage src(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),
                      buf.width() * 4, QImage::Format_RGBA8888);
@@ -152,58 +220,102 @@ QIcon LayersPanel::layerThumbnail(std::size_t engineIndex) const {
     return QIcon(pm);
 }
 
+QTreeWidgetItem* LayersPanel::itemForId(pe::LayerId id) const {
+    if (id == pe::kNoLayer) return nullptr;
+    for (QTreeWidgetItemIterator it(tree_); *it != nullptr; ++it) {
+        if (idOf(*it) == id) return *it;
+    }
+    return nullptr;
+}
+
 void LayersPanel::updateLayerThumbnail(pe::LayerId id) {
     if (doc_ == nullptr || id == pe::kNoLayer) {
         rebuild();
         return;
     }
-    const std::size_t idx = doc_->topLevelIndexOf(id);
-    if (idx == pe::GroupLayer::npos) {
-        rebuild();  // not a top-level row (unknown id, or nested in a group)
+    QTreeWidgetItem* item = itemForId(id);
+    if (item == nullptr) {
+        rebuild();  // tree out of sync: rebuild it
         return;
     }
-    for (int row = 0; row < list_->count(); ++row) {
-        if (idOf(list_->item(row)) == id) {
-            // Guard: setIcon emits itemChanged, which must not be read back as an edit.
-            updating_ = true;
-            list_->item(row)->setIcon(layerThumbnail(idx));
-            updating_ = false;
-            return;
+    // Find the engine slot (sibling span + index) that directly owns `id` so we can
+    // composite just that layer. Pixels only change on non-group layers.
+    std::span<const std::unique_ptr<pe::Layer>> level = doc_->topLevelLayers();
+    std::size_t idx = pe::GroupLayer::npos;
+    for (;;) {
+        bool descended = false;
+        for (std::size_t i = 0; i < level.size(); ++i) {
+            const pe::Layer* l = level[i].get();
+            if (l == nullptr) continue;
+            if (l->id() == id) {
+                idx = i;
+                break;
+            }
+            if (l->kind() == pe::LayerKind::Group &&
+                static_cast<const pe::GroupLayer*>(l)->findDescendant(id) != nullptr) {
+                level = static_cast<const pe::GroupLayer*>(l)->children();
+                descended = true;
+                break;
+            }
+        }
+        if (idx != pe::GroupLayer::npos || !descended) break;
+    }
+    if (idx == pe::GroupLayer::npos) {
+        rebuild();
+        return;
+    }
+    // Guard: setIcon emits itemChanged, which must not be read back as an edit.
+    updating_ = true;
+    item->setIcon(0, layerThumbnail(level, idx));
+    updating_ = false;
+}
+
+void LayersPanel::addLevel(QTreeWidgetItem* parentItem,
+                           std::span<const std::unique_ptr<pe::Layer>> siblings) {
+    // Display top layer first: walk the stack from top (highest index) down.
+    for (std::size_t i = siblings.size(); i-- > 0;) {
+        const pe::Layer* l = siblings[i].get();
+        if (l == nullptr) continue;
+        const bool isGroup = l->kind() == pe::LayerKind::Group;
+        auto* item = new QTreeWidgetItem();
+        item->setText(0, QString::fromStdString(l->name()));
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(0, l->visible() ? Qt::Checked : Qt::Unchecked);
+        item->setData(0, Qt::UserRole, static_cast<qulonglong>(l->id()));
+        item->setIcon(0, isGroup ? groupIcon() : layerThumbnail(siblings, i));
+        if (parentItem != nullptr) {
+            parentItem->addChild(item);
+        } else {
+            tree_->addTopLevelItem(item);
+        }
+        if (isGroup) {
+            addLevel(item, static_cast<const pe::GroupLayer*>(l)->children());
+            item->setExpanded(collapsed_.find(l->id()) == collapsed_.end());
         }
     }
-    rebuild();  // row not found: the list is out of sync, rebuild it
 }
 
 void LayersPanel::rebuild() {
     updating_ = true;
-    list_->clear();
+    tree_->clear();
     if (doc_ != nullptr) {
-        const auto layers = doc_->topLevelLayers();  // bottom-to-top
-        // Display top layer first: walk the stack from top (highest index) down.
-        for (std::size_t i = layers.size(); i-- > 0;) {
-            const pe::Layer* l = layers[i].get();
-            auto* item = new QListWidgetItem(QString::fromStdString(l->name()), list_);
-            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-            item->setCheckState(l->visible() ? Qt::Checked : Qt::Unchecked);
-            item->setData(Qt::UserRole, static_cast<qulonglong>(l->id()));
-            item->setIcon(layerThumbnail(i));
+        addLevel(nullptr, doc_->topLevelLayers());
+        // Drop collapse state for groups that no longer exist (e.g. ungrouped/deleted), so
+        // the set doesn't accumulate dead ids across a session.
+        for (auto it = collapsed_.begin(); it != collapsed_.end();) {
+            it = (itemForId(*it) == nullptr) ? collapsed_.erase(it) : std::next(it);
         }
-        selectActiveInList();
+        selectActiveInTree();
     }
     updating_ = false;
     syncActiveControls();
     updateButtons();
 }
 
-void LayersPanel::selectActiveInList() {
+void LayersPanel::selectActiveInTree() {
     if (doc_ == nullptr) return;
-    const pe::LayerId active = doc_->activeLayer();
-    for (int row = 0; row < list_->count(); ++row) {
-        if (idOf(list_->item(row)) == active) {
-            list_->setCurrentRow(row);
-            return;
-        }
-    }
+    QTreeWidgetItem* item = itemForId(doc_->activeLayer());
+    if (item != nullptr) tree_->setCurrentItem(item);  // sets current + selects it
 }
 
 void LayersPanel::syncActiveControls() {
@@ -221,30 +333,94 @@ void LayersPanel::syncActiveControls() {
 
 void LayersPanel::updateButtons() {
     const bool hasDoc = doc_ != nullptr;
-    const bool hasActive = hasDoc && doc_->findLayer(doc_->activeLayer()) != nullptr;
+    const pe::LayerId active = hasDoc ? doc_->activeLayer() : pe::kNoLayer;
+    const pe::Layer* a = hasDoc ? doc_->findLayer(active) : nullptr;
+    const bool hasActive = a != nullptr;
     const std::size_t n = hasDoc ? doc_->topLevelCount() : 0;
-    const std::size_t idx =
-        hasActive ? doc_->topLevelIndexOf(doc_->activeLayer()) : pe::GroupLayer::npos;
+    const std::size_t idx = hasActive ? doc_->topLevelIndexOf(active) : pe::GroupLayer::npos;
+    const bool activeTopLevel = idx != pe::GroupLayer::npos;
+
     addBtn_->setEnabled(hasDoc);
-    dupBtn_->setEnabled(hasActive);
-    delBtn_->setEnabled(hasActive && n > 1);
-    upBtn_->setEnabled(hasActive && idx != pe::GroupLayer::npos && idx + 1 < n);
-    downBtn_->setEnabled(hasActive && idx != pe::GroupLayer::npos && idx > 0);
+    // Duplicate / Delete / reorder operate on top-level layers only in this version.
+    dupBtn_->setEnabled(hasActive && activeTopLevel);
+    delBtn_->setEnabled(hasActive && activeTopLevel && n > 1);
+    upBtn_->setEnabled(activeTopLevel && idx + 1 < n);
+    downBtn_->setEnabled(activeTopLevel && idx > 0);
+    groupBtn_->setEnabled(hasDoc && selectionAllTopLevel());
+    ungroupBtn_->setEnabled(hasActive && activeTopLevel && a->kind() == pe::LayerKind::Group);
+}
+
+void LayersPanel::groupSelected() {
+    if (doc_ == nullptr) return;
+    std::vector<pe::LayerId> ids = selectedTopLevelIds();
+    if (ids.empty()) return;
+    // GroupLayersCommand validates the ids are distinct top-level siblings (which the
+    // filter above guarantees) and sets the new group active, so the rebuild that the
+    // resulting LayerStructure change triggers re-selects the group for us.
+    push(std::make_unique<pe::GroupLayersCommand>(std::move(ids)));
+}
+
+void LayersPanel::ungroupSelected() {
+    if (doc_ == nullptr) return;
+    const pe::LayerId id = selectedLayer();
+    const pe::Layer* l = doc_->findLayer(id);
+    if (l == nullptr || l->kind() != pe::LayerKind::Group ||
+        doc_->topLevelIndexOf(id) == pe::GroupLayer::npos) {
+        return;  // only top-level groups dissolve in this version
+    }
+    // The command clears the active layer when the dissolved group was active; pick the
+    // group's topmost child as the new active so the panel doesn't end up with nothing
+    // selected. Captured before the command runs, while the group is still intact.
+    pe::LayerId newActive = pe::kNoLayer;
+    const auto kids = static_cast<const pe::GroupLayer*>(l)->children();
+    if (!kids.empty() && kids.back() != nullptr) newActive = kids.back()->id();
+
+    push(std::make_unique<pe::UngroupCommand>(id));
+    // Only compensate when the command actually cleared the active layer (the dissolved
+    // group was active). This avoids clobbering an unrelated active layer, and matches the
+    // command's contract: undo restores the prior active, so we don't fight it.
+    if (doc_->activeLayer() == pe::kNoLayer && newActive != pe::kNoLayer &&
+        doc_->findLayer(newActive) != nullptr) {
+        doc_->setActiveLayer(newActive);
+    }
 }
 
 void LayersPanel::onRowChanged() {
     if (updating_ || doc_ == nullptr) return;
     const pe::LayerId id = selectedLayer();
-    if (id != pe::kNoLayer) doc_->setActiveLayer(id);  // session state (not undoable)
+    if (id != pe::kNoLayer) {
+        // The active change below mirrors the current row; mark it self-induced so the
+        // resulting ActiveLayer notification does not re-select (and thereby collapse a
+        // multi-selection the user is building for Group).
+        syncingActive_ = true;
+        doc_->setActiveLayer(id);  // session state (not undoable)
+        syncingActive_ = false;
+    }
 }
 
-void LayersPanel::onItemChanged(QListWidgetItem* item) {
+void LayersPanel::onSelectionChanged() {
+    if (updating_) return;
+    updateButtons();  // Group enablement depends on the whole multi-selection
+}
+
+void LayersPanel::onItemChanged(QTreeWidgetItem* item, int /*column*/) {
     if (updating_ || doc_ == nullptr || item == nullptr) return;
     const pe::LayerId id = idOf(item);
     const pe::Layer* l = doc_->findLayer(id);
     if (l == nullptr) return;
-    const bool want = item->checkState() == Qt::Checked;
+    const bool want = item->checkState(0) == Qt::Checked;
     if (l->visible() != want) push(std::make_unique<pe::SetVisibilityCommand>(id, want));
+}
+
+void LayersPanel::onItemExpanded(QTreeWidgetItem* item) {
+    if (updating_) return;
+    collapsed_.erase(idOf(item));
+}
+
+void LayersPanel::onItemCollapsed(QTreeWidgetItem* item) {
+    if (updating_) return;
+    const pe::LayerId id = idOf(item);
+    if (id != pe::kNoLayer) collapsed_.insert(id);
 }
 
 void LayersPanel::onBlendChanged(int index) {
@@ -281,13 +457,18 @@ void LayersPanel::onAdd() {
 void LayersPanel::onDuplicate() {
     if (doc_ == nullptr) return;
     const pe::LayerId id = doc_->activeLayer();
-    if (doc_->findLayer(id) != nullptr) push(std::make_unique<pe::DuplicateLayerCommand>(id));
+    // DuplicateLayerCommand clones a top-level layer only; skip otherwise so no phantom
+    // (no-op) undo entry is recorded.
+    if (doc_->topLevelIndexOf(id) == pe::GroupLayer::npos) return;
+    push(std::make_unique<pe::DuplicateLayerCommand>(id));
 }
 
 void LayersPanel::onDelete() {
     if (doc_ == nullptr || doc_->topLevelCount() <= 1) return;
     const pe::LayerId id = doc_->activeLayer();
-    if (doc_->findLayer(id) != nullptr) push(std::make_unique<pe::RemoveLayerCommand>(id));
+    // RemoveLayerCommand removes a top-level layer only; skip otherwise (no phantom entry).
+    if (doc_->topLevelIndexOf(id) == pe::GroupLayer::npos) return;
+    push(std::make_unique<pe::RemoveLayerCommand>(id));
 }
 
 void LayersPanel::onMoveUp() {
