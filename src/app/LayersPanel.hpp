@@ -96,6 +96,12 @@ private:
 
     pe::Document* doc_ = nullptr;  // not owned; observed while non-null
     bool updating_ = false;        // guard: programmatic UI updates must not echo as edits
+    // Set while onRowChanged() pushes the active layer to the document. The resulting
+    // (synchronous) ActiveLayer notification must NOT re-select the active item — doing so
+    // would clear the rest of the multi-selection (setCurrentItem uses ClearAndSelect),
+    // making it impossible to assemble a 2+ layer selection for Group. The UI is already
+    // in sync in that case; only externally-driven active changes need re-selection.
+    bool syncingActive_ = false;
 
     QComboBox* blend_ = nullptr;
     QSpinBox* opacity_ = nullptr;

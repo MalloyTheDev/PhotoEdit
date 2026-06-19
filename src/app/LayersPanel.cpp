@@ -24,6 +24,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <utility>
 
 namespace pe::app {
@@ -120,9 +121,14 @@ void LayersPanel::onDocumentChanged(const pe::Document&, const pe::DocumentChang
             updateLayerThumbnail(change.layer);
             break;
         case pe::DocumentChange::Kind::ActiveLayer:
-            updating_ = true;
-            selectActiveInTree();
-            updating_ = false;
+            // Skip re-selection for an active change we ourselves just pushed from a row
+            // click — the tree selection is already correct, and re-selecting would
+            // collapse a multi-selection (see syncingActive_).
+            if (!syncingActive_) {
+                updating_ = true;
+                selectActiveInTree();
+                updating_ = false;
+            }
             syncActiveControls();
             updateButtons();
             break;
@@ -294,6 +300,11 @@ void LayersPanel::rebuild() {
     tree_->clear();
     if (doc_ != nullptr) {
         addLevel(nullptr, doc_->topLevelLayers());
+        // Drop collapse state for groups that no longer exist (e.g. ungrouped/deleted), so
+        // the set doesn't accumulate dead ids across a session.
+        for (auto it = collapsed_.begin(); it != collapsed_.end();) {
+            it = (itemForId(*it) == nullptr) ? collapsed_.erase(it) : std::next(it);
+        }
         selectActiveInTree();
     }
     updating_ = false;
@@ -365,7 +376,11 @@ void LayersPanel::ungroupSelected() {
     if (!kids.empty() && kids.back() != nullptr) newActive = kids.back()->id();
 
     push(std::make_unique<pe::UngroupCommand>(id));
-    if (newActive != pe::kNoLayer && doc_->findLayer(newActive) != nullptr) {
+    // Only compensate when the command actually cleared the active layer (the dissolved
+    // group was active). This avoids clobbering an unrelated active layer, and matches the
+    // command's contract: undo restores the prior active, so we don't fight it.
+    if (doc_->activeLayer() == pe::kNoLayer && newActive != pe::kNoLayer &&
+        doc_->findLayer(newActive) != nullptr) {
         doc_->setActiveLayer(newActive);
     }
 }
@@ -373,7 +388,14 @@ void LayersPanel::ungroupSelected() {
 void LayersPanel::onRowChanged() {
     if (updating_ || doc_ == nullptr) return;
     const pe::LayerId id = selectedLayer();
-    if (id != pe::kNoLayer) doc_->setActiveLayer(id);  // session state (not undoable)
+    if (id != pe::kNoLayer) {
+        // The active change below mirrors the current row; mark it self-induced so the
+        // resulting ActiveLayer notification does not re-select (and thereby collapse a
+        // multi-selection the user is building for Group).
+        syncingActive_ = true;
+        doc_->setActiveLayer(id);  // session state (not undoable)
+        syncingActive_ = false;
+    }
 }
 
 void LayersPanel::onSelectionChanged() {
