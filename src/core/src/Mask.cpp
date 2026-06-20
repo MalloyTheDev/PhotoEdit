@@ -73,6 +73,28 @@ Rect MaskBuffer::contentBounds() const noexcept {
     return bounds;
 }
 
+void MaskBuffer::compact(Rect region) noexcept {
+    if (region.isEmpty()) return;
+    // Only inspect tiles overlapping `region` so the work is bounded by the caller's edit, not the
+    // whole buffer. Erase any that are entirely kOpaque (identical to absent; absent reads
+    // kOpaque).
+    const TileSpan span = tilesForRect(region);
+    for (int row = span.rowBegin; row < span.rowEnd; ++row) {
+        for (int col = span.colBegin; col < span.colEnd; ++col) {
+            auto it = tiles_.find(keyOf(TileCoord{col, row}));
+            if (it == tiles_.end()) continue;
+            bool allOpaque = true;
+            for (const uint8_t b : it->second) {
+                if (b != kOpaque) {
+                    allOpaque = false;
+                    break;
+                }
+            }
+            if (allOpaque) tiles_.erase(it);
+        }
+    }
+}
+
 bool maskFillFits(Rect canvas) noexcept {
     return !rejectFill(canvas);
 }

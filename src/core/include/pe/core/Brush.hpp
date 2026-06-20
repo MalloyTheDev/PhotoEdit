@@ -10,6 +10,7 @@
 #include "pe/core/TileStore.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
@@ -96,6 +97,26 @@ private:
     std::string name_;
 };
 
+// A reversible paint stroke into a layer's MASK buffer (single-channel grayscale: 0 hides, 255
+// reveals). It snapshots the before/after mask bytes over the stroke's bounding box (row-major), so
+// undo restores them exactly. Used by the mask brush to refine which parts of a layer the mask
+// shows.
+class MaskPaintCommand final : public Command {
+public:
+    MaskPaintCommand(LayerId layer, Rect region, std::vector<std::uint8_t> before,
+                     std::vector<std::uint8_t> after);
+    [[nodiscard]] std::string name() const override { return "Mask Brush"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    DocumentChange apply(Document& doc, const std::vector<std::uint8_t>& values);
+    LayerId layer_;
+    Rect region_;                       // document-space bbox the snapshots cover
+    std::vector<std::uint8_t> before_;  // mask bytes before the stroke
+    std::vector<std::uint8_t> after_;   // mask bytes after the stroke
+};
+
 // Build a PaintCommand depositing `points` with `settings` and `color` into the
 // pixel layer `layerId`. If `selection` is non-null and active, painting is gated
 // (coverage multiplied) by it, so a brush is confined to the selected region with
@@ -178,5 +199,14 @@ private:
                                                        const BrushSettings& settings,
                                                        std::span<const StrokePoint> points,
                                                        const Selection* selection = nullptr);
+
+// Mask brush: paint into the active layer's MASK (not its pixels), blending each touched mask byte
+// from its current value toward `targetGray` in [0,1] (0 = hide, 1 = reveal) by the brush coverage
+// (capped at the stroke opacity, gated by any active selection). Returns nullptr if the layer has
+// no mask, the stroke has no coverage / changes nothing, or the bounding box is over the per-stroke
+// budget. The command is NOT applied — push it to history.
+[[nodiscard]] std::unique_ptr<MaskPaintCommand> maskPaintStroke(
+    Document& doc, LayerId layerId, const BrushSettings& settings,
+    std::span<const StrokePoint> points, float targetGray, const Selection* selection = nullptr);
 
 }  // namespace pe

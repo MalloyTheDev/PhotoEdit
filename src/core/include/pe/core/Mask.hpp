@@ -31,6 +31,13 @@ public:
     // Union of allocated (non-default) tile bounds.
     [[nodiscard]] Rect contentBounds() const noexcept;
 
+    // Drop any allocated tile within `region` whose bytes are all kOpaque: such a tile is
+    // semantically identical to an absent one (absent reads as kOpaque), so erasing it is lossless
+    // and keeps the buffer canonical. Callers that may write kOpaque into a previously-allocated
+    // tile (e.g. undoing a mask-brush stroke) use this so empty()/contentBounds()/serialization
+    // stay byte-exact rather than retaining a redundant fully-revealing tile.
+    void compact(Rect region) noexcept;
+
 private:
     using Key = std::pair<int, int>;
     using GrayTile = std::array<uint8_t, kTilePixels>;
