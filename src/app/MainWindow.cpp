@@ -128,6 +128,12 @@ void MainWindow::buildMenuBar() {
     undoAct->setShortcut(QKeySequence::Undo);
     QAction* redoAct = editMenu->addAction(QStringLiteral("&Redo"), this, &MainWindow::redo);
     redoAct->setShortcut(QKeySequence::Redo);
+    editMenu->addSeparator();
+    QAction* freeTransformAct =
+        editMenu->addAction(QStringLiteral("Free &Transform"), this, [this] {
+            if (canvas_ != nullptr) canvas_->setTool(CanvasView::Tool::Transform);
+        });
+    freeTransformAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
 
     // Open a parameterized effect dialog (live preview + one-undo-step commit). Captured by
     // value into the action lambdas below, so it must hold only `this` (a stable pointer).
