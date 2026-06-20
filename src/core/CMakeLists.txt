@@ -11,6 +11,7 @@ add_library(pe_core
     src/Layer.cpp
     src/PixelLayer.cpp
     src/SolidColorLayer.cpp
+    src/TextLayer.cpp
     src/GroupLayer.cpp
     src/Compositor.cpp
     src/Document.cpp
