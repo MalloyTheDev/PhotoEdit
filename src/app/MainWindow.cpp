@@ -18,6 +18,7 @@
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Filter.hpp"
+#include "pe/core/TextLayer.hpp"  // pe::TextLayer / TextModel / EditTextCommand
 #include "pe/core/Version.hpp"
 
 #include <QAction>
@@ -857,35 +858,78 @@ bool MainWindow::writeTo(const QString& path) {
     return true;
 }
 
+namespace {
+// Build a TextModel from the dialog's chosen string + font, the foreground ink color, and the
+// document-space click point. The QFont carries family / pixel size / bold / italic.
+pe::TextModel modelFromDialog(const QString& text, const QFont& font, const QColor& ink,
+                              pe::Point origin) {
+    return pe::TextModel{
+        .text = text.toStdString(),
+        .fontFamily = font.family().toStdString(),
+        .pixelSize = font.pixelSize() > 0 ? font.pixelSize() : 48,
+        .bold = font.bold(),
+        .italic = font.italic(),
+        .color =
+            pe::Rgba8{static_cast<std::uint8_t>(ink.red()), static_cast<std::uint8_t>(ink.green()),
+                      static_cast<std::uint8_t>(ink.blue()), 255},
+        .origin = origin,
+    };
+}
+}  // namespace
+
 void MainWindow::onAddText(const QPointF& docPos) {
     if (doc_ == nullptr) return;
-    // Check paintability up front so the user isn't prompted to type (and configure a font) only
-    // to lose that input when the active layer turns out not to be a pixel layer.
-    const pe::Layer* active = doc_->findLayer(doc_->activeLayer());
-    if (active == nullptr || active->kind() != pe::LayerKind::Pixel) {
-        statusBar()->showMessage(QStringLiteral("Select a pixel layer to add text."), 4000);
-        return;
-    }
     TextDialog dlg(this);
     if (dlg.exec() != QDialog::Accepted) return;
     const QString text = dlg.text();
     if (text.isEmpty()) return;
 
-    // Rasterize in the app layer (Qt fonts), then hand the pixels to the headless engine to
-    // composite onto the active layer as one undoable command (the foreground color is the ink).
-    const pe::PixelBuffer raster = renderText(text, dlg.font(), fgColor_);
+    // A live, re-editable text layer: the app rasterizes (Qt fonts) into the cached raster the
+    // engine composites; the editable model rides along so it can be reopened. The raster is
+    // anchored top-left at the click (rasterOrigin == model.origin) so re-edits don't shift it.
+    const pe::Point origin{static_cast<int>(std::lround(docPos.x())),
+                           static_cast<int>(std::lround(docPos.y()))};
+    const pe::TextModel model = modelFromDialog(text, dlg.font(), fgColor_, origin);
+    pe::PixelBuffer raster = rasterizeText(model);
     if (raster.isEmpty()) {
         statusBar()->showMessage(QStringLiteral("Text is too large to rasterize."), 4000);
         return;
     }
-    const pe::Point origin{static_cast<int>(std::lround(docPos.x())),
-                           static_cast<int>(std::lround(docPos.y()))};
-    if (auto cmd = pe::stampBuffer(*doc_, doc_->activeLayer(), origin, raster,
-                                   std::string("Type Text"), &doc_->selection())) {
-        doc_->history().push(std::move(cmd));  // observer repaints
-    } else {
-        statusBar()->showMessage(QStringLiteral("Select a pixel layer to add text."), 4000);
+    auto layer = std::make_unique<pe::TextLayer>(model, std::move(raster), model.origin);
+    const pe::LayerId id = layer->id();
+    doc_->history().push(
+        std::make_unique<pe::AddLayerCommand>(std::move(layer), doc_->topLevelCount()));
+    doc_->setActiveLayer(id);
+}
+
+void MainWindow::editTextLayer(pe::LayerId id) {
+    if (doc_ == nullptr) return;
+    pe::Layer* layer = doc_->findLayer(id);
+    if (layer == nullptr || layer->kind() != pe::LayerKind::Text) return;
+    const pe::TextModel current = static_cast<pe::TextLayer*>(layer)->model();
+
+    // Reopen the dialog seeded from the layer's current text + font.
+    TextDialog dlg(this);
+    QFont font(QString::fromStdString(current.fontFamily));
+    font.setPixelSize(current.pixelSize);
+    font.setBold(current.bold);
+    font.setItalic(current.italic);
+    dlg.setInitial(QString::fromStdString(current.text), font);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QString text = dlg.text();
+    if (text.isEmpty()) return;
+
+    // Keep the original origin + ink color (the dialog edits text/family/size only); re-rasterize
+    // and commit one undoable EditTextCommand.
+    pe::TextModel model = modelFromDialog(text, dlg.font(), fgColor_, current.origin);
+    model.color = current.color;  // preserve the layer's color (no color control in the dialog)
+    pe::PixelBuffer raster = rasterizeText(model);
+    if (raster.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Text is too large to rasterize."), 4000);
+        return;
     }
+    doc_->history().push(
+        std::make_unique<pe::EditTextCommand>(id, model, std::move(raster), model.origin));
 }
 
 void MainWindow::editAdjustmentLayer(pe::LayerId id) {
@@ -1145,6 +1189,7 @@ void MainWindow::buildDockPanels() {
 
     layers_ = new LayersPanel();
     connect(layers_, &LayersPanel::editAdjustmentRequested, this, &MainWindow::editAdjustmentLayer);
+    connect(layers_, &LayersPanel::editTextRequested, this, &MainWindow::editTextLayer);
     // Clicking a mask thumbnail targets it for brush painting; route that to the canvas so the
     // Brush paints the active layer's mask (black hides, white reveals) until the target is
     // cleared.

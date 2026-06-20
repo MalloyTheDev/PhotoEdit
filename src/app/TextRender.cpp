@@ -16,10 +16,10 @@ namespace pe::app {
 
 namespace {
 // Bound the rasterized text so a huge font size or long string can't trigger an enormous QImage
-// allocation. 16 MP matches the engine's per-edit cap (stampBuffer would reject a larger region
-// anyway); the per-dimension bound guards the multiply.
-constexpr int kMaxTextDim = 8192;
-constexpr long long kMaxTextPixels = 16'000'000;
+// allocation. These mirror the engine's TextLayer raster round-trip contract so this producer can
+// never emit a raster the .pedoc reader would reject (a file you could save but not reopen).
+constexpr int kMaxTextDim = pe::kMaxTextRasterDim;
+constexpr long long kMaxTextPixels = pe::kMaxTextRasterPixels;
 }  // namespace
 
 pe::PixelBuffer renderText(const QString& text, const QFont& font, const QColor& color) {
@@ -59,6 +59,15 @@ pe::PixelBuffer renderText(const QString& text, const QFont& font, const QColor&
                     img.constScanLine(y), static_cast<std::size_t>(w) * 4);
     }
     return out;
+}
+
+pe::PixelBuffer rasterizeText(const pe::TextModel& model) {
+    QFont font(QString::fromStdString(model.fontFamily));
+    font.setPixelSize(model.pixelSize);
+    font.setBold(model.bold);
+    font.setItalic(model.italic);
+    const QColor color(model.color.r, model.color.g, model.color.b, model.color.a);
+    return renderText(QString::fromStdString(model.text), font, color);
 }
 
 }  // namespace pe::app

@@ -586,8 +586,14 @@ void LayersPanel::onItemDoubleClicked(QTreeWidgetItem* item, int /*column*/) {
     if (doc_ == nullptr || item == nullptr) return;
     const pe::LayerId id = idOf(item);
     const pe::Layer* l = doc_->findLayer(id);
-    // Double-clicking an adjustment-layer row opens its parameter dialog (MainWindow handles it).
-    if (l != nullptr && l->isAdjustment()) emit editAdjustmentRequested(id);
+    // Double-clicking an adjustment-layer row opens its parameter dialog; a text-layer row reopens
+    // the text dialog. (MainWindow handles both.)
+    if (l == nullptr) return;
+    if (l->isAdjustment()) {
+        emit editAdjustmentRequested(id);
+    } else if (l->kind() == pe::LayerKind::Text) {
+        emit editTextRequested(id);
+    }
 }
 
 void LayersPanel::onItemExpanded(QTreeWidgetItem* item) {

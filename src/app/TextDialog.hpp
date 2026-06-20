@@ -23,6 +23,10 @@ public:
     [[nodiscard]] QString text() const;
     [[nodiscard]] QFont font() const;  // chosen family at the chosen pixel size
 
+    // Seed the controls from an existing string + font (the re-edit path: double-clicking a text
+    // layer reopens this dialog with its current content).
+    void setInitial(const QString& text, const QFont& font);
+
 private:
     QLineEdit* textEdit_ = nullptr;
     QFontComboBox* fontCombo_ = nullptr;

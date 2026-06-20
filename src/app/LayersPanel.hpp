@@ -63,6 +63,10 @@ signals:
     // parameter dialog. (The panel owns the selection but not the adjustment dialogs.)
     void editAdjustmentRequested(pe::LayerId id);
 
+    // Emitted when the user double-clicks a text-layer row; MainWindow reopens the text dialog
+    // seeded from the layer's model and commits an EditTextCommand.
+    void editTextRequested(pe::LayerId id);
+
     // Emitted when the mask-edit target changes: true when the user clicks a layer's mask
     // thumbnail to paint into it, false when they leave mask-edit (select a layer/thumbnail, or
     // the targeted mask disappears). MainWindow relays it to CanvasView::setMaskEditTarget so the

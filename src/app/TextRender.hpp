@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pe/core/PixelBuffer.hpp"
+#include "pe/core/TextLayer.hpp"  // pe::TextModel
 
 class QColor;
 class QFont;
@@ -15,5 +16,11 @@ namespace pe::app {
 // result onto a layer via pe::stampBuffer.
 [[nodiscard]] pe::PixelBuffer renderText(const QString& text, const QFont& font,
                                          const QColor& color);
+
+// Rasterize a TextModel into the cached raster a pe::TextLayer composites: builds the QFont from
+// the model (family / pixelSize / bold / italic) and the QColor from model.color, then delegates to
+// renderText. Empty buffer on empty/over-cap text. This is the single producer the engine's
+// TextLayer raster contract (pe::kMaxTextRasterDim/Pixels) is aligned to.
+[[nodiscard]] pe::PixelBuffer rasterizeText(const pe::TextModel& model);
 
 }  // namespace pe::app
