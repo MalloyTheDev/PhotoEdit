@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace pe {
@@ -70,6 +71,57 @@ struct Rect {
 
     [[nodiscard]] constexpr bool intersects(const Rect& o) const noexcept {
         return !intersected(o).isEmpty();
+    }
+};
+
+// A 2x3 affine transform in document space (doubles for sub-pixel precision), mapping
+// (x, y) -> (m00*x + m01*y + m02, m10*x + m11*y + m12). Used by the Transform tool to build a
+// scale/rotate/translate and by transformLayerContent to resample a layer's pixels. Row-major.
+struct Affine2D {
+    double m00 = 1.0, m01 = 0.0, m02 = 0.0;
+    double m10 = 0.0, m11 = 1.0, m12 = 0.0;
+
+    [[nodiscard]] constexpr double applyX(double x, double y) const noexcept {
+        return m00 * x + m01 * y + m02;
+    }
+    [[nodiscard]] constexpr double applyY(double x, double y) const noexcept {
+        return m10 * x + m11 * y + m12;
+    }
+    [[nodiscard]] constexpr double determinant() const noexcept { return m00 * m11 - m01 * m10; }
+
+    // Inverse transform. Only meaningful when determinant() is non-zero (callers check); a singular
+    // matrix yields a zeroed linear part.
+    [[nodiscard]] constexpr Affine2D inverted() const noexcept {
+        const double det = determinant();
+        const double inv = det != 0.0 ? 1.0 / det : 0.0;
+        Affine2D r;
+        r.m00 = m11 * inv;
+        r.m01 = -m01 * inv;
+        r.m10 = -m10 * inv;
+        r.m11 = m00 * inv;
+        r.m02 = -(r.m00 * m02 + r.m01 * m12);  // -R^-1 * t
+        r.m12 = -(r.m10 * m02 + r.m11 * m12);
+        return r;
+    }
+
+    static constexpr Affine2D translation(double tx, double ty) noexcept {
+        return Affine2D{1.0, 0.0, tx, 0.0, 1.0, ty};
+    }
+    static constexpr Affine2D scaling(double sx, double sy) noexcept {
+        return Affine2D{sx, 0.0, 0.0, 0.0, sy, 0.0};
+    }
+    static Affine2D rotation(double radians) noexcept {
+        const double c = std::cos(radians);
+        const double s = std::sin(radians);
+        return Affine2D{c, -s, 0.0, s, c, 0.0};
+    }
+
+    // a after b: result(p) == a(b(p)).
+    [[nodiscard]] static constexpr Affine2D concat(const Affine2D& a, const Affine2D& b) noexcept {
+        return Affine2D{
+            a.m00 * b.m00 + a.m01 * b.m10,         a.m00 * b.m01 + a.m01 * b.m11,
+            a.m00 * b.m02 + a.m01 * b.m12 + a.m02, a.m10 * b.m00 + a.m11 * b.m10,
+            a.m10 * b.m01 + a.m11 * b.m11,         a.m10 * b.m02 + a.m11 * b.m12 + a.m12};
     }
 };
 

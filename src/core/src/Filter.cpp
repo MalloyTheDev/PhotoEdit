@@ -461,6 +461,97 @@ std::unique_ptr<PaintCommand> moveLayerContent(Document& doc, LayerId layerId, i
         /*selection=*/nullptr);  // the Move tool shifts the whole layer, not a gated region
 }
 
+std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layerId,
+                                                    const Affine2D& srcToDst) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    const Rect src = static_cast<PixelLayer*>(layer)->contentBounds();
+    if (src.isEmpty()) return nullptr;  // nothing to transform
+
+    // Reject a singular or non-finite transform (would be non-invertible / collapse to nothing).
+    const double det = srcToDst.determinant();
+    if (!std::isfinite(det) || std::fabs(det) < 1e-9) return nullptr;
+
+    // Destination bounding box = the transformed source corners. Validate finiteness and range
+    // before the double->int cast (an absurd transform must reject, never produce UB).
+    constexpr double kBound = static_cast<double>(kMaxCanvasDimension);
+    const double cx[4] = {static_cast<double>(src.left()), static_cast<double>(src.right()),
+                          static_cast<double>(src.left()), static_cast<double>(src.right())};
+    const double cy[4] = {static_cast<double>(src.top()), static_cast<double>(src.top()),
+                          static_cast<double>(src.bottom()), static_cast<double>(src.bottom())};
+    double minX = kBound;
+    double minY = kBound;
+    double maxX = -kBound;
+    double maxY = -kBound;
+    for (int i = 0; i < 4; ++i) {
+        const double dx = srcToDst.applyX(cx[i], cy[i]);
+        const double dy = srcToDst.applyY(cx[i], cy[i]);
+        if (!std::isfinite(dx) || !std::isfinite(dy) || std::fabs(dx) > kBound ||
+            std::fabs(dy) > kBound) {
+            return nullptr;  // off-canvas / overflow: refuse rather than clamp the result
+        }
+        minX = std::min(minX, dx);
+        minY = std::min(minY, dy);
+        maxX = std::max(maxX, dx);
+        maxY = std::max(maxY, dy);
+    }
+    const int dl = static_cast<int>(std::floor(minX));
+    const int dt = static_cast<int>(std::floor(minY));
+    const int dr = static_cast<int>(std::ceil(maxX));
+    const int db = static_cast<int>(std::ceil(maxY));
+    const Rect dst{dl, dt, dr - dl, db - dt};
+    if (dst.isEmpty()) return nullptr;
+
+    // The edit spans both the vacated source and the destination: clear the old pixels and write
+    // the resampled ones in one reversible in-region transform. bakePixelEditRegion caps the area
+    // (kMaxFilterPixels) and the origin/extent, so the destination size is bounded there.
+    const Rect region = src.united(dst);
+    const Affine2D inv = srcToDst.inverted();
+    const int rx = region.x;
+    const int ry = region.y;
+    return bakePixelEditRegion(
+        doc, layerId, "Transform", region,
+        [inv, rx, ry](std::span<Rgbaf> img, int w, int h) {
+            const std::vector<Rgbaf> orig(img.begin(), img.end());
+            // Premultiplied bilinear sample of `orig` at continuous pixel index (fx, fy); fully
+            // outside (or non-finite) reads transparent, so the transform never bleeds the
+            // arbitrary color of transparent pixels and the int casts below can't go out of range.
+            const auto sample = [&](double fx, double fy) -> Rgbaf {
+                if (!std::isfinite(fx) || !std::isfinite(fy) || fx < -1.0 || fy < -1.0 ||
+                    fx > static_cast<double>(w) || fy > static_cast<double>(h)) {
+                    return Rgbaf{};
+                }
+                const int x0 = static_cast<int>(std::floor(fx));
+                const int y0 = static_cast<int>(std::floor(fy));
+                const float tx = static_cast<float>(fx - x0);
+                const float ty = static_cast<float>(fy - y0);
+                const auto at = [&](int xi, int yi) -> Rgbaf {
+                    if (xi < 0 || xi >= w || yi < 0 || yi >= h) return Rgbaf{};
+                    return premultiply(orig[idx(xi, yi, w)]);
+                };
+                const auto lerp = [](const Rgbaf& a, const Rgbaf& b, float t) {
+                    return Rgbaf{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                                 a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+                };
+                const Rgbaf top = lerp(at(x0, y0), at(x0 + 1, y0), tx);
+                const Rgbaf bot = lerp(at(x0, y0 + 1), at(x0 + 1, y0 + 1), tx);
+                return unpremultiply(lerp(top, bot, ty));
+            };
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    // Inverse-map this destination pixel's CENTER to a source document coordinate,
+                    // then to a region-local pixel index (center of index i sits at rx+i+0.5).
+                    const double ddx = static_cast<double>(rx) + x + 0.5;
+                    const double ddy = static_cast<double>(ry) + y + 0.5;
+                    const double sxDoc = inv.applyX(ddx, ddy);
+                    const double syDoc = inv.applyY(ddx, ddy);
+                    img[idx(x, y, w)] = sample(sxDoc - rx - 0.5, syDoc - ry - 0.5);
+                }
+            }
+        },
+        /*selection=*/nullptr);  // the Transform tool transforms the whole layer
+}
+
 std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const Filter& filter,
                                           const Selection* selection) {
     return bakePixelEdit(

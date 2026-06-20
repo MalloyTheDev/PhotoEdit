@@ -454,3 +454,71 @@ PE_TEST(stamp_buffer_16bit_layer_and_negative_origin) {
     doc2->history().undo();
     PE_CHECK_EQ(pl2->tiles().pixel(0, 0).a, static_cast<uint8_t>(0));  // restored
 }
+
+namespace {
+std::unique_ptr<Document> docWithRect(Rect fill, Rgba8 color, Size canvas) {
+    auto doc = Document::createBlank(canvas);
+    static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()))->tiles().fillRect(fill, color);
+    return doc;
+}
+}  // namespace
+
+PE_TEST(transform_identity_is_noop) {
+    // Identity inverse-maps each dest pixel to its own integer source coord, reproducing every
+    // pixel exactly — so nothing changes and no command (no phantom undo entry) is produced.
+    auto doc = docWithRect(Rect{10, 10, 20, 20}, Rgba8{200, 100, 50, 255}, Size{64, 64});
+    PE_CHECK(transformLayerContent(*doc, doc->activeLayer(), Affine2D{}) == nullptr);
+}
+
+PE_TEST(transform_integer_translate_matches_move) {
+    // An integer translation samples at integer coords (no resampling error), so it must equal
+    // moveLayerContent pixel-for-pixel.
+    auto d1 = docWithRect(Rect{8, 8, 16, 16}, Rgba8{50, 150, 250, 255}, Size{64, 64});
+    auto d2 = docWithRect(Rect{8, 8, 16, 16}, Rgba8{50, 150, 250, 255}, Size{64, 64});
+    d1->history().push(moveLayerContent(*d1, d1->activeLayer(), 12, 9));
+    d2->history().push(
+        transformLayerContent(*d2, d2->activeLayer(), Affine2D::translation(12.0, 9.0)));
+    auto* p1 = static_cast<PixelLayer*>(d1->findLayer(d1->activeLayer()));
+    auto* p2 = static_cast<PixelLayer*>(d2->findLayer(d2->activeLayer()));
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) PE_CHECK_EQ(p1->tiles().pixel(x, y), p2->tiles().pixel(x, y));
+    }
+}
+
+PE_TEST(transform_scale_2x_grows_content) {
+    auto doc = docWithRect(Rect{0, 0, 16, 16}, Rgba8{255, 0, 0, 255}, Size{128, 128});
+    const LayerId base = doc->activeLayer();
+    doc->history().push(transformLayerContent(*doc, base, Affine2D::scaling(2.0, 2.0)));
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    PE_CHECK(pl->tiles().pixel(20, 20).a > 200);  // inside the doubled 0..32 region
+    PE_CHECK_EQ(pl->tiles().pixel(40, 40).a,
+                static_cast<uint8_t>(0));  // beyond the dst, transparent
+}
+
+PE_TEST(transform_rejects_degenerate_nonfinite_and_huge) {
+    auto doc = docWithRect(Rect{0, 0, 16, 16}, Rgba8{255, 0, 0, 255}, Size{32, 32});
+    const LayerId base = doc->activeLayer();
+    PE_CHECK(transformLayerContent(*doc, base, Affine2D::scaling(0.0, 0.0)) ==
+             nullptr);  // singular
+    Affine2D nanT;
+    nanT.m00 = std::nan("");
+    PE_CHECK(transformLayerContent(*doc, base, nanT) == nullptr);  // non-finite -> no UB
+    PE_CHECK(transformLayerContent(*doc, base, Affine2D::translation(1e9, 0.0)) ==
+             nullptr);  // off-range
+}
+
+PE_TEST(transform_empty_layer_is_null) {
+    auto doc = Document::createBlank(Size{32, 32});
+    PE_CHECK(transformLayerContent(*doc, doc->activeLayer(), Affine2D::scaling(2.0, 2.0)) ==
+             nullptr);
+}
+
+PE_TEST(transform_undo_restores_exact) {
+    auto doc = docWithRect(Rect{10, 10, 20, 20}, Rgba8{30, 60, 90, 255}, Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    doc->history().push(transformLayerContent(*doc, base, Affine2D::rotation(0.5)));
+    doc->history().undo();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    PE_CHECK_EQ(pl->tiles().pixel(15, 15), (Rgba8{30, 60, 90, 255}));  // exact restore
+    PE_CHECK_EQ(pl->tiles().pixel(0, 0).a, static_cast<uint8_t>(0));
+}
