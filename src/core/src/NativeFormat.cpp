@@ -8,6 +8,7 @@
 #include "pe/core/Mask.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/SolidColorLayer.hpp"
+#include "pe/core/TextLayer.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -25,12 +26,15 @@ namespace pe {
 
 namespace {
 
-// Magic is "PEDOC" + a version digit. v5 adds adjustment & solid-color layer records; the reader
-// still accepts v4 files (they only ever contained pixel/group layers, which read identically).
-constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '5'};
-constexpr std::uint32_t kVersion = 5;
+// Magic is "PEDOC" + a version digit. v5 adds adjustment & solid-color layer records; v6 adds text
+// layers. The reader checks only the "PEDOC" prefix + the u32 version, so it still accepts v4/v5
+// files (they only ever contained the earlier kinds, which read identically).
+constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '6'};
+constexpr std::uint32_t kVersion = 6;
 constexpr std::uint32_t kMinReadVersion = 4;          // oldest format this reader accepts
 constexpr std::int64_t kMaxLayerPixels = 64'000'000;  // per-layer content cap
+// Text-raster caps live in TextLayer.hpp (pe::kMaxTextRasterDim / pe::kMaxTextRasterPixels) so the
+// app producer, the engine type, and this reader share one source of truth.
 constexpr std::uint32_t kMaxLayers = 100'000;
 constexpr std::uint32_t kMaxNameBytes = 65'536;
 constexpr int kMaxGroupDepth = 256;  // cap nesting so a hostile file can't blow the stack
@@ -41,6 +45,7 @@ constexpr std::uint8_t kKindPixel = 0;
 constexpr std::uint8_t kKindGroup = 1;
 constexpr std::uint8_t kKindAdjustment = 2;
 constexpr std::uint8_t kKindSolid = 3;
+constexpr std::uint8_t kKindText = 4;
 
 // --- little-endian byte writer ---
 class Writer {
@@ -138,11 +143,12 @@ bool zlibInflate(std::span<const std::byte> in, std::vector<std::byte>& out) {
 }
 #endif
 
-// Whether the format serializes this layer. Pixel, Group, Adjustment, and SolidColor round-trip;
-// text layers and embedded profiles arrive later.
+// Whether the format serializes this layer. Pixel, Group, Adjustment, SolidColor, and Text
+// round-trip; embedded profiles arrive later.
 [[nodiscard]] bool serializable(const Layer& layer) {
     return layer.kind() == LayerKind::Group || layer.isAdjustment() ||
            dynamic_cast<const SolidColorLayer*>(&layer) != nullptr ||
+           dynamic_cast<const TextLayer*>(&layer) != nullptr ||
            dynamic_cast<const PixelLayer*>(&layer) != nullptr;
 }
 
@@ -576,9 +582,11 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
     const bool isGroup = layer.kind() == LayerKind::Group;
     const bool isAdjustment = layer.isAdjustment();
     const auto* solid = dynamic_cast<const SolidColorLayer*>(&layer);
+    const auto* text = dynamic_cast<const TextLayer*>(&layer);
     const std::uint8_t kindByte = isGroup            ? kKindGroup
                                   : isAdjustment     ? kKindAdjustment
                                   : solid != nullptr ? kKindSolid
+                                  : text != nullptr  ? kKindText
                                                      : kKindPixel;
     w.u8(kindByte);
     w.u8(layer.visible() ? 1 : 0);
@@ -647,6 +655,41 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
         return;
     }
 
+    if (text != nullptr) {
+        // Editable model (re-rasterized by the app on edit).
+        const TextModel& m = text->model();
+        w.u32(static_cast<std::uint32_t>(m.text.size()));
+        w.bytes(m.text.data(), m.text.size());
+        w.u32(static_cast<std::uint32_t>(m.fontFamily.size()));
+        w.bytes(m.fontFamily.data(), m.fontFamily.size());
+        w.i32(m.pixelSize);
+        w.u8(m.bold ? 1 : 0);
+        w.u8(m.italic ? 1 : 0);
+        w.u8(m.color.r);
+        w.u8(m.color.g);
+        w.u8(m.color.b);
+        w.u8(m.color.a);
+        w.i32(m.origin.x);
+        w.i32(m.origin.y);
+        // Cached straight-alpha RGBA8 raster (the engine can't regenerate it). Not canvas-clamped:
+        // text may legitimately hang off the edge, so it carries its own placement + dims.
+        const PixelBuffer& ras = text->raster();
+        const Point ro = text->rasterOrigin();
+        w.i32(ro.x);
+        w.i32(ro.y);
+        w.i32(ras.width());
+        w.i32(ras.height());
+        const std::size_t n = static_cast<std::size_t>(ras.width()) *
+                              static_cast<std::size_t>(ras.height()) * sizeof(Rgba8);
+        std::vector<std::byte> raw;
+        if (n > 0) {
+            const auto* pb = reinterpret_cast<const std::byte*>(ras.data());
+            raw.assign(pb, pb + n);
+        }
+        writeBlock(w, raw);
+        return;
+    }
+
     // Pixel layer: serialize the store matching the document's bit depth (the active
     // store; the others are empty). `depth` is the document depth, which every pixel
     // layer shares (createBlank/AddLayer seed layers at the document depth) — the reader
@@ -689,7 +732,7 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
     const std::uint8_t blendRaw = r.u8();
     const std::uint8_t activeFlag = r.u8();
     const std::uint32_t nameLen = r.u32();
-    if (!r.ok() || kind > kKindSolid || blendRaw >= static_cast<std::uint8_t>(BlendMode::Count) ||
+    if (!r.ok() || kind > kKindText || blendRaw >= static_cast<std::uint8_t>(BlendMode::Count) ||
         nameLen > kMaxNameBytes) {
         return nullptr;
     }
@@ -769,6 +812,55 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
         }
         layer = std::make_unique<SolidColorLayer>(Rgba8{cr, cg, cb, ca}, Rect{bx, by, bw, bh},
                                                   std::move(name));
+    } else if (kind == kKindText) {
+        // Editable model.
+        const std::uint32_t tlen = r.u32();
+        if (!r.ok() || tlen > kMaxNameBytes) return nullptr;
+        std::string ttext(tlen, '\0');
+        if (tlen > 0 && !r.read(ttext.data(), tlen)) return nullptr;
+        const std::uint32_t flen = r.u32();
+        if (!r.ok() || flen > kMaxNameBytes) return nullptr;
+        std::string family(flen, '\0');
+        if (flen > 0 && !r.read(family.data(), flen)) return nullptr;
+        const std::int32_t pixelSize = r.i32();
+        const std::uint8_t bold = r.u8();
+        const std::uint8_t italic = r.u8();
+        const std::uint8_t cr = r.u8();
+        const std::uint8_t cg = r.u8();
+        const std::uint8_t cb = r.u8();
+        const std::uint8_t ca = r.u8();
+        const std::int32_t ox = r.i32();
+        const std::int32_t oy = r.i32();
+        // Cached raster: its own placement + dims, validated INDEPENDENTLY of the canvas (text may
+        // hang off the edge). A flat PixelBuffer is resident-dense, so charge exactly its bytes.
+        const std::int32_t rox = r.i32();
+        const std::int32_t roy = r.i32();
+        const std::int32_t rw = r.i32();
+        const std::int32_t rh = r.i32();
+        // Validate the raster against the shared text caps (kMaxTextRasterDim/Pixels), which match
+        // what the app producer can emit, so the reader's accepted set equals the producible set.
+        // The origin may sit anywhere on/near the canvas; bound it so origin + extent stays in int.
+        if (!r.ok() || bold > 1 || italic > 1 || rw < 0 || rh < 0 || rw > kMaxTextRasterDim ||
+            rh > kMaxTextRasterDim || static_cast<std::int64_t>(rw) * rh > kMaxTextRasterPixels ||
+            rox < -kMaxCanvasDimension || rox > kMaxCanvasDimension || roy < -kMaxCanvasDimension ||
+            roy > kMaxCanvasDimension) {
+            return nullptr;
+        }
+        const std::size_t rawSize =
+            static_cast<std::size_t>(rw) * static_cast<std::size_t>(rh) * sizeof(Rgba8);
+        std::vector<std::byte> raw;
+        if (!readBlock(r, rawSize, raw, budget, static_cast<std::int64_t>(rawSize))) return nullptr;
+        PixelBuffer raster(rw, rh);
+        if (rawSize > 0) std::memcpy(raster.data(), raw.data(), rawSize);
+        // The model only drives the app's re-rasterize; sanitize pixelSize to a sane positive
+        // range.
+        const int ps = pixelSize < 1                     ? 1
+                       : pixelSize > kMaxCanvasDimension ? kMaxCanvasDimension
+                                                         : pixelSize;
+        TextModel model{std::move(ttext), std::move(family),     ps,           bold != 0,
+                        italic != 0,      Rgba8{cr, cg, cb, ca}, Point{ox, oy}};
+        layer = std::make_unique<TextLayer>(std::move(model), std::move(raster), Point{rox, roy},
+                                            std::move(name));
     } else {
         auto pl = std::make_unique<PixelLayer>(std::move(name), depth);
         std::int32_t cx = 0;
