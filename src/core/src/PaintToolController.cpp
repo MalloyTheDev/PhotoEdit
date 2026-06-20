@@ -10,9 +10,17 @@
 
 namespace pe {
 
+namespace {
+// Foreground luminance that drives mask painting: 0 (black) hides, 1 (white) reveals. Rec.601
+// weights, matching the engine's other luma uses; clamped because an HDR/F32 color may exceed 1.
+[[nodiscard]] float maskGrayFromColor(Rgbaf c) noexcept {
+    return clamp01(0.299f * c.r + 0.587f * c.g + 0.114f * c.b);
+}
+}  // namespace
+
 PaintToolController::~PaintToolController() = default;
 
-std::unique_ptr<PaintCommand> PaintToolController::buildStroke(Document& doc) const {
+std::unique_ptr<Command> PaintToolController::buildStroke(Document& doc) const {
     switch (mode_) {
         case Mode::Eraser:
             return eraseStroke(doc, layer_, brush_, points_, selection_);
@@ -48,6 +56,11 @@ std::unique_ptr<PaintCommand> PaintToolController::buildStroke(Document& doc) co
             const int offY = py - csy;
             return cloneStroke(doc, layer_, brush_, points_, offX, offY, selection_);
         }
+        case Mode::MaskPaint:
+            // Paint the active layer's mask toward the foreground luminance (black hides, white
+            // reveals) instead of depositing color into the pixels.
+            return maskPaintStroke(doc, layer_, brush_, points_, maskGrayFromColor(color_),
+                                   selection_);
         case Mode::Brush:
         default:
             return paintStroke(doc, layer_, brush_, color_, points_, selection_);
@@ -76,7 +89,14 @@ void PaintToolController::rebuildPreview(Document& doc) {
 bool PaintToolController::begin(Document& doc, StrokePoint p, const Selection* selection) {
     if (stroking_) return false;
     const Layer* active = doc.findLayer(doc.activeLayer());
-    if (active == nullptr || active->kind() != LayerKind::Pixel) return false;
+    if (active == nullptr) return false;
+    if (mode_ == Mode::MaskPaint) {
+        // Mask painting targets the active layer's MASK, so any layer kind that carries one is
+        // paintable (e.g. an adjustment or solid-color layer with a mask) — but a mask must exist.
+        if (active->mask() == nullptr) return false;
+    } else if (active->kind() != LayerKind::Pixel) {
+        return false;
+    }
 
     stroking_ = true;
     layer_ = doc.activeLayer();
@@ -103,7 +123,7 @@ bool PaintToolController::end(Document& doc) {
 
     // Reuse the preview as the committed command: revert it (tiles back to S0) and
     // hand it to History, which re-executes it from S0 — exactly one undo step.
-    std::unique_ptr<PaintCommand> cmd;
+    std::unique_ptr<Command> cmd;
     if (preview_) {
         preview_->undo(doc);
         cmd = std::move(preview_);

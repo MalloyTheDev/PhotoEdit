@@ -1,11 +1,14 @@
 #include "pe/core/Brush.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/Layer.hpp"
+#include "pe/core/Mask.hpp"
 #include "pe/core/PaintToolController.hpp"
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
 #include "pe_test.hpp"
 
+#include <memory>
 #include <vector>
 
 using namespace pe;
@@ -173,6 +176,63 @@ PE_TEST(painttool_eraser_reduces_alpha) {
     PE_CHECK_EQ(alphaAt(*doc, base, 32, 32), 0);  // erased back to transparent
     PE_CHECK_EQ(doc->history().undoDepth(), 2u);  // paint + erase, each one step
     PE_CHECK_EQ(doc->history().topUndoName(), std::string("Eraser"));
+}
+
+PE_TEST(painttool_maskpaint_paints_mask_not_pixels) {
+    // MaskPaint routes the brush into the active layer's MASK: the layer's pixels are untouched,
+    // but the composite hides where the (black) brush painted. One undo step named "Mask Brush".
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{255, 0, 0, 255});
+    pl->setMask(std::make_unique<Mask>(Mask::Kind::Layer));  // reveal-all mask
+
+    PaintToolController tool;
+    tool.setBrush(hardBrush(16));
+    tool.setColor(Rgbaf{0.0f, 0.0f, 0.0f, 1.0f});  // black foreground -> hide
+    tool.setMode(PaintToolController::Mode::MaskPaint);
+
+    PE_CHECK(tool.begin(*doc, pt(32, 32)));
+    PE_CHECK(tool.end(*doc));
+
+    PE_CHECK_EQ(alphaAt(*doc, base, 32, 32), 255);  // the layer's PIXELS are untouched
+    PE_CHECK(static_cast<int>(doc->compositeImage().at(32, 32).a) < 40);   // composite hidden there
+    PE_CHECK_EQ(static_cast<int>(doc->compositeImage().at(2, 2).a), 255);  // revealed elsewhere
+    PE_CHECK_EQ(doc->history().undoDepth(), 1u);
+    PE_CHECK_EQ(doc->history().topUndoName(), std::string("Mask Brush"));
+
+    doc->history().undo();
+    PE_CHECK_EQ(static_cast<int>(doc->compositeImage().at(32, 32).a), 255);  // reveal restored
+}
+
+PE_TEST(painttool_maskpaint_white_reveals) {
+    auto doc = Document::createBlank(Size{64, 64});
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{0, 0, 255, 255});
+    auto mask = std::make_unique<Mask>(Mask::Kind::Layer);
+    mask->buffer().fillRect(Rect{0, 0, 64, 64}, MaskBuffer::kClear);  // hide all
+    pl->setMask(std::move(mask));
+
+    PaintToolController tool;
+    tool.setBrush(hardBrush(16));
+    tool.setColor(Rgbaf{1.0f, 1.0f, 1.0f, 1.0f});  // white foreground -> reveal
+    tool.setMode(PaintToolController::Mode::MaskPaint);
+    PE_CHECK(tool.begin(*doc, pt(32, 32)));
+    PE_CHECK(tool.end(*doc));
+
+    PE_CHECK(static_cast<int>(doc->compositeImage().at(32, 32).a) > 200);  // revealed where painted
+    PE_CHECK_EQ(static_cast<int>(doc->compositeImage().at(2, 2).a), 0);    // still hidden elsewhere
+}
+
+PE_TEST(painttool_maskpaint_refuses_without_mask) {
+    // MaskPaint needs a mask on the active layer; a pixel layer with none can't begin a mask
+    // stroke.
+    auto doc = Document::createBlank(Size{64, 64});
+    PaintToolController tool;
+    tool.setMode(PaintToolController::Mode::MaskPaint);
+    PE_CHECK(!tool.begin(*doc, pt(32, 32)));
+    PE_CHECK(!tool.isStroking());
 }
 
 PE_TEST(painttool_selection_gates_stroke) {

@@ -58,6 +58,12 @@ signals:
     // parameter dialog. (The panel owns the selection but not the adjustment dialogs.)
     void editAdjustmentRequested(pe::LayerId id);
 
+    // Emitted when the mask-edit target changes: true when the user clicks a layer's mask
+    // thumbnail to paint into it, false when they leave mask-edit (select a layer/thumbnail, or
+    // the targeted mask disappears). MainWindow relays it to CanvasView::setMaskEditTarget so the
+    // Brush paints the active layer's mask. (The targeted layer is always made active.)
+    void maskEditTargetChanged(bool targeted);
+
 private:
     void rebuild();             // repopulate the tree from the model
     void syncActiveControls();  // reflect the active layer into blend/opacity
@@ -81,10 +87,17 @@ private:
                                        std::size_t index) const;
     [[nodiscard]] QIcon groupIcon() const;
     [[nodiscard]] QIcon adjustmentIcon() const;  // glyph for non-pixel adjustment layers
-    // Grayscale preview of a layer's mask (shown in column 1); a disabled mask is marked with an X.
-    [[nodiscard]] QIcon maskThumbnail(const pe::Mask& mask) const;
+    // Grayscale preview of a layer's mask (shown in column 1); a disabled mask is marked with an X,
+    // and the current mask-edit target gets a highlighted focus ring.
+    [[nodiscard]] QIcon maskThumbnail(const pe::Mask& mask, bool targeted) const;
     // Add a mask to the active layer (from the active selection if any, else fully revealing).
     void addMaskForActive();
+    // Set (or clear, with kNoLayer) the mask the Brush paints into; refreshes the focus ring and
+    // emits maskEditTargetChanged. No-op if already targeting `id`.
+    void setMaskTarget(pe::LayerId id);
+    // Re-set just the column-1 mask icons (cheap, no tree rebuild) so the focus ring follows the
+    // current target without the reentrancy of rebuild() inside a selection-change handler.
+    void refreshMaskIcons();
     // Refresh just one layer's row icon after a pixel edit (the paint hot path),
     // instead of rebuilding the whole tree. Falls back to rebuild() if not found.
     void updateLayerThumbnail(pe::LayerId id);
@@ -130,6 +143,10 @@ private:
     // Groups the user has collapsed (by id). Everything else defaults to expanded so a
     // rebuild after an edit does not fold the tree back up. Survives rebuilds.
     std::set<pe::LayerId> collapsed_;
+
+    // The layer whose mask the Brush currently paints into (kNoLayer = none). Always kept equal to
+    // the active layer; cleared when the active layer changes or the mask goes away.
+    pe::LayerId maskTarget_ = pe::kNoLayer;
 };
 
 }  // namespace pe::app

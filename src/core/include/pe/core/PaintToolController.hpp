@@ -12,6 +12,7 @@ namespace pe {
 
 class Document;
 class Selection;
+class Command;
 class PaintCommand;
 
 // Drives an interactive brush/eraser stroke from pointer input into the engine's
@@ -32,10 +33,12 @@ class PaintCommand;
 // docs/systems/09-tool-system.md.
 class PaintToolController {
 public:
-    enum class Mode { Brush, Eraser, Dodge, Burn, Clone, Blur, Sharpen, Heal };
+    // MaskPaint paints into the active layer's MASK (not its pixels): each dab blends the mask
+    // toward the foreground color's luminance (black hides, white reveals), gated by the selection.
+    enum class Mode { Brush, Eraser, Dodge, Burn, Clone, Blur, Sharpen, Heal, MaskPaint };
 
     PaintToolController() = default;
-    // Out-of-line so unique_ptr<PaintCommand> only needs a forward declaration here.
+    // Out-of-line so unique_ptr<Command> only needs a forward declaration here.
     ~PaintToolController();
 
     PaintToolController(const PaintToolController&) = delete;
@@ -86,7 +89,10 @@ public:
 private:
     void clearPreview(Document& doc);    // revert + drop the provisional command
     void rebuildPreview(Document& doc);  // recompute from points_ and apply (store at S0)
-    [[nodiscard]] std::unique_ptr<PaintCommand> buildStroke(Document& doc) const;
+    // Returns the base Command so a stroke can be either a PaintCommand (pixel modes) or a
+    // MaskPaintCommand (MaskPaint mode); both derive from Command and the preview uses it
+    // polymorphically (execute/undo).
+    [[nodiscard]] std::unique_ptr<Command> buildStroke(Document& doc) const;
 
     BrushSettings brush_{};
     Rgbaf color_{0.0f, 0.0f, 0.0f, 1.0f};  // opaque black foreground default
@@ -99,7 +105,7 @@ private:
     LayerId layer_ = kNoLayer;
     const Selection* selection_ = nullptr;
     std::vector<StrokePoint> points_;
-    std::unique_ptr<PaintCommand> preview_;  // applied-to-doc provisional stroke
+    std::unique_ptr<Command> preview_;  // applied-to-doc provisional stroke (Paint or MaskPaint)
     Rect strokeDirty_{};  // cumulative dirty bounds of the live preview (see accessor)
 };
 
