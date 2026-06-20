@@ -69,6 +69,9 @@ private:
     // panel, or Layer▸Edit Adjustment). Commits one EditAdjustmentCommand on OK; a no-op for a
     // non-adjustment layer or a type without an editor yet.
     void editAdjustmentLayer(pe::LayerId id);
+    // Reopen the text dialog for a text layer (double-click in the Layers panel), seeded from its
+    // model; commits one EditTextCommand on OK. A no-op for a non-text layer.
+    void editTextLayer(pe::LayerId id);
     bool writeTo(const QString& path);
     void setDocument(std::unique_ptr<pe::Document> doc, QString path);
     void refreshTitle();

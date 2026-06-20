@@ -62,4 +62,11 @@ QFont TextDialog::font() const {
     return f;
 }
 
+void TextDialog::setInitial(const QString& text, const QFont& font) {
+    setWindowTitle(QStringLiteral("Edit Text"));
+    textEdit_->setText(text);  // textChanged enables the OK button
+    fontCombo_->setCurrentFont(font);
+    if (font.pixelSize() > 0) sizeSpin_->setValue(font.pixelSize());
+}
+
 }  // namespace pe::app

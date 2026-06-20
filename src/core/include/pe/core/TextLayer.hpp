@@ -35,9 +35,12 @@ struct TextModel {
 };
 
 // A non-destructive text layer: an editable TextModel plus an app-supplied cached raster
-// (straight-alpha RGBA8) placed at rasterOrigin (= model.origin + the font's ink offset). The
-// compositor blits the cached raster per tile exactly like SolidColorLayer blits a flat color, so
-// text gets blend mode / opacity / mask / clipping for free and is composited every frame rather
+// (straight-alpha RGBA8) placed so its (0,0) lands at rasterOrigin in document space. The engine
+// treats rasterOrigin as opaque placement; the app's rasterizer decides the relationship to
+// model.origin (today it bakes the glyph ink offset into the raster and sets rasterOrigin ==
+// model.origin, but the two are stored independently in .pedoc so a future producer may differ).
+// The compositor blits the cached raster per tile exactly like SolidColorLayer blits a flat color,
+// so text gets blend mode / opacity / mask / clipping for free and is composited every frame rather
 // than baked into pixels. Re-editing swaps in a fresh {model, raster, origin} as one undo step
 // (EditTextCommand). The engine cannot regenerate the raster (no fonts), so the raster is the
 // source of truth for appearance and round-trips through .pedoc verbatim; the model only drives the
