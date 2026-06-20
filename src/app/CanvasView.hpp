@@ -53,10 +53,11 @@ public:
         Bucket,
         Gradient,
         Type,
-        Dodge,  // tone brush (lighten); Alt during the stroke burns (darkens) instead
-        Clone,  // clone stamp; Alt-click sets the source, then drag clones from it
-        Blur,   // blur brush; drag to locally soften existing pixels under the stroke
-        Heal,   // spot healing brush; drag over a blemish to dissolve it into its surroundings
+        Dodge,      // tone brush (lighten); Alt during the stroke burns (darkens) instead
+        Clone,      // clone stamp; Alt-click sets the source, then drag clones from it
+        Blur,       // blur brush; drag to locally soften existing pixels under the stroke
+        Heal,       // spot healing brush; drag over a blemish to dissolve it into its surroundings
+        Transform,  // free transform: scale (corners) / rotate (top handle) / move the active layer
         Eyedropper,
         Inactive
     };
@@ -75,6 +76,11 @@ public:
     // the paint controller's mode.
     void setTool(Tool t);
     [[nodiscard]] Tool activeTool() const noexcept { return toolMode_; }
+
+    // True while a Free Transform session is live (an uncommitted preview is applied directly to
+    // the tiles, outside history). MainWindow gates undo/redo on this — mutating history underneath
+    // the preview would desync its tile snapshots (same reason as tool().isStroking()).
+    [[nodiscard]] bool isTransforming() const noexcept { return transforming_; }
 
     // Background color (the Gradient tool's far stop; the foreground is the paint color).
     void setBackgroundColor(const QColor& c) { bgColor_ = c; }
@@ -116,6 +122,7 @@ protected:
     void showEvent(QShowEvent*) override;
     [[nodiscard]] QSize sizeHint() const override;
     void tabletEvent(QTabletEvent*) override;
+    void keyPressEvent(QKeyEvent*) override;  // Enter commits / Esc cancels a live transform
 
 private:
     void zoomAroundCenter(double factor);  // zoom about the viewport center
@@ -172,6 +179,34 @@ private:
     QPointF moveStartWidget_;               // drag start (widget space)
     pe::LayerId moveLayer_ = pe::kNoLayer;  // the layer captured at drag start
     std::unique_ptr<pe::PaintCommand> movePreview_;
+
+    // Free Transform session: a live affine (uniform scale about the box center, rotation about the
+    // center, and translation) of the active pixel layer's content. Previewed as a provisional
+    // command (reverted + reapplied from the original content each gesture) and committed on
+    // Enter / click-outside; Esc cancels. transformBox_ is the ORIGINAL content bounds, fixed for
+    // the session; the params below place it.
+    void beginTransform();          // start a session on the active pixel layer (no-op otherwise)
+    void updateTransformPreview();  // reapply transformLayerContent(matrix) from the original
+    void commitTransform();         // push the final command (one undo step) and end the session
+    void cancelTransform();         // revert the preview and end the session
+    [[nodiscard]] pe::Affine2D transformMatrix() const;   // original-box -> current placement
+    [[nodiscard]] pe::PointD transformCenterDoc() const;  // current box center (doc space)
+    // Hit-test a widget point: 0..3 = corner (scale), 4 = rotate handle, 5 = inside (move), -1
+    // none.
+    [[nodiscard]] int hitTransformHandle(QPointF widgetPos) const;
+
+    bool transforming_ = false;
+    pe::LayerId transformLayer_ = pe::kNoLayer;
+    pe::Rect transformBox_{};  // original content bounds (doc space), fixed for the session
+    double tfScale_ = 1.0;     // uniform scale about the box center
+    double tfAngle_ = 0.0;     // rotation (radians) about the box center
+    pe::PointD tfTranslate_{0.0, 0.0};  // extra translation (doc space)
+    int tfDrag_ = -1;                   // active handle during a drag (-1 = none)
+    pe::PointD tfDragStartDoc_{0.0, 0.0};
+    double tfDragStartScale_ = 1.0;
+    double tfDragStartAngle_ = 0.0;
+    pe::PointD tfDragStartTranslate_{0.0, 0.0};
+    std::unique_ptr<pe::PaintCommand> transformPreview_;
 };
 
 }  // namespace pe::app

@@ -12,6 +12,7 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
@@ -51,6 +52,7 @@ constexpr double kZoomStep = 1.25;  // per Zoom In/Out and per wheel notch
 
 CanvasView::CanvasView(QWidget* parent) : QWidget(parent), checker_(makeCheckerBrush()) {
     setMinimumSize(320, 240);
+    setFocusPolicy(Qt::StrongFocus);  // so Free Transform receives Enter (commit) / Esc (cancel)
     // A visible default: an opaque black, medium round tip.
     pe::BrushSettings b = tool_.brush();
     b.diameter = 24.0f;
@@ -69,6 +71,7 @@ void CanvasView::setDocument(pe::Document* doc) {
         // live preview, so a tool never carries provisional state across documents.
         if (tool_.isStroking()) tool_.cancel(*doc_);
         cancelMovePreview();
+        cancelTransform();  // revert any live transform preview before detaching
         renderer_.reset();  // unregister the old renderer before detaching this view
         doc_->removeObserver(this);
     }
@@ -101,6 +104,12 @@ void CanvasView::onDocumentChanged(const pe::Document&, const pe::DocumentChange
         update();
         return;
     }
+    // An EXTERNAL committed mutation while a Free Transform session is live (undo/redo, a
+    // layers-panel edit, a file load) invalidates the session — the layer it captured may be gone
+    // or changed. End it (reverting its provisional preview) before repainting. Self-induced
+    // commits don't reach here with transforming_ still true (commitTransform clears it before
+    // pushing).
+    if (transforming_) cancelTransform();
     // A committed mutation (paint commit, undo/redo, file load). The renderer is also an
     // observer and has already marked the changed tiles dirty, so we only need to repaint;
     // paintEvent recomposites just those tiles. The live brush preview repaints separately.
@@ -239,15 +248,161 @@ void CanvasView::setTool(Tool t) {
         draggingGradient_ = false;
         update();
     }
-    setCursor(t == Tool::Hand       ? Qt::OpenHandCursor
-              : t == Tool::Zoom     ? Qt::PointingHandCursor
-              : t == Tool::Move     ? Qt::SizeAllCursor
-              : t == Tool::Wand     ? Qt::PointingHandCursor
-              : t == Tool::Type     ? Qt::IBeamCursor
-              : t == Tool::Inactive ? Qt::ArrowCursor
-                                    : Qt::CrossCursor);  // all other interactive tools
-                                                         // (Brush/Eraser/Marquee/Lasso/Crop/
-                                                         // Bucket/Gradient/Eyedropper)
+    if (transforming_ && t != Tool::Transform) {  // leaving Free Transform commits the live result
+        commitTransform();
+    }
+    setCursor(t == Tool::Hand        ? Qt::OpenHandCursor
+              : t == Tool::Zoom      ? Qt::PointingHandCursor
+              : t == Tool::Move      ? Qt::SizeAllCursor
+              : t == Tool::Wand      ? Qt::PointingHandCursor
+              : t == Tool::Type      ? Qt::IBeamCursor
+              : t == Tool::Transform ? Qt::ArrowCursor
+              : t == Tool::Inactive  ? Qt::ArrowCursor
+                                     : Qt::CrossCursor);  // all other interactive tools
+                                                          // (Brush/Eraser/Marquee/Lasso/Crop/
+                                                          // Bucket/Gradient/Eyedropper)
+    if (t == Tool::Transform) {
+        setFocus();  // so Enter/Esc reach keyPressEvent
+        // Begin a session only if one isn't already live, so re-selecting Free Transform (e.g.
+        // pressing Ctrl+T again mid-edit) keeps the in-progress transform instead of dropping it.
+        if (!transforming_) beginTransform();
+    }
+}
+
+// ---------------------------------------------------------------- Free Transform
+
+pe::PointD CanvasView::transformCenterDoc() const {
+    return pe::PointD{transformBox_.x + transformBox_.width / 2.0 + tfTranslate_.x,
+                      transformBox_.y + transformBox_.height / 2.0 + tfTranslate_.y};
+}
+
+pe::Affine2D CanvasView::transformMatrix() const {
+    // Map the ORIGINAL box to its current placement: translate out to its center, scale + rotate
+    // about that center, then apply the extra translation. (concat(a, b) applies b then a.)
+    const double cx = transformBox_.x + transformBox_.width / 2.0;
+    const double cy = transformBox_.y + transformBox_.height / 2.0;
+    using A = pe::Affine2D;
+    return A::concat(A::translation(cx + tfTranslate_.x, cy + tfTranslate_.y),
+                     A::concat(A::rotation(tfAngle_), A::concat(A::scaling(tfScale_, tfScale_),
+                                                                A::translation(-cx, -cy))));
+}
+
+void CanvasView::beginTransform() {
+    cancelTransform();  // drop any prior session/preview first
+    if (doc_ == nullptr) return;
+    const pe::Layer* l = doc_->findLayer(doc_->activeLayer());
+    // Only a pixel layer with content can be transformed; tell the user why nothing appeared.
+    const pe::Rect b =
+        (l != nullptr && l->kind() == pe::LayerKind::Pixel) ? l->contentBounds() : pe::Rect{};
+    if (b.isEmpty()) {
+        emit toolMessage(QStringLiteral("Free Transform needs a pixel layer with content."));
+        return;
+    }
+    transformLayer_ = doc_->activeLayer();
+    transformBox_ = b;
+    tfScale_ = 1.0;
+    tfAngle_ = 0.0;
+    tfTranslate_ = pe::PointD{0.0, 0.0};
+    tfDrag_ = -1;
+    transforming_ = true;
+    update();
+}
+
+void CanvasView::updateTransformPreview() {
+    if (!transforming_ || doc_ == nullptr) return;
+    if (transformPreview_) {  // revert the prior preview so we always resample the ORIGINAL content
+        transformPreview_->undo(*doc_);
+        transformPreview_.reset();
+    }
+    transformPreview_ = pe::transformLayerContent(*doc_, transformLayer_, transformMatrix());
+    if (transformPreview_) transformPreview_->execute(*doc_);
+    reloadImage();  // provisional command applied without notifying: drop the cache + repaint
+    update();       // redraw the box/handles at their new placement
+}
+
+void CanvasView::commitTransform() {
+    if (!transforming_) return;
+    if (transformPreview_ && doc_ != nullptr) transformPreview_->undo(*doc_);  // back to S0
+    transformPreview_.reset();
+    std::unique_ptr<pe::PaintCommand> cmd;
+    if (doc_ != nullptr) cmd = pe::transformLayerContent(*doc_, transformLayer_, transformMatrix());
+    transforming_ = false;
+    tfDrag_ = -1;
+    transformLayer_ = pe::kNoLayer;
+    if (cmd != nullptr && doc_ != nullptr) {
+        doc_->history().push(std::move(cmd));  // one undo step; the observer refreshes the canvas
+    } else {
+        reloadImage();  // identity / no-op: just clear the (already-reverted) preview cache
+    }
+    update();
+}
+
+void CanvasView::cancelTransform() {
+    const bool was = transforming_;
+    if (transformPreview_ && doc_ != nullptr) transformPreview_->undo(*doc_);  // restore the layer
+    transformPreview_.reset();
+    transforming_ = false;
+    tfDrag_ = -1;
+    transformLayer_ = pe::kNoLayer;
+    if (was) {
+        reloadImage();
+        update();
+    }
+}
+
+int CanvasView::hitTransformHandle(QPointF w) const {
+    if (!transforming_) return -1;
+    const pe::Affine2D m = transformMatrix();
+    const double l = transformBox_.x;
+    const double t = transformBox_.y;
+    const double r = transformBox_.x + transformBox_.width;
+    const double b = transformBox_.y + transformBox_.height;
+    const double cxd[4] = {l, r, r, l};  // TL, TR, BR, BL (original box corners)
+    const double cyd[4] = {t, t, b, b};
+    QPointF cw[4];
+    for (int i = 0; i < 4; ++i) {
+        const pe::PointD v =
+            view_.docToView(pe::PointD{m.applyX(cxd[i], cyd[i]), m.applyY(cxd[i], cyd[i])});
+        cw[i] = QPointF(v.x, v.y);
+    }
+    constexpr double kHandlePx = 9.0;
+    for (int i = 0; i < 4; ++i) {
+        if (std::hypot(w.x() - cw[i].x(), w.y() - cw[i].y()) <= kHandlePx)
+            return i;  // corner=scale
+    }
+    // Rotate handle: offset out from the center past the top-edge midpoint.
+    const QPointF topMid((cw[0].x() + cw[1].x()) / 2.0, (cw[0].y() + cw[1].y()) / 2.0);
+    const pe::PointD cv = view_.docToView(transformCenterDoc());
+    QPointF dir = topMid - QPointF(cv.x, cv.y);
+    const double len = std::hypot(dir.x(), dir.y());
+    dir = len > 1e-6 ? dir / len : QPointF(0.0, -1.0);
+    const QPointF rot = topMid + dir * 24.0;
+    if (std::hypot(w.x() - rot.x(), w.y() - rot.y()) <= kHandlePx) return 4;  // rotate
+    // Inside the (convex) quad => move. Consistent-sign cross products over the 4 edges.
+    const auto cross = [](QPointF a, QPointF c, QPointF p) {
+        return (c.x() - a.x()) * (p.y() - a.y()) - (c.y() - a.y()) * (p.x() - a.x());
+    };
+    const double s0 = cross(cw[0], cw[1], w);
+    const double s1 = cross(cw[1], cw[2], w);
+    const double s2 = cross(cw[2], cw[3], w);
+    const double s3 = cross(cw[3], cw[0], w);
+    const bool allNonNeg = s0 >= 0 && s1 >= 0 && s2 >= 0 && s3 >= 0;
+    const bool allNonPos = s0 <= 0 && s1 <= 0 && s2 <= 0 && s3 <= 0;
+    return (allNonNeg || allNonPos) ? 5 : -1;  // 5 = inside (move)
+}
+
+void CanvasView::keyPressEvent(QKeyEvent* e) {
+    if (transforming_) {
+        if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
+            commitTransform();
+            return;
+        }
+        if (e->key() == Qt::Key_Escape) {
+            cancelTransform();
+            return;
+        }
+    }
+    QWidget::keyPressEvent(e);
 }
 
 void CanvasView::maybeInitialFit() {
@@ -382,6 +537,52 @@ void CanvasView::paintEvent(QPaintEvent*) {
         painter.setPen(guideWhite);
         painter.drawLine(gradStartWidget_, gradEndWidget_);
     }
+
+    // Free Transform: the transformed bounding box (dashed black-under-white, like the ants), the
+    // four corner scale handles, and a rotate knob above the top edge — all in widget space.
+    if (transforming_) {
+        painter.resetTransform();
+        const pe::Affine2D m = transformMatrix();
+        const double bl = transformBox_.x;
+        const double bt = transformBox_.y;
+        const double br = transformBox_.x + transformBox_.width;
+        const double bb = transformBox_.y + transformBox_.height;
+        const double cxd[4] = {bl, br, br, bl};
+        const double cyd[4] = {bt, bt, bb, bb};
+        QPointF cw[4];
+        for (int i = 0; i < 4; ++i) {
+            const pe::PointD v =
+                view_.docToView(pe::PointD{m.applyX(cxd[i], cyd[i]), m.applyY(cxd[i], cyd[i])});
+            cw[i] = QPointF(v.x, v.y);
+        }
+        const QPointF poly[5] = {cw[0], cw[1], cw[2], cw[3], cw[0]};
+        QPen edgeBlack(QColor(0, 0, 0), 1);
+        edgeBlack.setCosmetic(true);
+        QPen edgeWhite(QColor(255, 255, 255), 1, Qt::DashLine);
+        edgeWhite.setCosmetic(true);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(edgeBlack);
+        painter.drawPolyline(poly, 5);
+        painter.setPen(edgeWhite);
+        painter.drawPolyline(poly, 5);
+
+        const QPointF topMid((cw[0].x() + cw[1].x()) / 2.0, (cw[0].y() + cw[1].y()) / 2.0);
+        const pe::PointD cv = view_.docToView(transformCenterDoc());
+        QPointF dir = topMid - QPointF(cv.x, cv.y);
+        const double len = std::hypot(dir.x(), dir.y());
+        dir = len > 1e-6 ? dir / len : QPointF(0.0, -1.0);
+        const QPointF rot = topMid + dir * 24.0;
+        painter.setPen(edgeBlack);
+        painter.drawLine(topMid, rot);
+
+        painter.setPen(QPen(QColor(0, 0, 0), 1));
+        painter.setBrush(QColor(255, 255, 255));
+        constexpr double hs = 4.0;  // handle half-size (widget px)
+        for (int i = 0; i < 4; ++i) {
+            painter.drawRect(QRectF(cw[i].x() - hs, cw[i].y() - hs, 2 * hs, 2 * hs));
+        }
+        painter.drawEllipse(rot, hs, hs);
+    }
 }
 
 void CanvasView::tabletEvent(QTabletEvent* e) {
@@ -456,6 +657,21 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
     }
     if (e->button() != Qt::LeftButton || doc_ == nullptr) {
         QWidget::mousePressEvent(e);
+        return;
+    }
+    if (toolMode_ == Tool::Transform) {
+        if (!transforming_) beginTransform();  // (re)start a session if none is live
+        if (!transforming_) return;            // no active pixel layer with content
+        const int hit = hitTransformHandle(e->position());
+        if (hit < 0) {  // a click outside the box commits the transform (Photoshop behavior)
+            commitTransform();
+            return;
+        }
+        tfDrag_ = hit;
+        tfDragStartDoc_ = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        tfDragStartScale_ = tfScale_;
+        tfDragStartAngle_ = tfAngle_;
+        tfDragStartTranslate_ = tfTranslate_;
         return;
     }
     if (toolMode_ == Tool::Zoom) {
@@ -616,6 +832,27 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         update();  // redraw the guide line to the new cursor position
         return;
     }
+    if (transforming_ && tfDrag_ >= 0 && doc_ != nullptr) {
+        const pe::PointD now = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        if (tfDrag_ == 5) {  // move: translate by the doc-space drag delta
+            tfTranslate_ = pe::PointD{tfDragStartTranslate_.x + (now.x - tfDragStartDoc_.x),
+                                      tfDragStartTranslate_.y + (now.y - tfDragStartDoc_.y)};
+        } else if (tfDrag_ == 4) {  // rotate about the box center by the angular delta
+            const pe::PointD c = transformCenterDoc();
+            const double a0 = std::atan2(tfDragStartDoc_.y - c.y, tfDragStartDoc_.x - c.x);
+            const double a1 = std::atan2(now.y - c.y, now.x - c.x);
+            tfAngle_ = tfDragStartAngle_ + (a1 - a0);
+        } else {  // corner (0..3): uniform scale about the center by the radial-distance ratio
+            const pe::PointD c = transformCenterDoc();
+            const double r0 = std::hypot(tfDragStartDoc_.x - c.x, tfDragStartDoc_.y - c.y);
+            const double r1 = std::hypot(now.x - c.x, now.y - c.y);
+            if (r0 > 1e-6) {
+                tfScale_ = std::clamp(tfDragStartScale_ * (r1 / r0), 0.01, 100.0);
+            }
+        }
+        updateTransformPreview();
+        return;
+    }
     if (movingContent_ && doc_ != nullptr) {
         // Cumulative drag delta in document pixels, applied to the ORIGINAL content each move
         // (the prior preview is reverted first), so the result equals one move by the total.
@@ -648,6 +885,12 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
         setCursor(toolMode_ == Tool::Hand   ? Qt::OpenHandCursor
                   : toolMode_ == Tool::Zoom ? Qt::PointingHandCursor
                                             : Qt::CrossCursor);
+        return;
+    }
+    // Free Transform: a left-release just ends the current handle drag — the transform session
+    // stays live (more handle drags, then Enter / click-outside commits, Esc cancels).
+    if (transforming_ && tfDrag_ >= 0 && e->button() == Qt::LeftButton) {
+        tfDrag_ = -1;
         return;
     }
     // The drag tools (marquee/crop, lasso, gradient, move) commit only on a LEFT-button release,
