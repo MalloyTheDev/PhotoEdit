@@ -3,11 +3,13 @@
 #include "pe/core/BlendMode.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/Filter.hpp"  // gaussianBlur kernel + bakePixelEditRegion (Blur brush)
+#include "pe/core/Mask.hpp"    // Mask / MaskBuffer (mask brush)
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <map>
 #include <utility>
 #include <vector>
@@ -434,6 +436,88 @@ std::unique_ptr<PaintCommand> sharpenStroke(Document& doc, LayerId layerId, cons
             }
         },
         selection);
+}
+
+// ---- Mask brush ----
+// Paints into the active layer's MASK buffer (single-channel grayscale) rather than its pixels:
+// each touched mask byte is blended from its current value toward `targetGray` by the brush
+// coverage (capped at the stroke opacity, and gated by any active selection). The before/after
+// bytes over the stroke's bounding box are snapshotted so the command is byte-exact reversible.
+std::unique_ptr<MaskPaintCommand> maskPaintStroke(Document& doc, LayerId layerId,
+                                                  const BrushSettings& in,
+                                                  std::span<const StrokePoint> points,
+                                                  float targetGray, const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr) return nullptr;
+    Mask* mask = layer->mask();
+    if (mask == nullptr || points.empty()) return nullptr;  // no mask to paint
+
+    const float opacity = clamp01(in.opacity);
+    const float target = clamp01(targetGray) * 255.0f;
+    const CoverageMap cov = buildCoverage(in, points);
+    const Rect bb = coverageBounds(cov);
+    if (bb.isEmpty()) return nullptr;
+    // Bound the dense snapshot allocation (the bbox can be large for a long diagonal stroke even
+    // though coverage is sparse). Over the cap, refuse rather than allocate unboundedly.
+    constexpr std::int64_t kMaxMaskBrushPixels = 16'000'000;
+    const std::int64_t area = static_cast<std::int64_t>(bb.width) * bb.height;
+    if (area > kMaxMaskBrushPixels) return nullptr;
+
+    const int w = bb.width;
+    const int h = bb.height;
+    const int left = bb.left();
+    const int top = bb.top();
+    const bool gate = selection != nullptr && selection->active();
+    std::vector<std::uint8_t> before(static_cast<std::size_t>(area));
+    std::vector<std::uint8_t> after(static_cast<std::size_t>(area));
+    bool changed = false;
+    MaskBuffer& buf = mask->buffer();
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                  static_cast<std::size_t>(x);
+            const std::uint8_t b = buf.value(left + x, top + y);
+            before[i] = b;
+            float c = std::min(coverageAt(cov, left + x, top + y), opacity);
+            if (gate) c *= selection->coverage(left + x, top + y);
+            std::uint8_t a = b;
+            if (c > 0.0f) {
+                const float nv = static_cast<float>(b) + (target - static_cast<float>(b)) * c;
+                a = static_cast<std::uint8_t>(std::lround(std::clamp(nv, 0.0f, 255.0f)));
+            }
+            after[i] = a;
+            if (a != b) changed = true;
+        }
+    }
+    if (!changed) return nullptr;  // stroke missed the mask entirely
+    return std::make_unique<MaskPaintCommand>(layerId, bb, std::move(before), std::move(after));
+}
+
+MaskPaintCommand::MaskPaintCommand(LayerId layer, Rect region, std::vector<std::uint8_t> before,
+                                   std::vector<std::uint8_t> after)
+    : layer_(layer), region_(region), before_(std::move(before)), after_(std::move(after)) {}
+
+DocumentChange MaskPaintCommand::apply(Document& doc, const std::vector<std::uint8_t>& values) {
+    Layer* layer = doc.findLayer(layer_);
+    // Defensive: if the mask was removed out of lockstep, this is a no-op (never crash).
+    if (layer != nullptr && layer->mask() != nullptr &&
+        values.size() == static_cast<std::size_t>(region_.width) * region_.height) {
+        MaskBuffer& buf = layer->mask()->buffer();
+        for (int y = 0; y < region_.height; ++y) {
+            for (int x = 0; x < region_.width; ++x) {
+                buf.setValue(region_.left() + x, region_.top() + y,
+                             values[static_cast<std::size_t>(y) * region_.width + x]);
+            }
+        }
+    }
+    return DocumentChange{DocumentChange::Kind::LayerProps, region_, layer_};
+}
+
+DocumentChange MaskPaintCommand::execute(Document& doc) {
+    return apply(doc, after_);
+}
+DocumentChange MaskPaintCommand::undo(Document& doc) {
+    return apply(doc, before_);
 }
 
 // ---- Spot Healing brush ----
