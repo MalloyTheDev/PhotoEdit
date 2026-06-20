@@ -522,3 +522,15 @@ PE_TEST(transform_undo_restores_exact) {
     PE_CHECK_EQ(pl->tiles().pixel(15, 15), (Rgba8{30, 60, 90, 255}));  // exact restore
     PE_CHECK_EQ(pl->tiles().pixel(0, 0).a, static_cast<uint8_t>(0));
 }
+
+PE_TEST(transform_preserves_superwhite_on_f32) {
+    // The resample path is depth-generic; on an F32 layer it must preserve HDR (>1.0) values —
+    // premultiply/unpremultiply don't clamp. A 2x scale takes the bilinear resample path (not the
+    // integer-translate fast path).
+    auto doc = Document::createBlank(Size{64, 64}, ColorMode::RGB, BitDepth::F32);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tilesF().fillRect(Rect{0, 0, 16, 16}, Rgbaf{4.0f, 0.0f, 0.0f, 1.0f});  // super-white red
+    doc->history().push(transformLayerContent(*doc, base, Affine2D::scaling(2.0, 2.0)));
+    PE_CHECK(pl->tilesF().pixel(10, 10).r > 3.0f);  // HDR survived the resample (not clamped to 1)
+}

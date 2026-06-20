@@ -472,9 +472,22 @@ std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layer
     const double det = srcToDst.determinant();
     if (!std::isfinite(det) || std::fabs(det) < 1e-9) return nullptr;
 
+    constexpr double kBound = static_cast<double>(kMaxCanvasDimension);
+
+    // Lossless fast path: a pure INTEGER translation needs no resampling, so reuse the exact
+    // (byte-identical, premultiply-free) Move path. This keeps an integer move bit-exact and makes
+    // identity (dx == dy == 0) a true no-op (moveLayerContent returns nullptr) regardless of any
+    // fully-transparent-but-colored pixels — which the resampling path below would otherwise
+    // normalize to {0,0,0,0}.
+    if (srcToDst.m00 == 1.0 && srcToDst.m11 == 1.0 && srcToDst.m01 == 0.0 && srcToDst.m10 == 0.0 &&
+        std::floor(srcToDst.m02) == srcToDst.m02 && std::floor(srcToDst.m12) == srcToDst.m12 &&
+        std::fabs(srcToDst.m02) <= kBound && std::fabs(srcToDst.m12) <= kBound) {
+        return moveLayerContent(doc, layerId, static_cast<int>(srcToDst.m02),
+                                static_cast<int>(srcToDst.m12));
+    }
+
     // Destination bounding box = the transformed source corners. Validate finiteness and range
     // before the double->int cast (an absurd transform must reject, never produce UB).
-    constexpr double kBound = static_cast<double>(kMaxCanvasDimension);
     const double cx[4] = {static_cast<double>(src.left()), static_cast<double>(src.right()),
                           static_cast<double>(src.left()), static_cast<double>(src.right())};
     const double cy[4] = {static_cast<double>(src.top()), static_cast<double>(src.top()),
@@ -495,10 +508,14 @@ std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layer
         maxX = std::max(maxX, dx);
         maxY = std::max(maxY, dy);
     }
-    const int dl = static_cast<int>(std::floor(minX));
-    const int dt = static_cast<int>(std::floor(minY));
-    const int dr = static_cast<int>(std::ceil(maxX));
-    const int db = static_cast<int>(std::ceil(maxY));
+    // Pad by 1px on every side: a destination pixel whose center maps just outside the source still
+    // gets a fractional bilinear tap from the edge, so the anti-aliased fringe lives one pixel
+    // beyond the rounded corner bbox. bakePixelEditRegion still caps the area, and the sampler
+    // returns transparent for the extra ring, so this only recovers the AA ramp (no over-draw).
+    const int dl = static_cast<int>(std::floor(minX)) - 1;
+    const int dt = static_cast<int>(std::floor(minY)) - 1;
+    const int dr = static_cast<int>(std::ceil(maxX)) + 1;
+    const int db = static_cast<int>(std::ceil(maxY)) + 1;
     const Rect dst{dl, dt, dr - dl, db - dt};
     if (dst.isEmpty()) return nullptr;
 
