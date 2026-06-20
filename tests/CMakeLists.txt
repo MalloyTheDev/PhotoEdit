@@ -22,6 +22,7 @@ add_executable(pe_core_tests
     core/test_crop.cpp
     core/test_layergroup.cpp
     core/test_mask.cpp
+    core/test_maskcommands.cpp
     core/test_adjustment.cpp
     core/test_filter.cpp
     core/test_histogram.cpp

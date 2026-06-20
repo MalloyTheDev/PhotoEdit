@@ -4,6 +4,7 @@
 #include "pe/core/Document.hpp"
 #include "pe/core/Filter.hpp"      // moveLayerContent
 #include "pe/core/GroupLayer.hpp"  // recurse into groups for crop
+#include "pe/core/Mask.hpp"        // Mask, MaskBuffer, maskFromSelection (layer-mask commands)
 #include "pe/core/PixelLayer.hpp"  // contentBounds() on the concrete pixel layer
 
 #include <algorithm>
@@ -384,6 +385,94 @@ DocumentChange RenameLayerCommand::execute(Document& doc) {
 DocumentChange RenameLayerCommand::undo(Document& doc) {
     Layer* layer = doc.findLayer(layerId_);
     if (layer != nullptr) layer->setName(oldName_);
+    return propsChange(layer, layerId_);
+}
+
+// --------------------------------------------------------------- Layer masks
+
+AddLayerMaskCommand::AddLayerMaskCommand(LayerId id, Init init) : layerId_(id), init_(init) {}
+
+DocumentChange AddLayerMaskCommand::execute(Document& doc) {
+    Layer* layer = doc.findLayer(layerId_);
+    if (!validated_) {
+        validated_ = true;
+        // Build the mask ONCE (so redo re-attaches the same object, preserving any painted
+        // content).
+        if (layer == nullptr || layer->mask() != nullptr) {
+            noop_ = true;  // missing layer, or already masked: nothing to do
+        } else {
+            switch (init_) {
+                case Init::FromSelection:
+                    owned_ = std::make_unique<Mask>(
+                        maskFromSelection(doc.selection(), doc.canvasBounds()));
+                    break;
+                case Init::HideAll:
+                    owned_ = std::make_unique<Mask>(Mask::Kind::Layer);
+                    owned_->buffer().fillRect(doc.canvasBounds(), MaskBuffer::kClear);
+                    break;
+                case Init::RevealAll:
+                default:
+                    owned_ = std::make_unique<Mask>(Mask::Kind::Layer);  // empty buffer reveals all
+                    break;
+            }
+        }
+    }
+    if (noop_ || layer == nullptr) return propsChange(layer, layerId_);
+    if (owned_) layer->setMask(std::move(owned_));  // owned_ now empty until undo
+    return propsChange(layer, layerId_);
+}
+
+DocumentChange AddLayerMaskCommand::undo(Document& doc) {
+    Layer* layer = doc.findLayer(layerId_);
+    if (noop_ || layer == nullptr) return propsChange(layer, layerId_);
+    owned_ = layer->takeMask();  // detach and retain for redo
+    return propsChange(layer, layerId_);
+}
+
+RemoveLayerMaskCommand::RemoveLayerMaskCommand(LayerId id) : layerId_(id) {}
+
+DocumentChange RemoveLayerMaskCommand::execute(Document& doc) {
+    Layer* layer = doc.findLayer(layerId_);
+    if (!validated_) {
+        validated_ = true;
+        noop_ = layer == nullptr || layer->mask() == nullptr;  // nothing to remove
+    }
+    if (noop_ || layer == nullptr) return propsChange(layer, layerId_);
+    owned_ = layer->takeMask();  // retain for undo
+    return propsChange(layer, layerId_);
+}
+
+DocumentChange RemoveLayerMaskCommand::undo(Document& doc) {
+    Layer* layer = doc.findLayer(layerId_);
+    if (noop_ || layer == nullptr) return propsChange(layer, layerId_);
+    if (owned_) layer->setMask(std::move(owned_));
+    return propsChange(layer, layerId_);
+}
+
+SetMaskEnabledCommand::SetMaskEnabledCommand(LayerId id, bool enabled)
+    : layerId_(id), newEnabled_(enabled) {}
+
+DocumentChange SetMaskEnabledCommand::execute(Document& doc) {
+    Layer* layer = doc.findLayer(layerId_);
+    Mask* mask = layer != nullptr ? layer->mask() : nullptr;
+    if (!validated_) {
+        validated_ = true;
+        if (mask == nullptr) {
+            noop_ = true;
+        } else {
+            oldEnabled_ = mask->enabled();
+        }
+    }
+    if (noop_ || mask == nullptr) return propsChange(layer, layerId_);
+    mask->setEnabled(newEnabled_);
+    return propsChange(layer, layerId_);
+}
+
+DocumentChange SetMaskEnabledCommand::undo(Document& doc) {
+    Layer* layer = doc.findLayer(layerId_);
+    Mask* mask = layer != nullptr ? layer->mask() : nullptr;
+    if (noop_ || mask == nullptr) return propsChange(layer, layerId_);
+    mask->setEnabled(oldEnabled_);
     return propsChange(layer, layerId_);
 }
 
