@@ -182,6 +182,61 @@ private:
     std::string oldName_;
 };
 
+// --- Layer mask commands ---
+
+// Attach a raster mask to a layer. RevealAll = an empty (fully revealing) mask; HideAll = a fully
+// hidden mask over the canvas; FromSelection = reveal where the document's selection is set (an
+// inactive selection reveals all). No-op if the layer is missing or already has a mask. Reversible:
+// undo removes the mask, redo re-attaches the SAME mask object (built once on first execute), so
+// any content later painted into it survives the round-trip.
+class AddLayerMaskCommand final : public Command {
+public:
+    enum class Init { RevealAll, HideAll, FromSelection };
+    AddLayerMaskCommand(LayerId id, Init init);
+    [[nodiscard]] std::string name() const override { return "Add Layer Mask"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    LayerId layerId_;
+    Init init_;
+    std::unique_ptr<Mask> owned_;  // holds the mask while detached (undo); reused on redo
+    bool validated_ = false;       // input checked + mask built on first execute
+    bool noop_ = false;            // layer missing or already masked
+};
+
+// Remove a layer's mask. No-op if there is none. Reversible (undo restores the removed mask).
+class RemoveLayerMaskCommand final : public Command {
+public:
+    explicit RemoveLayerMaskCommand(LayerId id);
+    [[nodiscard]] std::string name() const override { return "Remove Layer Mask"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    LayerId layerId_;
+    std::unique_ptr<Mask> owned_;  // the removed mask, restored on undo
+    bool validated_ = false;
+    bool noop_ = false;  // no mask to remove
+};
+
+// Enable/disable a layer's mask (the compositor ignores a disabled mask). Reversible; no-op if the
+// layer has no mask.
+class SetMaskEnabledCommand final : public Command {
+public:
+    SetMaskEnabledCommand(LayerId id, bool enabled);
+    [[nodiscard]] std::string name() const override { return "Toggle Layer Mask"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    LayerId layerId_;
+    bool newEnabled_;
+    bool oldEnabled_ = true;
+    bool validated_ = false;
+    bool noop_ = false;  // no mask
+};
+
 // --- Color management ---
 
 // Assign a color profile to the document: reinterpret its numbers under a new
