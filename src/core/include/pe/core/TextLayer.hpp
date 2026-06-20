@@ -11,6 +11,13 @@ namespace pe {
 
 class Document;
 
+// Round-trip contract for a TextLayer's cached raster. Producers (the app's text rasterizer) MUST
+// keep the raster within these bounds, and the .pedoc reader rejects anything larger, so a saved
+// document always reopens. Keeping the origin and dimensions within these caps also keeps
+// contentBounds()'s Rect math (right()/bottom() == origin + extent) comfortably inside int.
+inline constexpr int kMaxTextRasterDim = 8192;  // max raster width / height per side
+inline constexpr std::int64_t kMaxTextRasterPixels = 16'000'000;  // max raster width * height
+
 // The editable parameters of a TextLayer. Qt-FREE on purpose: font rasterization lives entirely in
 // the app (src/app/TextRender, which uses QFont/QPainter), which turns this model into the cached
 // raster the engine composites. The engine never measures or renders glyphs — it only stores this

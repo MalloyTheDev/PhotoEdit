@@ -31,9 +31,10 @@ namespace {
 // files (they only ever contained the earlier kinds, which read identically).
 constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '6'};
 constexpr std::uint32_t kVersion = 6;
-constexpr std::uint32_t kMinReadVersion = 4;               // oldest format this reader accepts
-constexpr std::int64_t kMaxLayerPixels = 64'000'000;       // per-layer content cap
-constexpr std::int64_t kMaxTextRasterPixels = 16'000'000;  // matches the app's TextRender cap
+constexpr std::uint32_t kMinReadVersion = 4;          // oldest format this reader accepts
+constexpr std::int64_t kMaxLayerPixels = 64'000'000;  // per-layer content cap
+// Text-raster caps live in TextLayer.hpp (pe::kMaxTextRasterDim / pe::kMaxTextRasterPixels) so the
+// app producer, the engine type, and this reader share one source of truth.
 constexpr std::uint32_t kMaxLayers = 100'000;
 constexpr std::uint32_t kMaxNameBytes = 65'536;
 constexpr int kMaxGroupDepth = 256;  // cap nesting so a hostile file can't blow the stack
@@ -836,8 +837,11 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
         const std::int32_t roy = r.i32();
         const std::int32_t rw = r.i32();
         const std::int32_t rh = r.i32();
-        if (!r.ok() || bold > 1 || italic > 1 || rw < 0 || rh < 0 || rw > kMaxCanvasDimension ||
-            rh > kMaxCanvasDimension || static_cast<std::int64_t>(rw) * rh > kMaxTextRasterPixels ||
+        // Validate the raster against the shared text caps (kMaxTextRasterDim/Pixels), which match
+        // what the app producer can emit, so the reader's accepted set equals the producible set.
+        // The origin may sit anywhere on/near the canvas; bound it so origin + extent stays in int.
+        if (!r.ok() || bold > 1 || italic > 1 || rw < 0 || rh < 0 || rw > kMaxTextRasterDim ||
+            rh > kMaxTextRasterDim || static_cast<std::int64_t>(rw) * rh > kMaxTextRasterPixels ||
             rox < -kMaxCanvasDimension || rox > kMaxCanvasDimension || roy < -kMaxCanvasDimension ||
             roy > kMaxCanvasDimension) {
             return nullptr;
