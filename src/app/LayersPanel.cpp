@@ -5,12 +5,14 @@
 #include "pe/core/Compositor.hpp"
 #include "pe/core/GroupLayer.hpp"
 #include "pe/core/Layer.hpp"
+#include "pe/core/Mask.hpp"
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/PixelLayer.hpp"
 
 #include <QColor>
 #include <QComboBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QIcon>
 #include <QImage>
 #include <QPainter>
@@ -55,12 +57,16 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
 
     tree_ = new QTreeWidget(this);
     tree_->setHeaderHidden(true);
-    tree_->setColumnCount(1);
+    tree_->setColumnCount(2);           // col 0: visibility + layer thumb + name; col 1: mask thumb
     tree_->setIconSize(QSize(26, 26));  // per-layer preview thumbnails
     tree_->setIndentation(14);
     tree_->setUniformRowHeights(true);
     tree_->setSelectionMode(QAbstractItemView::ExtendedSelection);  // multi-select for Group
     tree_->setExpandsOnDoubleClick(true);
+    tree_->header()->setStretchLastSection(false);
+    tree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    tree_->header()->setSectionResizeMode(1, QHeaderView::Fixed);
+    tree_->setColumnWidth(1, 34);  // narrow mask-thumbnail column
     root->addWidget(tree_, 1);
 
     auto* btnRow = new QHBoxLayout();
@@ -69,11 +75,16 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     delBtn_ = new QPushButton(QStringLiteral("Del"), this);
     groupBtn_ = new QPushButton(QStringLiteral("Grp"), this);
     ungroupBtn_ = new QPushButton(QStringLiteral("Ungrp"), this);
+    maskBtn_ = new QPushButton(QStringLiteral("Msk"), this);
     upBtn_ = new QPushButton(QStringLiteral("▲"), this);
     downBtn_ = new QPushButton(QStringLiteral("▼"), this);
     groupBtn_->setToolTip(QStringLiteral("Group selected layers (Ctrl+G)"));
     ungroupBtn_->setToolTip(QStringLiteral("Ungroup the active group (Ctrl+Shift+G)"));
-    for (QPushButton* b : {addBtn_, dupBtn_, delBtn_, groupBtn_, ungroupBtn_, upBtn_, downBtn_}) {
+    maskBtn_->setToolTip(
+        QStringLiteral("Add a layer mask (from the selection if any). "
+                       "Click a mask thumbnail to enable/disable it."));
+    for (QPushButton* b :
+         {addBtn_, dupBtn_, delBtn_, groupBtn_, ungroupBtn_, maskBtn_, upBtn_, downBtn_}) {
         btnRow->addWidget(b);
     }
     root->addLayout(btnRow);
@@ -81,6 +92,7 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     connect(tree_, &QTreeWidget::currentItemChanged, this, &LayersPanel::onRowChanged);
     connect(tree_, &QTreeWidget::itemSelectionChanged, this, &LayersPanel::onSelectionChanged);
     connect(tree_, &QTreeWidget::itemChanged, this, &LayersPanel::onItemChanged);
+    connect(tree_, &QTreeWidget::itemClicked, this, &LayersPanel::onItemClicked);
     connect(tree_, &QTreeWidget::itemDoubleClicked, this, &LayersPanel::onItemDoubleClicked);
     connect(tree_, &QTreeWidget::itemExpanded, this, &LayersPanel::onItemExpanded);
     connect(tree_, &QTreeWidget::itemCollapsed, this, &LayersPanel::onItemCollapsed);
@@ -91,6 +103,7 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     connect(delBtn_, &QPushButton::clicked, this, &LayersPanel::onDelete);
     connect(groupBtn_, &QPushButton::clicked, this, &LayersPanel::groupSelected);
     connect(ungroupBtn_, &QPushButton::clicked, this, &LayersPanel::ungroupSelected);
+    connect(maskBtn_, &QPushButton::clicked, this, &LayersPanel::addMaskForActive);
     connect(upBtn_, &QPushButton::clicked, this, &LayersPanel::onMoveUp);
     connect(downBtn_, &QPushButton::clicked, this, &LayersPanel::onMoveDown);
 
@@ -210,6 +223,40 @@ QIcon LayersPanel::adjustmentIcon() const {
     return QIcon(pm);
 }
 
+QIcon LayersPanel::maskThumbnail(const pe::Mask& mask) const {
+    constexpr int kThumb = 26;
+    if (doc_ == nullptr) return QIcon();
+    const pe::Rect b = doc_->canvasBounds();
+    if (b.width <= 0 || b.height <= 0) return QIcon();
+    // Sample the mask coverage on a small grid — cheap regardless of canvas size (no
+    // per-canvas-pixel loop). evaluate() reflects inverted + density; a disabled mask is marked
+    // with a cross below.
+    QImage gray(kThumb, kThumb, QImage::Format_RGB888);
+    for (int ty = 0; ty < kThumb; ++ty) {
+        const int dy = b.y + static_cast<int>((static_cast<std::int64_t>(ty) * b.height) / kThumb);
+        for (int tx = 0; tx < kThumb; ++tx) {
+            const int dx =
+                b.x + static_cast<int>((static_cast<std::int64_t>(tx) * b.width) / kThumb);
+            const int v = static_cast<int>(std::lround(mask.evaluate(dx, dy) * 255.0f));
+            gray.setPixel(tx, ty, qRgb(v, v, v));
+        }
+    }
+    QPixmap pm = QPixmap::fromImage(gray);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    if (!mask.enabled()) {
+        // Dim + a red cross: the compositor currently ignores this mask.
+        p.fillRect(pm.rect(), QColor(0, 0, 0, 90));
+        p.setPen(QPen(QColor(220, 80, 80), 1.5));
+        p.drawLine(3, 3, kThumb - 4, kThumb - 4);
+        p.drawLine(kThumb - 4, 3, 3, kThumb - 4);
+    }
+    p.setPen(QColor(0, 0, 0, 140));
+    p.drawRect(0, 0, kThumb - 1, kThumb - 1);
+    p.end();
+    return QIcon(pm);
+}
+
 QIcon LayersPanel::layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> siblings,
                                   std::size_t index) const {
     constexpr int kThumb = 26;
@@ -309,6 +356,8 @@ void LayersPanel::addLevel(QTreeWidgetItem* parentItem,
         item->setIcon(0, isGroup             ? groupIcon()
                          : l->isAdjustment() ? adjustmentIcon()
                                              : layerThumbnail(siblings, i));
+        // Column 1: a grayscale mask thumbnail when the layer carries a mask.
+        if (l->mask() != nullptr) item->setIcon(1, maskThumbnail(*l->mask()));
         if (parentItem != nullptr) {
             parentItem->addChild(item);
         } else {
@@ -374,6 +423,8 @@ void LayersPanel::updateButtons() {
     downBtn_->setEnabled(activeTopLevel && idx > 0);
     groupBtn_->setEnabled(hasDoc && selectionAllTopLevel());
     ungroupBtn_->setEnabled(hasActive && activeTopLevel && a->kind() == pe::LayerKind::Group);
+    maskBtn_->setEnabled(hasActive &&
+                         a->mask() == nullptr);  // add a mask to a not-yet-masked layer
 }
 
 void LayersPanel::groupSelected() {
@@ -409,6 +460,26 @@ void LayersPanel::ungroupSelected() {
         doc_->findLayer(newActive) != nullptr) {
         doc_->setActiveLayer(newActive);
     }
+}
+
+void LayersPanel::addMaskForActive() {
+    if (doc_ == nullptr) return;
+    const pe::LayerId id = doc_->activeLayer();
+    const pe::Layer* l = doc_->findLayer(id);
+    if (l == nullptr || l->mask() != nullptr) return;  // need a layer that has no mask yet
+    // From the active selection if there is one (the common workflow), else a fully-revealing mask.
+    const auto init = doc_->selection().active() ? pe::AddLayerMaskCommand::Init::FromSelection
+                                                 : pe::AddLayerMaskCommand::Init::RevealAll;
+    push(std::make_unique<pe::AddLayerMaskCommand>(id, init));
+}
+
+void LayersPanel::onItemClicked(QTreeWidgetItem* item, int column) {
+    // A click on the mask-thumbnail column toggles that layer's mask enabled (Photoshop-style).
+    if (updating_ || doc_ == nullptr || item == nullptr || column != 1) return;
+    const pe::LayerId id = idOf(item);
+    const pe::Layer* l = doc_->findLayer(id);
+    if (l == nullptr || l->mask() == nullptr) return;  // only act on a real mask thumbnail
+    push(std::make_unique<pe::SetMaskEnabledCommand>(id, !l->mask()->enabled()));
 }
 
 void LayersPanel::onRowChanged() {
