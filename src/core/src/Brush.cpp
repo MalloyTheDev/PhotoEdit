@@ -509,6 +509,11 @@ DocumentChange MaskPaintCommand::apply(Document& doc, const std::vector<std::uin
                              values[static_cast<std::size_t>(y) * region_.width + x]);
             }
         }
+        // Writing kOpaque cannot erase a tile setValue created, so undoing a stroke that first
+        // allocated tiles would otherwise leave redundant fully-revealing tiles behind (growing
+        // contentBounds/serialization, defeating the compositor's empty-mask fast path). Drop them
+        // so execute/undo are byte-exact at the tile level.
+        buf.compact(region_);
     }
     return DocumentChange{DocumentChange::Kind::LayerProps, region_, layer_};
 }

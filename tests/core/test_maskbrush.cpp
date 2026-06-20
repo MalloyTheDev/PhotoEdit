@@ -64,6 +64,38 @@ PE_TEST(maskbrush_white_reveals_on_hidden_mask) {
     PE_CHECK_EQ(compositeAlpha(*doc, 2, 2), 0);    // untouched -> still hidden
 }
 
+PE_TEST(maskbrush_undo_is_tile_exact) {
+    // Painting into a reveal-all (empty) mask then undoing must restore the buffer's TILE state
+    // exactly, not just its evaluated values: an all-kOpaque tile left allocated would grow
+    // contentBounds() / the serialized mask and defeat the compositor's empty-mask fast path.
+    auto doc = redDocWithMask(/*revealAll=*/true);
+    const LayerId base = doc->activeLayer();
+    auto* mask = static_cast<PixelLayer*>(doc->findLayer(base))->mask();
+    PE_CHECK(mask->buffer().empty());  // reveal-all starts with no tiles
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    auto cmd = maskPaintStroke(*doc, base, hardBrush(16, 1.0f), pts, /*targetGray=*/0.0f);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(!mask->buffer().empty());  // the stroke allocated tiles
+    doc->history().undo();
+    PE_CHECK(mask->buffer().empty());                    // undo dropped them back to none
+    PE_CHECK(mask->buffer().contentBounds().isEmpty());  // and contentBounds is back to empty
+}
+
+PE_TEST(maskbrush_partial_opacity_rounds) {
+    // opacity 0.5, paint black (target 0) on a reveal-all (255) mask: each fully-covered byte
+    // blends to 255 + (0 - 255) * 0.5 = 127.5 -> lround -> 128, i.e. ~50% coverage in the
+    // composite.
+    auto doc = redDocWithMask(/*revealAll=*/true);
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    auto cmd = maskPaintStroke(*doc, base, hardBrush(16, 0.5f), pts, /*targetGray=*/0.0f);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    const int a = compositeAlpha(*doc, 32, 32);
+    PE_CHECK(a >= 124 && a <= 132);  // ~128 (half-revealed)
+}
+
 PE_TEST(maskbrush_no_mask_is_null) {
     auto doc = Document::createBlank(Size{64, 64});
     const LayerId base = doc->activeLayer();
