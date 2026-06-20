@@ -256,6 +256,7 @@ PixelBuffer CanvasRenderer::renderRegionScaled(Rect docRegion, int maxOutputPixe
 void CanvasRenderer::onDocumentChanged(const Document&, const DocumentChange& change) {
     switch (change.kind) {
         case DocumentChange::Kind::Pixels:
+        case DocumentChange::Kind::MaskPixels:  // a mask edit changes the composite over its region
         case DocumentChange::Kind::LayerProps:
         case DocumentChange::Kind::LayerStructure:
         case DocumentChange::Kind::Profile:  // appearance changes -> recomposite all

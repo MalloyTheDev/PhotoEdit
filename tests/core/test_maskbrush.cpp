@@ -38,6 +38,22 @@ int compositeAlpha(Document& doc, int x, int y) {
 }
 }  // namespace
 
+PE_TEST(maskbrush_emits_maskpixels_change) {
+    // A mask stroke reports Kind::MaskPixels (not LayerProps) so the renderer recomposites the
+    // region while the Layers panel refreshes only the affected row instead of a full tree rebuild.
+    auto doc = redDocWithMask(/*revealAll=*/true);
+    const LayerId base = doc->activeLayer();
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    auto cmd = maskPaintStroke(*doc, base, hardBrush(16, 1.0f), pts, /*targetGray=*/0.0f);
+    PE_CHECK(cmd != nullptr);
+    const DocumentChange ch = cmd->execute(*doc);
+    PE_CHECK(ch.kind == DocumentChange::Kind::MaskPixels);
+    PE_CHECK_EQ(ch.layer, base);
+    PE_CHECK(!ch.dirtyRegion.isEmpty());  // the painted region, so the renderer invalidates it
+    const DocumentChange chu = cmd->undo(*doc);
+    PE_CHECK(chu.kind == DocumentChange::Kind::MaskPixels);  // undo reports it too
+}
+
 PE_TEST(maskbrush_black_hides) {
     auto doc = redDocWithMask(/*revealAll=*/true);
     const LayerId base = doc->activeLayer();

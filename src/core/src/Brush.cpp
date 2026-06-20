@@ -520,7 +520,10 @@ DocumentChange MaskPaintCommand::apply(Document& doc, const std::vector<std::uin
         // so execute/undo are byte-exact at the tile level.
         buf.compact(region_);
     }
-    return DocumentChange{DocumentChange::Kind::LayerProps, region_, layer_};
+    // MaskPixels (not LayerProps): the renderer recomposites region_, and the Layers panel
+    // refreshes only this layer's row (thumbnail + mask thumbnail) instead of rebuilding the whole
+    // tree.
+    return DocumentChange{DocumentChange::Kind::MaskPixels, region_, layer_};
 }
 
 DocumentChange MaskPaintCommand::execute(Document& doc) {

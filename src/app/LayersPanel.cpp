@@ -143,6 +143,13 @@ void LayersPanel::onDocumentChanged(const pe::Document&, const pe::DocumentChang
             // that row's icon (one composite) instead of recompositing every layer.
             updateLayerThumbnail(change.layer);
             break;
+        case pe::DocumentChange::Kind::MaskPixels:
+            // Mask-paint hot path: only the masked layer's row changed. Refresh its composited
+            // thumbnail (col 0, reflects the mask) and its mask thumbnail (col 1) — O(1) — instead
+            // of a full tree rebuild. The focus ring (maskTarget_) is preserved.
+            updateLayerThumbnail(change.layer);
+            updateMaskThumbnail(change.layer);
+            break;
         case pe::DocumentChange::Kind::ActiveLayer:
             // Skip re-selection for an active change we ourselves just pushed from a row
             // click — the tree selection is already correct, and re-selecting would
@@ -358,7 +365,36 @@ void LayersPanel::updateLayerThumbnail(pe::LayerId id) {
     }
     // Guard: setIcon emits itemChanged, which must not be read back as an edit.
     updating_ = true;
-    item->setIcon(0, layerThumbnail(level, idx));
+    // Choose the column-0 icon by kind, exactly like addLevel: a group keeps its folder glyph and
+    // an adjustment keeps its glyph (compositing them alone would blank the icon); only pixel/text
+    // layers get a live composited thumbnail. (Reached by both the pixel-paint and mask-paint
+    // paths.)
+    const pe::Layer* l = level[idx].get();
+    QIcon icon;
+    if (l != nullptr && l->kind() == pe::LayerKind::Group) {
+        icon = groupIcon();
+    } else if (l != nullptr && l->isAdjustment()) {
+        icon = adjustmentIcon();
+    } else {
+        icon = layerThumbnail(level, idx);
+    }
+    item->setIcon(0, icon);
+    updating_ = false;
+}
+
+void LayersPanel::updateMaskThumbnail(pe::LayerId id) {
+    // Refresh just one row's column-1 mask thumbnail (preserving the focus ring) after a mask edit,
+    // instead of rebuilding the whole tree. Falls back to rebuild() if the row is out of sync.
+    if (doc_ == nullptr || id == pe::kNoLayer) return;
+    QTreeWidgetItem* item = itemForId(id);
+    if (item == nullptr) {
+        rebuild();
+        return;
+    }
+    const pe::Layer* l = doc_->findLayer(id);
+    if (l == nullptr || l->mask() == nullptr) return;
+    updating_ = true;
+    item->setIcon(1, maskThumbnail(*l->mask(), id == maskTarget_));
     updating_ = false;
 }
 
