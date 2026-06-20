@@ -88,12 +88,21 @@ public:
     // Magic Wand per-channel tolerance (clamped to [0,255]); driven by the options bar.
     void setWandTolerance(int t) { wandTolerance_ = std::clamp(t, 0, 255); }
 
+    // Route the Brush into the active layer's MASK instead of its pixels (set by clicking a mask
+    // thumbnail in the Layers panel). The foreground luminance drives it: black hides, white
+    // reveals. Cleared when the target layer/mask goes away or the document changes.
+    void setMaskEditTarget(bool on);
+    [[nodiscard]] bool maskEditTarget() const noexcept { return maskEditTarget_; }
+
 signals:
     void zoomChanged(double percent);   // for the status-bar zoom readout
     void colorPicked(const QColor& c);  // for eyedropper tool
     void toolMessage(
         const QString& msg);  // transient status-bar feedback (e.g. a fill that no-ops)
     void textRequested(const QPointF& docPos);  // Type tool clicked at this doc-space point
+    // Mask-edit was exited because a non-Brush tool became active (only the Brush paints masks).
+    // MainWindow relays it so the Layers panel drops the focus ring; keeps the ring honest.
+    void maskEditTargetCleared();
 
 public:
     // View navigation (also driven by the View menu).
@@ -145,6 +154,8 @@ private:
     pe::ViewTransform view_;  // document <-> widget (device px) mapping
     QBrush checker_;          // transparency checkerboard (device-space tile)
     Tool toolMode_ = Tool::Brush;
+    bool maskEditTarget_ =
+        false;  // Brush paints the active layer's mask (set via the Layers panel)
 
     bool needsFit_ = true;  // fit-to-window pending until the widget has a valid size
     bool panning_ = false;  // pan in progress (middle-drag, or Hand tool + left-drag)

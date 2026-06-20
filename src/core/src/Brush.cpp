@@ -453,7 +453,12 @@ std::unique_ptr<MaskPaintCommand> maskPaintStroke(Document& doc, LayerId layerId
     if (mask == nullptr || points.empty()) return nullptr;  // no mask to paint
 
     const float opacity = clamp01(in.opacity);
-    const float target = clamp01(targetGray) * 255.0f;
+    // targetGray is the user-facing value (0 hides, 1 reveals). The buffer stores raw coverage that
+    // Mask::evaluate() flips when the mask is inverted, so on an inverted mask we must write the
+    // complement to keep "black hides, white reveals" true on the canvas and in the thumbnail.
+    float target = clamp01(targetGray);
+    if (mask->inverted()) target = 1.0f - target;
+    target *= 255.0f;
     const CoverageMap cov = buildCoverage(in, points);
     const Rect bb = coverageBounds(cov);
     if (bb.isEmpty()) return nullptr;

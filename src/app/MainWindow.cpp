@@ -1145,6 +1145,16 @@ void MainWindow::buildDockPanels() {
 
     layers_ = new LayersPanel();
     connect(layers_, &LayersPanel::editAdjustmentRequested, this, &MainWindow::editAdjustmentLayer);
+    // Clicking a mask thumbnail targets it for brush painting; route that to the canvas so the
+    // Brush paints the active layer's mask (black hides, white reveals) until the target is
+    // cleared.
+    connect(layers_, &LayersPanel::maskEditTargetChanged, this, [this](bool on) {
+        if (canvas_ != nullptr) canvas_->setMaskEditTarget(on);
+    });
+    // The canvas exits mask-edit when a non-Brush tool is chosen; drop the panel's ring to match.
+    connect(canvas_, &CanvasView::maskEditTargetCleared, this, [this] {
+        if (layers_ != nullptr) layers_->clearMaskTarget();
+    });
     history_ = new HistoryPanel();
     colorPanel_ = new ColorPanel();
     properties_ = new PropertiesPanel();

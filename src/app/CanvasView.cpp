@@ -83,6 +83,10 @@ void CanvasView::setDocument(pe::Document* doc) {
     lassoPts_.clear();
     draggingGradient_ = false;
     tool_.clearCloneSource();  // a clone anchor is stale doc-space state across documents
+    // The mask-edit target belonged to the outgoing document; reset so the Brush paints pixels
+    // again until the user targets a mask in the new document.
+    maskEditTarget_ = false;
+    if (toolMode_ == Tool::Brush) tool_.setMode(pe::PaintToolController::Mode::Brush);
     doc_ = doc;
     if (doc_ != nullptr) {
         doc_->addObserver(this);
@@ -217,8 +221,16 @@ void CanvasView::setTool(Tool t) {
         tool_.cancel(*doc_);
         reloadImage();  // the cancel reverted tiles without notifying the renderer
     }
+    // Only the Brush paints masks, so selecting any other tool exits mask-edit — otherwise the
+    // Layers-panel focus ring would lie while the new tool edits pixels. Tell the panel to drop it.
+    if (maskEditTarget_ && t != Tool::Brush) {
+        maskEditTarget_ = false;
+        emit maskEditTargetCleared();
+    }
     if (t == Tool::Brush) {
-        tool_.setMode(pe::PaintToolController::Mode::Brush);
+        // When a layer mask is the edit target, the Brush paints the mask instead of pixels.
+        tool_.setMode(maskEditTarget_ ? pe::PaintToolController::Mode::MaskPaint
+                                      : pe::PaintToolController::Mode::Brush);
     } else if (t == Tool::Eraser) {
         tool_.setMode(pe::PaintToolController::Mode::Eraser);
     } else if (t == Tool::Dodge) {
@@ -266,6 +278,23 @@ void CanvasView::setTool(Tool t) {
         // Begin a session only if one isn't already live, so re-selecting Free Transform (e.g.
         // pressing Ctrl+T again mid-edit) keeps the in-progress transform instead of dropping it.
         if (!transforming_) beginTransform();
+    }
+}
+
+void CanvasView::setMaskEditTarget(bool on) {
+    if (maskEditTarget_ == on) return;
+    // Drop any live stroke before flipping the target, mirroring setTool(): otherwise the next
+    // mouse-move would rebuild the stroke under the new mode and commit the wrong thing.
+    if (doc_ != nullptr && tool_.isStroking()) {
+        tool_.cancel(*doc_);
+        reloadImage();  // the cancel reverted tiles without notifying the renderer
+    }
+    maskEditTarget_ = on;
+    // Only the Brush honors mask-edit; re-point its controller mode now (other tools are unaffected
+    // and keep painting pixels). A no-op when the active tool isn't the Brush.
+    if (toolMode_ == Tool::Brush) {
+        tool_.setMode(on ? pe::PaintToolController::Mode::MaskPaint
+                         : pe::PaintToolController::Mode::Brush);
     }
 }
 

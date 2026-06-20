@@ -11,6 +11,7 @@
 
 #include <QColor>
 #include <QComboBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
@@ -81,8 +82,9 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     groupBtn_->setToolTip(QStringLiteral("Group selected layers (Ctrl+G)"));
     ungroupBtn_->setToolTip(QStringLiteral("Ungroup the active group (Ctrl+Shift+G)"));
     maskBtn_->setToolTip(
-        QStringLiteral("Add a layer mask (from the selection if any). "
-                       "Click a mask thumbnail to enable/disable it."));
+        QStringLiteral("Add a layer mask (from the selection if any). Click a mask thumbnail to "
+                       "paint into it with the Brush (black hides, white reveals); Alt-click "
+                       "toggles it on/off."));
     for (QPushButton* b :
          {addBtn_, dupBtn_, delBtn_, groupBtn_, ungroupBtn_, maskBtn_, upBtn_, downBtn_}) {
         btnRow->addWidget(b);
@@ -119,7 +121,8 @@ void LayersPanel::setDocument(pe::Document* doc) {
     if (doc_ != nullptr) doc_->removeObserver(this);
     doc_ = doc;
     if (doc_ != nullptr) doc_->addObserver(this);
-    collapsed_.clear();  // a different document: forget prior expand/collapse state
+    collapsed_.clear();          // a different document: forget prior expand/collapse state
+    maskTarget_ = pe::kNoLayer;  // the mask-edit target belonged to the old document
     rebuild();
 }
 
@@ -127,6 +130,12 @@ void LayersPanel::onDocumentChanged(const pe::Document&, const pe::DocumentChang
     switch (change.kind) {
         case pe::DocumentChange::Kind::LayerStructure:
         case pe::DocumentChange::Kind::LayerProps:
+            // A structural/property change may have removed the targeted mask (or its layer); drop
+            // the target (notifying CanvasView) before redrawing so the Brush stops aiming at it.
+            if (maskTarget_ != pe::kNoLayer) {
+                const pe::Layer* t = doc_->findLayer(maskTarget_);
+                if (t == nullptr || t->mask() == nullptr) setMaskTarget(pe::kNoLayer);
+            }
             rebuild();
             break;
         case pe::DocumentChange::Kind::Pixels:
@@ -145,6 +154,14 @@ void LayersPanel::onDocumentChanged(const pe::Document&, const pe::DocumentChang
             }
             syncActiveControls();
             updateButtons();
+            // Keep the mask-edit target equal to the active layer. An active change driven from
+            // OUTSIDE a row click (New Adjustment Layer / Add / Ungroup / undo, or keyboard nav)
+            // arrives here, NOT through onRowChanged (which is suppressed by updating_), so
+            // reconcile it directly — otherwise the focus ring and CanvasView's MaskPaint mode go
+            // stale on a layer whose mask is no longer the active one.
+            if (maskTarget_ != pe::kNoLayer && maskTarget_ != doc_->activeLayer()) {
+                setMaskTarget(pe::kNoLayer);
+            }
             break;
         default:
             break;  // DirtyState / Profile / Selection don't affect the layer tree
@@ -223,7 +240,7 @@ QIcon LayersPanel::adjustmentIcon() const {
     return QIcon(pm);
 }
 
-QIcon LayersPanel::maskThumbnail(const pe::Mask& mask) const {
+QIcon LayersPanel::maskThumbnail(const pe::Mask& mask, bool targeted) const {
     constexpr int kThumb = 26;
     if (doc_ == nullptr) return QIcon();
     const pe::Rect b = doc_->canvasBounds();
@@ -253,6 +270,12 @@ QIcon LayersPanel::maskThumbnail(const pe::Mask& mask) const {
     }
     p.setPen(QColor(0, 0, 0, 140));
     p.drawRect(0, 0, kThumb - 1, kThumb - 1);
+    if (targeted) {
+        // Bright focus ring: this mask is the Brush's current paint target (Photoshop's mask
+        // focus).
+        p.setPen(QPen(QColor(90, 170, 250), 2));
+        p.drawRect(1, 1, kThumb - 3, kThumb - 3);
+    }
     p.end();
     return QIcon(pm);
 }
@@ -356,8 +379,10 @@ void LayersPanel::addLevel(QTreeWidgetItem* parentItem,
         item->setIcon(0, isGroup             ? groupIcon()
                          : l->isAdjustment() ? adjustmentIcon()
                                              : layerThumbnail(siblings, i));
-        // Column 1: a grayscale mask thumbnail when the layer carries a mask.
-        if (l->mask() != nullptr) item->setIcon(1, maskThumbnail(*l->mask()));
+        // Column 1: a grayscale mask thumbnail when the layer carries a mask (with a focus ring
+        // when it is the current mask-edit target).
+        if (l->mask() != nullptr)
+            item->setIcon(1, maskThumbnail(*l->mask(), l->id() == maskTarget_));
         if (parentItem != nullptr) {
             parentItem->addChild(item);
         } else {
@@ -474,12 +499,29 @@ void LayersPanel::addMaskForActive() {
 }
 
 void LayersPanel::onItemClicked(QTreeWidgetItem* item, int column) {
-    // A click on the mask-thumbnail column toggles that layer's mask enabled (Photoshop-style).
-    if (updating_ || doc_ == nullptr || item == nullptr || column != 1) return;
+    if (updating_ || doc_ == nullptr || item == nullptr) return;
     const pe::LayerId id = idOf(item);
     const pe::Layer* l = doc_->findLayer(id);
-    if (l == nullptr || l->mask() == nullptr) return;  // only act on a real mask thumbnail
-    push(std::make_unique<pe::SetMaskEnabledCommand>(id, !l->mask()->enabled()));
+    if (column == 1 && l != nullptr && l->mask() != nullptr) {
+        // A click on the mask thumbnail: Alt toggles enabled (the old gesture), a plain click
+        // TARGETS the mask so the Brush paints into it (Photoshop: click the mask to edit it).
+        if ((QGuiApplication::keyboardModifiers() & Qt::AltModifier) != 0) {
+            push(std::make_unique<pe::SetMaskEnabledCommand>(id, !l->mask()->enabled()));
+            return;
+        }
+        if (doc_->activeLayer() != id) {
+            // Guard like onRowChanged: the resulting ActiveLayer notification must not re-select
+            // and collapse a multi-selection (the #89 class of bug). Usually a no-op here — a real
+            // click already moved the active layer via currentItemChanged -> onRowChanged.
+            syncingActive_ = true;
+            doc_->setActiveLayer(id);  // edit the mask of THIS layer
+            syncingActive_ = false;
+        }
+        setMaskTarget(id);
+        return;
+    }
+    // Any other click (the layer thumbnail/name, or a layer with no mask) leaves mask-edit mode.
+    setMaskTarget(pe::kNoLayer);
 }
 
 void LayersPanel::onRowChanged() {
@@ -492,7 +534,38 @@ void LayersPanel::onRowChanged() {
         syncingActive_ = true;
         doc_->setActiveLayer(id);  // session state (not undoable)
         syncingActive_ = false;
+        // The mask target is reconciled centrally in onDocumentChanged's ActiveLayer branch (which
+        // fires from the setActiveLayer above), so a row change that moves the active layer drops a
+        // stale target there; the mask-thumbnail click path re-targets afterward in onItemClicked.
     }
+}
+
+void LayersPanel::setMaskTarget(pe::LayerId id) {
+    // Only a layer that actually has a mask can be targeted; otherwise fall back to "no target".
+    if (id != pe::kNoLayer) {
+        const pe::Layer* l = doc_ != nullptr ? doc_->findLayer(id) : nullptr;
+        if (l == nullptr || l->mask() == nullptr) id = pe::kNoLayer;
+    }
+    if (maskTarget_ == id) return;
+    maskTarget_ = id;
+    refreshMaskIcons();  // move the focus ring to the new target (cheap; no tree rebuild)
+    emit maskEditTargetChanged(id != pe::kNoLayer);
+}
+
+void LayersPanel::clearMaskTarget() {
+    setMaskTarget(pe::kNoLayer);
+}
+
+void LayersPanel::refreshMaskIcons() {
+    if (doc_ == nullptr) return;
+    // setIcon emits itemChanged; guard so it isn't read back as a visibility edit.
+    updating_ = true;
+    for (QTreeWidgetItemIterator it(tree_); *it != nullptr; ++it) {
+        const pe::Layer* l = doc_->findLayer(idOf(*it));
+        if (l != nullptr && l->mask() != nullptr)
+            (*it)->setIcon(1, maskThumbnail(*l->mask(), l->id() == maskTarget_));
+    }
+    updating_ = false;
 }
 
 void LayersPanel::onSelectionChanged() {

@@ -96,6 +96,23 @@ PE_TEST(maskbrush_partial_opacity_rounds) {
     PE_CHECK(a >= 124 && a <= 132);  // ~128 (half-revealed)
 }
 
+PE_TEST(maskbrush_inverted_mask_honors_convention) {
+    // On an INVERTED mask "white reveals" must still hold: the engine writes the complement so
+    // Mask::evaluate() (which flips inverted bytes) reveals where the user paints white. Without
+    // the inversion handling, white (target 255 == the empty default) would be a no-op -> nullptr.
+    auto doc = redDocWithMask(/*revealAll=*/true);  // empty buffer
+    const LayerId base = doc->activeLayer();
+    auto* mask = static_cast<PixelLayer*>(doc->findLayer(base))->mask();
+    mask->setInverted(true);  // empty buffer (255) now evaluates to 0 -> fully hidden
+    PE_CHECK_EQ(compositeAlpha(*doc, 32, 32), 0);  // inverted reveal-all hides everything
+
+    std::vector<StrokePoint> pts = {{{32, 32}, 1.0f}};
+    auto cmd = maskPaintStroke(*doc, base, hardBrush(16, 1.0f), pts, /*targetGray=*/1.0f);  // white
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    PE_CHECK(compositeAlpha(*doc, 32, 32) > 200);  // white revealed it (convention holds)
+}
+
 PE_TEST(maskbrush_no_mask_is_null) {
     auto doc = Document::createBlank(Size{64, 64});
     const LayerId base = doc->activeLayer();
