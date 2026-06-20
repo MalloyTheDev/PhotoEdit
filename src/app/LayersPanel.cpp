@@ -582,8 +582,9 @@ void LayersPanel::onItemChanged(QTreeWidgetItem* item, int /*column*/) {
     if (l->visible() != want) push(std::make_unique<pe::SetVisibilityCommand>(id, want));
 }
 
-void LayersPanel::onItemDoubleClicked(QTreeWidgetItem* item, int /*column*/) {
+void LayersPanel::onItemDoubleClicked(QTreeWidgetItem* item, int column) {
     if (doc_ == nullptr || item == nullptr) return;
+    if (column != 0) return;  // the editors belong to the layer (col 0), not the mask thumb (col 1)
     const pe::LayerId id = idOf(item);
     const pe::Layer* l = doc_->findLayer(id);
     // Double-clicking an adjustment-layer row opens its parameter dialog; a text-layer row reopens

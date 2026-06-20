@@ -882,7 +882,7 @@ void MainWindow::onAddText(const QPointF& docPos) {
     TextDialog dlg(this);
     if (dlg.exec() != QDialog::Accepted) return;
     const QString text = dlg.text();
-    if (text.isEmpty()) return;
+    if (text.trimmed().isEmpty()) return;  // whitespace-only renders no ink -> no layer
 
     // A live, re-editable text layer: the app rasterizes (Qt fonts) into the cached raster the
     // engine composites; the editable model rides along so it can be reopened. The raster is
@@ -906,7 +906,12 @@ void MainWindow::editTextLayer(pe::LayerId id) {
     if (doc_ == nullptr) return;
     pe::Layer* layer = doc_->findLayer(id);
     if (layer == nullptr || layer->kind() != pe::LayerKind::Text) return;
-    const pe::TextModel current = static_cast<pe::TextLayer*>(layer)->model();
+    auto* textLayer = static_cast<pe::TextLayer*>(layer);
+    const pe::TextModel current = textLayer->model();
+    // Preserve the layer's ACTUAL raster placement across the edit (not just model.origin): the two
+    // can differ for a layer loaded from a .pedoc, and reusing the real rasterOrigin keeps the
+    // glyphs from snapping. The in-app producer keeps them equal, so this is a no-op there.
+    const pe::Point rasterOrigin = textLayer->rasterOrigin();
 
     // Reopen the dialog seeded from the layer's current text + font.
     TextDialog dlg(this);
@@ -917,19 +922,19 @@ void MainWindow::editTextLayer(pe::LayerId id) {
     dlg.setInitial(QString::fromStdString(current.text), font);
     if (dlg.exec() != QDialog::Accepted) return;
     const QString text = dlg.text();
-    if (text.isEmpty()) return;
+    if (text.trimmed().isEmpty()) return;  // whitespace-only renders no ink
 
     // Keep the original origin + ink color (the dialog edits text/family/size only); re-rasterize
     // and commit one undoable EditTextCommand.
-    pe::TextModel model = modelFromDialog(text, dlg.font(), fgColor_, current.origin);
-    model.color = current.color;  // preserve the layer's color (no color control in the dialog)
+    const QColor ink(current.color.r, current.color.g, current.color.b, current.color.a);
+    const pe::TextModel model = modelFromDialog(text, dlg.font(), ink, current.origin);
     pe::PixelBuffer raster = rasterizeText(model);
     if (raster.isEmpty()) {
         statusBar()->showMessage(QStringLiteral("Text is too large to rasterize."), 4000);
         return;
     }
     doc_->history().push(
-        std::make_unique<pe::EditTextCommand>(id, model, std::move(raster), model.origin));
+        std::make_unique<pe::EditTextCommand>(id, model, std::move(raster), rasterOrigin));
 }
 
 void MainWindow::editAdjustmentLayer(pe::LayerId id) {

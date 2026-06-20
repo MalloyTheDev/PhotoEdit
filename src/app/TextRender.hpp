@@ -12,8 +12,10 @@ namespace pe::app {
 // Rasterize a single line of `text` in `font` and `color` to a straight-alpha RGBA8 buffer that
 // tightly bounds the glyphs (baseline laid out, with a small antialiasing margin). Returns an
 // empty buffer for empty text or if the rendered size would exceed a sane area cap. Lives in the
-// app layer because it uses Qt's font/painter stack; the headless engine then composites the
-// result onto a layer via pe::stampBuffer.
+// app layer because it uses Qt's font/painter stack; the buffer becomes a pe::TextLayer's cached
+// raster (via rasterizeText), which the headless engine composites. The ink offset is baked into
+// the buffer here (glyphs laid out at the margin), so the layer places the raster's (0,0) at the
+// click point with no separate offset.
 [[nodiscard]] pe::PixelBuffer renderText(const QString& text, const QFont& font,
                                          const QColor& color);
 
