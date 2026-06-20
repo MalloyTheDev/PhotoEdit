@@ -251,6 +251,8 @@ void CanvasView::setTool(Tool t) {
     if (transforming_ && t != Tool::Transform) {  // leaving Free Transform commits the live result
         commitTransform();
     }
+    // Crosshair cursor for any other interactive tool
+    // (Brush/Eraser/Marquee/Lasso/Crop/Bucket/Gradient/Eyedropper).
     setCursor(t == Tool::Hand        ? Qt::OpenHandCursor
               : t == Tool::Zoom      ? Qt::PointingHandCursor
               : t == Tool::Move      ? Qt::SizeAllCursor
@@ -258,9 +260,7 @@ void CanvasView::setTool(Tool t) {
               : t == Tool::Type      ? Qt::IBeamCursor
               : t == Tool::Transform ? Qt::ArrowCursor
               : t == Tool::Inactive  ? Qt::ArrowCursor
-                                     : Qt::CrossCursor);  // all other interactive tools
-                                                          // (Brush/Eraser/Marquee/Lasso/Crop/
-                                                          // Bucket/Gradient/Eyedropper)
+                                     : Qt::CrossCursor);
     if (t == Tool::Transform) {
         setFocus();  // so Enter/Esc reach keyPressEvent
         // Begin a session only if one isn't already live, so re-selecting Free Transform (e.g.
