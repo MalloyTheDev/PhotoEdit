@@ -1151,6 +1151,10 @@ void MainWindow::buildDockPanels() {
     connect(layers_, &LayersPanel::maskEditTargetChanged, this, [this](bool on) {
         if (canvas_ != nullptr) canvas_->setMaskEditTarget(on);
     });
+    // The canvas exits mask-edit when a non-Brush tool is chosen; drop the panel's ring to match.
+    connect(canvas_, &CanvasView::maskEditTargetCleared, this, [this] {
+        if (layers_ != nullptr) layers_->clearMaskTarget();
+    });
     history_ = new HistoryPanel();
     colorPanel_ = new ColorPanel();
     properties_ = new PropertiesPanel();

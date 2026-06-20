@@ -221,6 +221,12 @@ void CanvasView::setTool(Tool t) {
         tool_.cancel(*doc_);
         reloadImage();  // the cancel reverted tiles without notifying the renderer
     }
+    // Only the Brush paints masks, so selecting any other tool exits mask-edit — otherwise the
+    // Layers-panel focus ring would lie while the new tool edits pixels. Tell the panel to drop it.
+    if (maskEditTarget_ && t != Tool::Brush) {
+        maskEditTarget_ = false;
+        emit maskEditTargetCleared();
+    }
     if (t == Tool::Brush) {
         // When a layer mask is the edit target, the Brush paints the mask instead of pixels.
         tool_.setMode(maskEditTarget_ ? pe::PaintToolController::Mode::MaskPaint

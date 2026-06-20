@@ -13,6 +13,9 @@ namespace pe {
 namespace {
 // Foreground luminance that drives mask painting: 0 (black) hides, 1 (white) reveals. Rec.601
 // weights, matching the engine's other luma uses; clamped because an HDR/F32 color may exceed 1.
+// The foreground ALPHA is intentionally ignored — a mask stores single-channel coverage, so only
+// the color's luminance is meaningful (a transparent foreground still deposits its RGB-derived
+// gray).
 [[nodiscard]] float maskGrayFromColor(Rgbaf c) noexcept {
     return clamp01(0.299f * c.r + 0.587f * c.g + 0.114f * c.b);
 }

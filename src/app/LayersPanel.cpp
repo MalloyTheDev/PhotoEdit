@@ -154,6 +154,14 @@ void LayersPanel::onDocumentChanged(const pe::Document&, const pe::DocumentChang
             }
             syncActiveControls();
             updateButtons();
+            // Keep the mask-edit target equal to the active layer. An active change driven from
+            // OUTSIDE a row click (New Adjustment Layer / Add / Ungroup / undo, or keyboard nav)
+            // arrives here, NOT through onRowChanged (which is suppressed by updating_), so
+            // reconcile it directly — otherwise the focus ring and CanvasView's MaskPaint mode go
+            // stale on a layer whose mask is no longer the active one.
+            if (maskTarget_ != pe::kNoLayer && maskTarget_ != doc_->activeLayer()) {
+                setMaskTarget(pe::kNoLayer);
+            }
             break;
         default:
             break;  // DirtyState / Profile / Selection don't affect the layer tree
@@ -501,7 +509,14 @@ void LayersPanel::onItemClicked(QTreeWidgetItem* item, int column) {
             push(std::make_unique<pe::SetMaskEnabledCommand>(id, !l->mask()->enabled()));
             return;
         }
-        if (doc_->activeLayer() != id) doc_->setActiveLayer(id);  // edit the mask of THIS layer
+        if (doc_->activeLayer() != id) {
+            // Guard like onRowChanged: the resulting ActiveLayer notification must not re-select
+            // and collapse a multi-selection (the #89 class of bug). Usually a no-op here — a real
+            // click already moved the active layer via currentItemChanged -> onRowChanged.
+            syncingActive_ = true;
+            doc_->setActiveLayer(id);  // edit the mask of THIS layer
+            syncingActive_ = false;
+        }
         setMaskTarget(id);
         return;
     }
@@ -519,9 +534,9 @@ void LayersPanel::onRowChanged() {
         syncingActive_ = true;
         doc_->setActiveLayer(id);  // session state (not undoable)
         syncingActive_ = false;
-        // Moving to a different layer leaves mask-edit (the target always equals the active layer).
-        // The mask-thumbnail click path re-targets afterward in onItemClicked.
-        if (id != maskTarget_) setMaskTarget(pe::kNoLayer);
+        // The mask target is reconciled centrally in onDocumentChanged's ActiveLayer branch (which
+        // fires from the setActiveLayer above), so a row change that moves the active layer drops a
+        // stale target there; the mask-thumbnail click path re-targets afterward in onItemClicked.
     }
 }
 
@@ -535,6 +550,10 @@ void LayersPanel::setMaskTarget(pe::LayerId id) {
     maskTarget_ = id;
     refreshMaskIcons();  // move the focus ring to the new target (cheap; no tree rebuild)
     emit maskEditTargetChanged(id != pe::kNoLayer);
+}
+
+void LayersPanel::clearMaskTarget() {
+    setMaskTarget(pe::kNoLayer);
 }
 
 void LayersPanel::refreshMaskIcons() {

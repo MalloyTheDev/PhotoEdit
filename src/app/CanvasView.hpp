@@ -100,6 +100,9 @@ signals:
     void toolMessage(
         const QString& msg);  // transient status-bar feedback (e.g. a fill that no-ops)
     void textRequested(const QPointF& docPos);  // Type tool clicked at this doc-space point
+    // Mask-edit was exited because a non-Brush tool became active (only the Brush paints masks).
+    // MainWindow relays it so the Layers panel drops the focus ring; keeps the ring honest.
+    void maskEditTargetCleared();
 
 public:
     // View navigation (also driven by the View menu).

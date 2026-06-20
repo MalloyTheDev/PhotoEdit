@@ -53,6 +53,11 @@ public:
     void groupSelected();
     void ungroupSelected();
 
+    // Drop the mask-edit target (clears the focus ring + emits maskEditTargetChanged(false)).
+    // MainWindow calls this when a non-Brush tool becomes active, since only the Brush paints
+    // masks.
+    void clearMaskTarget();
+
 signals:
     // Emitted when the user double-clicks an adjustment-layer row; MainWindow opens the
     // parameter dialog. (The panel owns the selection but not the adjustment dialogs.)
