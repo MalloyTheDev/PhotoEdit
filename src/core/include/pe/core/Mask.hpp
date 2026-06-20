@@ -84,4 +84,11 @@ private:
 // (fully revealing). Bounded to `canvas`.
 [[nodiscard]] Mask maskFromSelection(const Selection& selection, Rect canvas);
 
+// Whether a full-coverage mask over `canvas` can be materialized (within the mask buffer's tile/
+// pixel caps). fillRect / maskFromSelection silently no-op past that bound, so callers that need a
+// materialized mask (hide-all, mask-from-an-active-selection) check this first to avoid attaching a
+// misleadingly empty (reveal-all) mask on an over-large canvas. A RevealAll mask (empty buffer)
+// always fits — it allocates nothing.
+[[nodiscard]] bool maskFillFits(Rect canvas) noexcept;
+
 }  // namespace pe

@@ -403,12 +403,26 @@ DocumentChange AddLayerMaskCommand::execute(Document& doc) {
         } else {
             switch (init_) {
                 case Init::FromSelection:
-                    owned_ = std::make_unique<Mask>(
-                        maskFromSelection(doc.selection(), doc.canvasBounds()));
+                    // An active selection needs a materialized mask; if the canvas is too large for
+                    // the mask buffer, don't attach a misleadingly empty (reveal-all) one — no-op.
+                    // (An inactive selection legitimately yields a reveal-all mask, which always
+                    // fits.)
+                    if (doc.selection().active() && !maskFillFits(doc.canvasBounds())) {
+                        noop_ = true;
+                    } else {
+                        owned_ = std::make_unique<Mask>(
+                            maskFromSelection(doc.selection(), doc.canvasBounds()));
+                    }
                     break;
                 case Init::HideAll:
-                    owned_ = std::make_unique<Mask>(Mask::Kind::Layer);
-                    owned_->buffer().fillRect(doc.canvasBounds(), MaskBuffer::kClear);
+                    // Hide-all must materialize a fully-cleared buffer; refuse rather than silently
+                    // attach a reveal-all mask (the inverse of the intent) on an over-large canvas.
+                    if (!maskFillFits(doc.canvasBounds())) {
+                        noop_ = true;
+                    } else {
+                        owned_ = std::make_unique<Mask>(Mask::Kind::Layer);
+                        owned_->buffer().fillRect(doc.canvasBounds(), MaskBuffer::kClear);
+                    }
                     break;
                 case Init::RevealAll:
                 default:

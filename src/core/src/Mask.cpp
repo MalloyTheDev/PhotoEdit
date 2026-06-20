@@ -73,6 +73,10 @@ Rect MaskBuffer::contentBounds() const noexcept {
     return bounds;
 }
 
+bool maskFillFits(Rect canvas) noexcept {
+    return !rejectFill(canvas);
+}
+
 Mask maskFromSelection(const Selection& selection, Rect canvas) {
     Mask mask(Mask::Kind::Layer);
     if (!selection.active()) return mask;  // all selected -> empty mask (reveal all)

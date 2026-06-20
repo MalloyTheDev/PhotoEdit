@@ -115,6 +115,29 @@ PE_TEST(mask_toggle_enabled_round_trips) {
     PE_CHECK_EQ(compositeAlpha(*doc, 16, 16), 0);
 }
 
+PE_TEST(mask_add_noop_on_oversize_canvas) {
+    // A canvas larger than the mask buffer's fill cap (~16384 px/side) can't materialize a full
+    // mask; HideAll / FromSelection (with an active selection) must NOT attach a misleadingly empty
+    // (reveal-all) mask — they no-op. RevealAll always fits (it allocates nothing).
+    auto doc = Document::createBlank(Size{20000, 20000});
+    const LayerId base = doc->activeLayer();
+    doc->history().push(
+        std::make_unique<AddLayerMaskCommand>(base, AddLayerMaskCommand::Init::HideAll));
+    PE_CHECK(doc->findLayer(base)->mask() == nullptr);  // no misleading reveal-all mask attached
+
+    Selection sel;
+    sel.selectRect(Rect{0, 0, 100, 100});
+    doc->editableSelection() = sel;
+    doc->history().push(
+        std::make_unique<AddLayerMaskCommand>(base, AddLayerMaskCommand::Init::FromSelection));
+    PE_CHECK(doc->findLayer(base)->mask() ==
+             nullptr);  // active selection + oversize canvas -> no-op
+
+    doc->history().push(
+        std::make_unique<AddLayerMaskCommand>(base, AddLayerMaskCommand::Init::RevealAll));
+    PE_CHECK(doc->findLayer(base)->mask() != nullptr);  // reveal-all always fits
+}
+
 PE_TEST(mask_redo_preserves_painted_content) {
     auto doc = redDoc();
     const LayerId base = doc->activeLayer();
