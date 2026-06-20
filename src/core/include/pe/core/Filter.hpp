@@ -42,6 +42,15 @@ class PixelBuffer;
 [[nodiscard]] std::unique_ptr<PaintCommand> moveLayerContent(Document& doc, LayerId layerId, int dx,
                                                              int dy);
 
+// Affine-transform a pixel layer's content (scale / rotate / translate / skew) as a reversible
+// tile-delta command — the engine behind the Transform tool. `srcToDst` maps source document
+// coordinates to destination document coordinates; the layer's content is inverse-mapped and
+// resampled (premultiplied bilinear, transparent outside the source). Returns nullptr for a
+// non-pixel/empty layer, a singular/non-finite transform, or a destination beyond the engine's
+// per-op size caps.
+[[nodiscard]] std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layerId,
+                                                                  const Affine2D& srcToDst);
+
 // Paint Bucket: flood-fill the contiguous (4-connected) region of layer `layerId` reachable
 // from the seed whose color is within `tolerance` (max per-channel, 0..255) of the seed's,
 // compositing `fillColor` (straight alpha, Normal) over each. Bounded by the canvas; honors the
