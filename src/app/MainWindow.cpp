@@ -1047,16 +1047,17 @@ void MainWindow::exportDocumentAs() {
 
 void MainWindow::undo() {
     if (doc_ == nullptr) return;
-    // A live brush stroke applies an uncommitted preview straight to the tiles
-    // (outside history); mutating history underneath it would desync the preview's
-    // snapshots. Ignore undo/redo until the stroke is committed.
-    if (canvas_ != nullptr && canvas_->tool().isStroking()) return;
+    // A live brush stroke OR Free Transform applies an uncommitted preview straight to the tiles
+    // (outside history); mutating history underneath it would desync the preview's whole-tile
+    // snapshots (History::undo mutates the tiles, then the canvas reverts a now-stale preview over
+    // them). Ignore undo/redo until the stroke/transform is committed (Esc cancels a transform).
+    if (canvas_ != nullptr && (canvas_->tool().isStroking() || canvas_->isTransforming())) return;
     doc_->history().undo();  // notifies -> canvas refreshes
 }
 
 void MainWindow::redo() {
     if (doc_ == nullptr) return;
-    if (canvas_ != nullptr && canvas_->tool().isStroking()) return;
+    if (canvas_ != nullptr && (canvas_->tool().isStroking() || canvas_->isTransforming())) return;
     doc_->history().redo();  // notifies -> canvas refreshes
 }
 

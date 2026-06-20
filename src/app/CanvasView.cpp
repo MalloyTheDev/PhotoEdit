@@ -262,8 +262,10 @@ void CanvasView::setTool(Tool t) {
                                                           // (Brush/Eraser/Marquee/Lasso/Crop/
                                                           // Bucket/Gradient/Eyedropper)
     if (t == Tool::Transform) {
-        setFocus();        // so Enter/Esc reach keyPressEvent
-        beginTransform();  // show the bounding box on the active pixel layer (no-op otherwise)
+        setFocus();  // so Enter/Esc reach keyPressEvent
+        // Begin a session only if one isn't already live, so re-selecting Free Transform (e.g.
+        // pressing Ctrl+T again mid-edit) keeps the in-progress transform instead of dropping it.
+        if (!transforming_) beginTransform();
     }
 }
 
@@ -289,9 +291,13 @@ void CanvasView::beginTransform() {
     cancelTransform();  // drop any prior session/preview first
     if (doc_ == nullptr) return;
     const pe::Layer* l = doc_->findLayer(doc_->activeLayer());
-    if (l == nullptr || l->kind() != pe::LayerKind::Pixel) return;  // only pixel layers transform
-    const pe::Rect b = l->contentBounds();
-    if (b.isEmpty()) return;  // nothing to transform
+    // Only a pixel layer with content can be transformed; tell the user why nothing appeared.
+    const pe::Rect b =
+        (l != nullptr && l->kind() == pe::LayerKind::Pixel) ? l->contentBounds() : pe::Rect{};
+    if (b.isEmpty()) {
+        emit toolMessage(QStringLiteral("Free Transform needs a pixel layer with content."));
+        return;
+    }
     transformLayer_ = doc_->activeLayer();
     transformBox_ = b;
     tfScale_ = 1.0;

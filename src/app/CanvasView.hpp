@@ -77,6 +77,11 @@ public:
     void setTool(Tool t);
     [[nodiscard]] Tool activeTool() const noexcept { return toolMode_; }
 
+    // True while a Free Transform session is live (an uncommitted preview is applied directly to
+    // the tiles, outside history). MainWindow gates undo/redo on this — mutating history underneath
+    // the preview would desync its tile snapshots (same reason as tool().isStroking()).
+    [[nodiscard]] bool isTransforming() const noexcept { return transforming_; }
+
     // Background color (the Gradient tool's far stop; the foreground is the paint color).
     void setBackgroundColor(const QColor& c) { bgColor_ = c; }
 
@@ -178,8 +183,8 @@ private:
     // Free Transform session: a live affine (uniform scale about the box center, rotation about the
     // center, and translation) of the active pixel layer's content. Previewed as a provisional
     // command (reverted + reapplied from the original content each gesture) and committed on
-    // Enter / double-click / click-outside; Esc cancels. transformBox_ is the ORIGINAL content
-    // bounds, fixed for the session; the params below place it.
+    // Enter / click-outside; Esc cancels. transformBox_ is the ORIGINAL content bounds, fixed for
+    // the session; the params below place it.
     void beginTransform();          // start a session on the active pixel layer (no-op otherwise)
     void updateTransformPreview();  // reapply transformLayerContent(matrix) from the original
     void commitTransform();         // push the final command (one undo step) and end the session
