@@ -81,6 +81,10 @@ private:
                                        std::size_t index) const;
     [[nodiscard]] QIcon groupIcon() const;
     [[nodiscard]] QIcon adjustmentIcon() const;  // glyph for non-pixel adjustment layers
+    // Grayscale preview of a layer's mask (shown in column 1); a disabled mask is marked with an X.
+    [[nodiscard]] QIcon maskThumbnail(const pe::Mask& mask) const;
+    // Add a mask to the active layer (from the active selection if any, else fully revealing).
+    void addMaskForActive();
     // Refresh just one layer's row icon after a pixel edit (the paint hot path),
     // instead of rebuilding the whole tree. Falls back to rebuild() if not found.
     void updateLayerThumbnail(pe::LayerId id);
@@ -88,6 +92,7 @@ private:
     void onRowChanged();
     void onSelectionChanged();
     void onItemChanged(QTreeWidgetItem* item, int column);        // visibility checkbox
+    void onItemClicked(QTreeWidgetItem* item, int column);        // click the mask thumb to toggle
     void onItemDoubleClicked(QTreeWidgetItem* item, int column);  // adjustment-layer edit
     void onItemExpanded(QTreeWidgetItem* item);
     void onItemCollapsed(QTreeWidgetItem* item);
@@ -118,6 +123,7 @@ private:
     QPushButton* delBtn_ = nullptr;
     QPushButton* groupBtn_ = nullptr;
     QPushButton* ungroupBtn_ = nullptr;
+    QPushButton* maskBtn_ = nullptr;
     QPushButton* upBtn_ = nullptr;
     QPushButton* downBtn_ = nullptr;
 

@@ -267,6 +267,41 @@ void MainWindow::buildMenuBar() {
         });
         ungroupAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+G")));
 
+        // Layer Mask: a non-destructive raster mask on the active layer; the compositor multiplies
+        // its coverage into the layer's alpha. Each action is one undo step and a safe no-op when
+        // it doesn't apply (e.g. add when already masked, delete/toggle when there is no mask).
+        layerMenu->addSeparator();
+        auto* maskMenu = layerMenu->addMenu(QStringLiteral("Layer Mask"));
+        maskMenu->addAction(QStringLiteral("Reveal All"), this, [this] {
+            if (doc_)
+                doc_->history().push(std::make_unique<pe::AddLayerMaskCommand>(
+                    doc_->activeLayer(), pe::AddLayerMaskCommand::Init::RevealAll));
+        });
+        maskMenu->addAction(QStringLiteral("Hide All"), this, [this] {
+            if (doc_)
+                doc_->history().push(std::make_unique<pe::AddLayerMaskCommand>(
+                    doc_->activeLayer(), pe::AddLayerMaskCommand::Init::HideAll));
+        });
+        maskMenu->addAction(QStringLiteral("From Selection"), this, [this] {
+            if (doc_)
+                doc_->history().push(std::make_unique<pe::AddLayerMaskCommand>(
+                    doc_->activeLayer(), pe::AddLayerMaskCommand::Init::FromSelection));
+        });
+        maskMenu->addSeparator();
+        maskMenu->addAction(QStringLiteral("Toggle Mask Enabled"), this, [this] {
+            if (doc_ == nullptr) return;
+            const pe::Layer* l = doc_->findLayer(doc_->activeLayer());
+            if (l != nullptr && l->mask() != nullptr) {
+                doc_->history().push(std::make_unique<pe::SetMaskEnabledCommand>(
+                    doc_->activeLayer(), !l->mask()->enabled()));
+            }
+        });
+        maskMenu->addAction(QStringLiteral("Delete Mask"), this, [this] {
+            if (doc_)
+                doc_->history().push(
+                    std::make_unique<pe::RemoveLayerMaskCommand>(doc_->activeLayer()));
+        });
+
         // New Adjustment Layer: a non-destructive layer that transforms the composite beneath it at
         // render time. Added on top of the stack as one undo step;
         // visibility/opacity/blend/reorder/ delete all work through the existing layer commands,
