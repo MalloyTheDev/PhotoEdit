@@ -268,25 +268,25 @@ void MainWindow::buildMenuBar() {
         ungroupAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+G")));
 
         // Layer Mask: a non-destructive raster mask on the active layer; the compositor multiplies
-        // its coverage into the layer's alpha. Each action is one undo step and a safe no-op when
-        // it doesn't apply (e.g. add when already masked, delete/toggle when there is no mask).
+        // its coverage into the layer's alpha. Each action checks applicability BEFORE pushing, so
+        // an inapplicable choice records no phantom undo entry and doesn't clear the redo branch
+        // (the engine commands no-op too, but History::push would still truncate redo).
         layerMenu->addSeparator();
         auto* maskMenu = layerMenu->addMenu(QStringLiteral("Layer Mask"));
-        maskMenu->addAction(QStringLiteral("Reveal All"), this, [this] {
-            if (doc_)
-                doc_->history().push(std::make_unique<pe::AddLayerMaskCommand>(
-                    doc_->activeLayer(), pe::AddLayerMaskCommand::Init::RevealAll));
-        });
-        maskMenu->addAction(QStringLiteral("Hide All"), this, [this] {
-            if (doc_)
-                doc_->history().push(std::make_unique<pe::AddLayerMaskCommand>(
-                    doc_->activeLayer(), pe::AddLayerMaskCommand::Init::HideAll));
-        });
-        maskMenu->addAction(QStringLiteral("From Selection"), this, [this] {
-            if (doc_)
-                doc_->history().push(std::make_unique<pe::AddLayerMaskCommand>(
-                    doc_->activeLayer(), pe::AddLayerMaskCommand::Init::FromSelection));
-        });
+        const auto addMask = [this](pe::AddLayerMaskCommand::Init init) {
+            if (doc_ == nullptr) return;
+            const pe::Layer* l = doc_->findLayer(doc_->activeLayer());
+            if (l != nullptr && l->mask() == nullptr) {  // only a not-yet-masked layer
+                doc_->history().push(
+                    std::make_unique<pe::AddLayerMaskCommand>(doc_->activeLayer(), init));
+            }
+        };
+        maskMenu->addAction(QStringLiteral("Reveal All"), this,
+                            [addMask] { addMask(pe::AddLayerMaskCommand::Init::RevealAll); });
+        maskMenu->addAction(QStringLiteral("Hide All"), this,
+                            [addMask] { addMask(pe::AddLayerMaskCommand::Init::HideAll); });
+        maskMenu->addAction(QStringLiteral("From Selection"), this,
+                            [addMask] { addMask(pe::AddLayerMaskCommand::Init::FromSelection); });
         maskMenu->addSeparator();
         maskMenu->addAction(QStringLiteral("Toggle Mask Enabled"), this, [this] {
             if (doc_ == nullptr) return;
@@ -297,9 +297,12 @@ void MainWindow::buildMenuBar() {
             }
         });
         maskMenu->addAction(QStringLiteral("Delete Mask"), this, [this] {
-            if (doc_)
+            if (doc_ == nullptr) return;
+            const pe::Layer* l = doc_->findLayer(doc_->activeLayer());
+            if (l != nullptr && l->mask() != nullptr) {
                 doc_->history().push(
                     std::make_unique<pe::RemoveLayerMaskCommand>(doc_->activeLayer()));
+            }
         });
 
         // New Adjustment Layer: a non-destructive layer that transforms the composite beneath it at
