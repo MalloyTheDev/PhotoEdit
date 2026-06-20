@@ -14,6 +14,8 @@ namespace pe {
 struct DocumentChange {
     enum class Kind : uint8_t {
         Pixels,          // a region of one or more layers changed
+        MaskPixels,      // a region of ONE layer's mask changed (recomposite; cheap per-row panel
+                         // refresh, not a full tree rebuild — unlike a real LayerProps edit)
         LayerStructure,  // add / remove / reorder / group
         LayerProps,      // opacity / blend / visibility / name / lock
         ActiveLayer,     // active-layer session change (not undoable)
@@ -23,8 +25,8 @@ struct DocumentChange {
     };
 
     Kind kind = Kind::Pixels;
-    Rect dirtyRegion{};        // meaningful for Pixels: union of touched tiles
-    LayerId layer = kNoLayer;  // affected layer where meaningful
+    Rect dirtyRegion{};        // meaningful for Pixels / MaskPixels: union of touched tiles
+    LayerId layer = kNoLayer;  // affected layer where meaningful (the masked layer for MaskPixels)
 };
 
 }  // namespace pe

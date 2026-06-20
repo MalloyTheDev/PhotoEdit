@@ -110,6 +110,10 @@ private:
     // Refresh just one layer's row icon after a pixel edit (the paint hot path),
     // instead of rebuilding the whole tree. Falls back to rebuild() if not found.
     void updateLayerThumbnail(pe::LayerId id);
+    // Refresh just one layer's column-1 mask thumbnail after a mask-brush edit (preserving the
+    // focus ring), instead of rebuilding the whole tree. Falls back to rebuild() if the row is out
+    // of sync.
+    void updateMaskThumbnail(pe::LayerId id);
 
     void onRowChanged();
     void onSelectionChanged();
