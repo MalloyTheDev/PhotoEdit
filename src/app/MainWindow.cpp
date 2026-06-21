@@ -2,6 +2,7 @@
 
 #include "CanvasView.hpp"
 #include "ColorPanel.hpp"
+#include "CurvesDialog.hpp"
 #include "EffectDialog.hpp"
 #include "ExportDialog.hpp"
 #include "HistoryPanel.hpp"
@@ -1075,6 +1076,22 @@ void MainWindow::editAdjustmentLayer(pe::LayerId id) {
                 return std::make_unique<pe::Threshold>(f(v[0]));
             };
             break;
+        }
+        case pe::AdjustmentKind::Curves: {
+            // Curves needs an interactive curve plot, not sliders, so it uses its own dialog (with
+            // the same live-preview + single-undo-step flow as EffectDialog) and returns here.
+            const auto& a = static_cast<const pe::Curves&>(adj);
+            CurvesDialog dlg(
+                this, a.points(),
+                [id](const std::vector<std::pair<float, float>>& pts)
+                    -> std::unique_ptr<pe::Command> {
+                    auto c = std::make_unique<pe::Curves>();
+                    c->setPoints(pts);
+                    return std::make_unique<pe::EditAdjustmentCommand>(id, std::move(c));
+                },
+                doc_.get(), [this] { canvas_->reloadImage(); });
+            dlg.exec();
+            return;
         }
         default:
             QMessageBox::information(this, QStringLiteral("Edit Adjustment"),
