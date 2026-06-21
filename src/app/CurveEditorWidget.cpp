@@ -74,11 +74,19 @@ std::pair<float, float> CurveEditorWidget::toCurve(QPointF w) const {
 }
 
 int CurveEditorWidget::hitPoint(QPointF w) const {
+    // Nearest control point within the grab radius (so overlapping handles grab the closest one,
+    // not just the lowest-index one).
+    int best = -1;
+    double bestDist = kGrabRadius;
     for (std::size_t i = 0; i < points_.size(); ++i) {
         const QPointF p = toWidget(points_[i].first, points_[i].second);
-        if (std::hypot(p.x() - w.x(), p.y() - w.y()) <= kGrabRadius) return static_cast<int>(i);
+        const double d = std::hypot(p.x() - w.x(), p.y() - w.y());
+        if (d <= bestDist) {
+            bestDist = d;
+            best = static_cast<int>(i);
+        }
     }
-    return -1;
+    return best;
 }
 
 void CurveEditorWidget::paintEvent(QPaintEvent*) {
@@ -142,8 +150,13 @@ void CurveEditorWidget::mousePressEvent(QMouseEvent* e) {
     } else if (points_.size() < kMaxPoints) {
         // Add a new interior point at the cursor and start dragging it.
         const auto [cx, cy] = toCurve(w);
+        const std::size_t before = points_.size();
         points_.emplace_back(cx, cy);
         sanitize();
+        if (points_.size() == before) {
+            dragIndex_ = -1;  // collided with an existing x: the add was dropped — a no-op click
+            return;           // (don't emit / rebuild the preview for nothing)
+        }
         // Re-find the inserted point (sanitize sorts) so the drag tracks it.
         dragIndex_ = hitPoint(w);
         if (dragIndex_ < 0) dragIndex_ = hitPoint(toWidget(cx, cy));
@@ -164,10 +177,14 @@ void CurveEditorWidget::mouseMoveEvent(QMouseEvent* e) {
         pt.first = 1.0f;
     } else {
         // Keep interior x strictly between its neighbours so the sort order (and the drag index)
-        // stays stable mid-drag.
-        const float lo = points_[static_cast<std::size_t>(dragIndex_ - 1)].first + 1e-3f;
-        const float hi = points_[static_cast<std::size_t>(dragIndex_ + 1)].first - 1e-3f;
-        pt.first = std::clamp(cx, lo, std::max(lo, hi));
+        // stays stable mid-drag. Neighbours are always distinct (sanitize dedups), so the midpoint
+        // is strictly between them — use it when the gap is too small for the 1e-3 margins, so x
+        // never collapses to/past a neighbour (which would break strictly-increasing ordering).
+        const float a = points_[static_cast<std::size_t>(dragIndex_ - 1)].first;
+        const float b = points_[static_cast<std::size_t>(dragIndex_ + 1)].first;
+        const float lo = a + 1e-3f;
+        const float hi = b - 1e-3f;
+        pt.first = (lo <= hi) ? std::clamp(cx, lo, hi) : 0.5f * (a + b);
     }
     update();
     emit pointsChanged();
