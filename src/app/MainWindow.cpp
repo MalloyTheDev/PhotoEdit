@@ -5,6 +5,7 @@
 #include "CurvesDialog.hpp"
 #include "EffectDialog.hpp"
 #include "ExportDialog.hpp"
+#include "GroupedSlidersDialog.hpp"
 #include "HistoryPanel.hpp"
 #include "IconUtil.hpp"
 #include "LayersPanel.hpp"
@@ -1138,6 +1139,69 @@ void MainWindow::editAdjustmentLayer(pe::LayerId id) {
                     auto c = std::make_unique<pe::Curves>();
                     c->setPoints(pts);
                     return std::make_unique<pe::EditAdjustmentCommand>(id, std::move(c));
+                },
+                doc_.get(), [this] { canvas_->reloadImage(); });
+            dlg.exec();
+            return;
+        }
+        case pe::AdjustmentKind::ChannelMixer: {
+            // A group per output channel (R/G/B), four sliders per group (source R/G/B + constant),
+            // and a global Monochrome flag. Its own combo-driven dialog (returns here).
+            const auto& a = static_cast<const pe::ChannelMixer&>(adj);
+            std::vector<std::vector<double>> init(3, std::vector<double>(4));
+            for (int out = 0; out < 3; ++out) {
+                for (int in = 0; in < 4; ++in) init[out][in] = a.coeff(out, in);
+            }
+            GroupedSlidersDialog dlg(
+                this, QStringLiteral("Channel Mixer"),
+                {QStringLiteral("Red"), QStringLiteral("Green"), QStringLiteral("Blue")},
+                {{QStringLiteral("Red"), -2.0, 2.0, 2},
+                 {QStringLiteral("Green"), -2.0, 2.0, 2},
+                 {QStringLiteral("Blue"), -2.0, 2.0, 2},
+                 {QStringLiteral("Constant"), -1.0, 1.0, 2}},
+                std::move(init), QStringLiteral("Monochrome"), a.monochrome(),
+                [id, f](const std::vector<std::vector<double>>& g,
+                        bool mono) -> std::unique_ptr<pe::Command> {
+                    auto cm = std::make_unique<pe::ChannelMixer>();
+                    for (int out = 0; out < 3; ++out) {
+                        cm->setRow(out, f(g[out][0]), f(g[out][1]), f(g[out][2]), f(g[out][3]));
+                    }
+                    cm->setMonochrome(mono);
+                    return std::make_unique<pe::EditAdjustmentCommand>(id, std::move(cm));
+                },
+                doc_.get(), [this] { canvas_->reloadImage(); });
+            dlg.exec();
+            return;
+        }
+        case pe::AdjustmentKind::SelectiveColor: {
+            // A group per color range, four C/M/Y/K sliders per group, and a Relative/Absolute
+            // flag.
+            using SC = pe::SelectiveColor;
+            const auto& a = static_cast<const SC&>(adj);
+            std::vector<std::vector<double>> init(SC::kRangeCount, std::vector<double>(4));
+            for (int r = 0; r < SC::kRangeCount; ++r) {
+                const SC::Cmyk v = a.range(r);
+                init[static_cast<std::size_t>(r)] = {v.c, v.m, v.y, v.k};
+            }
+            GroupedSlidersDialog dlg(
+                this, QStringLiteral("Selective Color"),
+                {QStringLiteral("Reds"), QStringLiteral("Yellows"), QStringLiteral("Greens"),
+                 QStringLiteral("Cyans"), QStringLiteral("Blues"), QStringLiteral("Magentas"),
+                 QStringLiteral("Whites"), QStringLiteral("Neutrals"), QStringLiteral("Blacks")},
+                {{QStringLiteral("Cyan"), -1.0, 1.0, 2},
+                 {QStringLiteral("Magenta"), -1.0, 1.0, 2},
+                 {QStringLiteral("Yellow"), -1.0, 1.0, 2},
+                 {QStringLiteral("Black"), -1.0, 1.0, 2}},
+                std::move(init), QStringLiteral("Relative"), a.relative(),
+                [id, f](const std::vector<std::vector<double>>& g,
+                        bool relative) -> std::unique_ptr<pe::Command> {
+                    auto sc = std::make_unique<SC>();
+                    for (int r = 0; r < SC::kRangeCount; ++r) {
+                        const auto& q = g[static_cast<std::size_t>(r)];
+                        sc->setRange(r, f(q[0]), f(q[1]), f(q[2]), f(q[3]));
+                    }
+                    sc->setRelative(relative);
+                    return std::make_unique<pe::EditAdjustmentCommand>(id, std::move(sc));
                 },
                 doc_.get(), [this] { canvas_->reloadImage(); });
             dlg.exec();
