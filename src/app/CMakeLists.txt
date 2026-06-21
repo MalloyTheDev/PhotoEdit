@@ -15,6 +15,10 @@ qt_add_executable(photoedit
     MainWindow.hpp
     CanvasView.cpp
     CanvasView.hpp
+    CurveEditorWidget.cpp
+    CurveEditorWidget.hpp
+    CurvesDialog.cpp
+    CurvesDialog.hpp
     EffectDialog.cpp
     EffectDialog.hpp
     ExportDialog.cpp
