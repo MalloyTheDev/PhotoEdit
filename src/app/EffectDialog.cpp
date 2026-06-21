@@ -4,6 +4,8 @@
 #include "pe/core/Document.hpp"  // pe::Document, history()
 
 #include <QCheckBox>
+#include <QColor>
+#include <QColorDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
@@ -26,6 +28,10 @@ namespace {
     for (int i = 0; i < decimals; ++i) s *= 10;
     return s;
 }
+// Paint a color-swatch button with its current color (a contrasting border keeps it visible).
+void styleSwatch(QPushButton* b, const QColor& c) {
+    b->setStyleSheet(QStringLiteral("background-color: %1; border: 1px solid #222;").arg(c.name()));
+}
 }  // namespace
 
 EffectDialog::EffectDialog(QWidget* parent, const QString& title, std::vector<Param> params,
@@ -40,8 +46,39 @@ EffectDialog::EffectDialog(QWidget* parent, const QString& title, std::vector<Pa
     form->setLabelAlignment(Qt::AlignRight);
 
     for (const Param& p : params) {
-        const int scale = sliderScale(p.decimals);
+        if (p.kind == Param::Check) {
+            auto* check = new QCheckBox(this);
+            check->setChecked(p.value != 0.0);
+            connect(check, &QCheckBox::toggled, this, [this](bool) { rebuildPreview(); });
+            form->addRow(p.label, check);
+            controls_.push_back(Control{.kind = Param::Check, .check = check});
+            continue;
+        }
+        if (p.kind == Param::Color) {
+            const std::size_t idx = controls_.size();  // stable index for the click handler
+            auto* swatch = new QPushButton(this);
+            swatch->setFixedSize(48, 22);
+            const QColor init = QColor::fromRgbF(p.r, p.g, p.b);
+            styleSwatch(swatch, init);
+            connect(swatch, &QPushButton::clicked, this, [this, swatch, idx] {
+                const QColor cur =
+                    QColor::fromRgbF(controls_[idx].cr, controls_[idx].cg, controls_[idx].cb);
+                const QColor picked = QColorDialog::getColor(cur, this, QStringLiteral("Color"));
+                if (!picked.isValid()) return;  // user cancelled
+                controls_[idx].cr = picked.redF();
+                controls_[idx].cg = picked.greenF();
+                controls_[idx].cb = picked.blueF();
+                styleSwatch(swatch, picked);
+                rebuildPreview();
+            });
+            form->addRow(p.label, swatch);
+            controls_.push_back(
+                Control{.kind = Param::Color, .swatch = swatch, .cr = p.r, .cg = p.g, .cb = p.b});
+            continue;
+        }
 
+        // Slider (the default kind): a slider + spinbox kept in lock-step.
+        const int scale = sliderScale(p.decimals);
         auto* spin = new QDoubleSpinBox(this);
         spin->setDecimals(p.decimals);
         spin->setRange(p.min, p.max);
@@ -53,7 +90,6 @@ EffectDialog::EffectDialog(QWidget* parent, const QString& title, std::vector<Pa
                          static_cast<int>(std::lround(p.max * scale)));
         slider->setValue(static_cast<int>(std::lround(p.value * scale)));
 
-        // Keep the slider and spinbox in lock-step; either edit triggers a fresh preview.
         connect(slider, &QSlider::valueChanged, this, [this, spin, scale](int v) {
             if (syncing_) return;
             syncing_ = true;
@@ -73,9 +109,7 @@ EffectDialog::EffectDialog(QWidget* parent, const QString& title, std::vector<Pa
         row->addWidget(slider, 1);
         row->addWidget(spin);
         form->addRow(p.label, row);
-
-        spins_.push_back(spin);
-        sliders_.push_back(slider);
+        controls_.push_back(Control{.kind = Param::Slider, .spin = spin});
     }
     root->addLayout(form);
 
@@ -100,9 +134,25 @@ EffectDialog::~EffectDialog() {
 }
 
 std::vector<double> EffectDialog::values() const {
+    // Flatten controls to doubles IN ORDER: Slider/Check push one, Color pushes three (r,g,b). The
+    // factory reads them positionally (must match the Param list it was built with).
     std::vector<double> v;
-    v.reserve(spins_.size());
-    for (const QDoubleSpinBox* s : spins_) v.push_back(s->value());
+    v.reserve(controls_.size());
+    for (const Control& c : controls_) {
+        switch (c.kind) {
+            case Param::Slider:
+                v.push_back(c.spin->value());
+                break;
+            case Param::Check:
+                v.push_back(c.check->isChecked() ? 1.0 : 0.0);
+                break;
+            case Param::Color:
+                v.push_back(c.cr);
+                v.push_back(c.cg);
+                v.push_back(c.cb);
+                break;
+        }
+    }
     return v;
 }
 
