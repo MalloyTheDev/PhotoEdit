@@ -1077,6 +1077,56 @@ void MainWindow::editAdjustmentLayer(pe::LayerId id) {
             };
             break;
         }
+        case pe::AdjustmentKind::PhotoFilter: {
+            const auto& a = static_cast<const pe::PhotoFilter&>(adj);
+            const pe::Rgbaf col = a.color();
+            title = QStringLiteral("Photo Filter");
+            // Values: [r, g, b, density, preserveLuminosity].
+            params = {{.label = QStringLiteral("Filter Color"),
+                       .kind = EffectDialog::Param::Color,
+                       .r = col.r,
+                       .g = col.g,
+                       .b = col.b},
+                      {QStringLiteral("Density"), 0.0, 1.0, a.density(), 2},
+                      {.label = QStringLiteral("Preserve Luminosity"),
+                       .value = a.preserveLuminosity() ? 1.0 : 0.0,
+                       .kind = EffectDialog::Param::Check}};
+            build = [f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                auto pf = std::make_unique<pe::PhotoFilter>(
+                    pe::Rgbaf{f(v[0]), f(v[1]), f(v[2]), 1.0f}, f(v[3]));
+                pf->setPreserveLuminosity(v[4] > 0.5);
+                return pf;
+            };
+            break;
+        }
+        case pe::AdjustmentKind::GradientMap: {
+            const auto& a = static_cast<const pe::GradientMap&>(adj);
+            const pe::Rgbaf c0 = a.color0();
+            const pe::Rgbaf c1 = a.color1();
+            title = QStringLiteral("Gradient Map");
+            // Values: [r0, g0, b0, r1, g1, b1, reverse].
+            params = {{.label = QStringLiteral("Start (shadows)"),
+                       .kind = EffectDialog::Param::Color,
+                       .r = c0.r,
+                       .g = c0.g,
+                       .b = c0.b},
+                      {.label = QStringLiteral("End (highlights)"),
+                       .kind = EffectDialog::Param::Color,
+                       .r = c1.r,
+                       .g = c1.g,
+                       .b = c1.b},
+                      {.label = QStringLiteral("Reverse"),
+                       .value = a.reverse() ? 1.0 : 0.0,
+                       .kind = EffectDialog::Param::Check}};
+            build = [f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                auto gm =
+                    std::make_unique<pe::GradientMap>(pe::Rgbaf{f(v[0]), f(v[1]), f(v[2]), 1.0f},
+                                                      pe::Rgbaf{f(v[3]), f(v[4]), f(v[5]), 1.0f});
+                gm->setReverse(v[6] > 0.5);
+                return gm;
+            };
+            break;
+        }
         case pe::AdjustmentKind::Curves: {
             // Curves needs an interactive curve plot, not sliders, so it uses its own dialog (with
             // the same live-preview + single-undo-step flow as EffectDialog) and returns here.

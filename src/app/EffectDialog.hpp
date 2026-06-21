@@ -9,6 +9,7 @@
 
 class QCheckBox;
 class QDoubleSpinBox;
+class QPushButton;
 class QSlider;
 
 namespace pe {
@@ -33,17 +34,26 @@ class EffectDialog : public QDialog {
 
 public:
     struct Param {
+        // A parameter renders as a slider+spinbox (Slider), an on/off checkbox (Check), or a color
+        // swatch that opens a color picker (Color). New kinds were appended after the original
+        // slider fields so existing positional initializers ({label,min,max,value,decimals}) still
+        // mean a Slider.
+        enum Kind { Slider, Check, Color };
+
         QString label;
         double min = 0.0;
         double max = 1.0;
-        double value = 0.0;
-        int decimals = 2;  // 0 => integer parameter
+        double value = 0.0;  // Slider: initial value. Check: initial state (0 or 1).
+        int decimals = 2;    // 0 => integer parameter (Slider only)
+        Kind kind = Slider;
+        double r = 0.0, g = 0.0, b = 0.0;  // Color: initial RGB, each [0,1]
     };
 
-    // Builds an undoable command from the current parameter values, or nullptr if the effect
-    // cannot apply (no paintable active layer, empty content, over budget). Any Command works:
-    // a destructive PaintCommand (Adjustments/Filters) or an EditAdjustmentCommand (adjustment
-    // layers) — the dialog only needs execute()/undo()/push() (the Command base).
+    // Builds an undoable command from the current parameter values, or nullptr if the effect cannot
+    // apply (no paintable active layer, empty content, over budget). Each parameter contributes to
+    // the value vector IN ORDER by kind: a Slider or Check pushes ONE double (Check is 0.0/1.0); a
+    // Color pushes THREE (r, g, b each in [0,1]). The factory reads them positionally. Any Command
+    // works: a destructive PaintCommand (Adjustments/Filters) or an EditAdjustmentCommand.
     using CommandFactory = std::function<std::unique_ptr<pe::Command>(const std::vector<double>&)>;
 
     EffectDialog(QWidget* parent, const QString& title, std::vector<Param> params,
@@ -65,8 +75,15 @@ private:
     std::function<void()> onPreview_;
     std::unique_ptr<pe::Command> preview_;  // provisional, applied-to-doc command
 
-    std::vector<QDoubleSpinBox*> spins_;
-    std::vector<QSlider*> sliders_;
+    // One per Param, in order, so values() collects the right doubles per kind.
+    struct Control {
+        Param::Kind kind = Param::Slider;
+        QDoubleSpinBox* spin = nullptr;       // Slider
+        QCheckBox* check = nullptr;           // Check
+        QPushButton* swatch = nullptr;        // Color
+        double cr = 0.0, cg = 0.0, cb = 0.0;  // Color: current RGB [0,1]
+    };
+    std::vector<Control> controls_;
     QCheckBox* previewChk_ = nullptr;
     bool syncing_ = false;  // guard: programmatic slider<->spin sync must not re-enter
 };
