@@ -23,6 +23,8 @@ qt_add_executable(photoedit
     EffectDialog.hpp
     ExportDialog.cpp
     ExportDialog.hpp
+    GroupedSlidersDialog.cpp
+    GroupedSlidersDialog.hpp
     TextDialog.cpp
     TextDialog.hpp
     TextRender.cpp
