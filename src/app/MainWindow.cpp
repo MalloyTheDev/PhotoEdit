@@ -1037,6 +1037,27 @@ void MainWindow::editAdjustmentLayer(pe::LayerId id) {
             };
             break;
         }
+        case pe::AdjustmentKind::BlackAndWhite: {
+            const auto& a = static_cast<const pe::BlackAndWhite&>(adj);
+            title = QStringLiteral("Black & White");
+            // One luminance-mix weight per color band (Photoshop's six). Range matches the engine's
+            // clamp ([-2, 3]); the layer's defaults already give a neutral-ish grayscale.
+            using BW = pe::BlackAndWhite;
+            params = {{QStringLiteral("Reds"), -2.0, 3.0, a.band(BW::Reds), 2},
+                      {QStringLiteral("Yellows"), -2.0, 3.0, a.band(BW::Yellows), 2},
+                      {QStringLiteral("Greens"), -2.0, 3.0, a.band(BW::Greens), 2},
+                      {QStringLiteral("Cyans"), -2.0, 3.0, a.band(BW::Cyans), 2},
+                      {QStringLiteral("Blues"), -2.0, 3.0, a.band(BW::Blues), 2},
+                      {QStringLiteral("Magentas"), -2.0, 3.0, a.band(BW::Magentas), 2}};
+            build = [f](const std::vector<double>& v) -> std::unique_ptr<pe::Adjustment> {
+                auto bw = std::make_unique<pe::BlackAndWhite>();
+                for (int b = 0; b < pe::BlackAndWhite::kBandCount; ++b) {
+                    bw->setBand(b, f(v[static_cast<std::size_t>(b)]));
+                }
+                return bw;
+            };
+            break;
+        }
         case pe::AdjustmentKind::Posterize: {
             const auto& a = static_cast<const pe::Posterize&>(adj);
             title = QStringLiteral("Posterize");
