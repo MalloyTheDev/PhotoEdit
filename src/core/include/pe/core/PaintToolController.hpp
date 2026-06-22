@@ -93,6 +93,14 @@ private:
     // MaskPaintCommand (MaskPaint mode); both derive from Command and the preview uses it
     // polymorphically (execute/undo).
     [[nodiscard]] std::unique_ptr<Command> buildStroke(Document& doc) const;
+    // The incremental LiveStroke for the current mode, or nullptr for modes with no incremental
+    // path (Blur/Sharpen/Heal/MaskPaint) or when stabilization is on — those use the batched
+    // rebuild. The per-pixel ops (Brush/Eraser/Dodge/Burn/Clone) get a LiveStroke so a long drag
+    // stays linear rather than re-rasterizing the whole stroke every sample.
+    [[nodiscard]] std::unique_ptr<LiveStroke> createLive(Document& doc);
+    // Clone source->dest offset locked to the stroke's first point (validated/clamped). False if no
+    // source is set or the first point is non-finite. Shared by buildStroke and createLive.
+    [[nodiscard]] bool cloneOffset(int& offX, int& offY) const;
 
     BrushSettings brush_{};
     Rgbaf color_{0.0f, 0.0f, 0.0f, 1.0f};  // opaque black foreground default
@@ -105,7 +113,9 @@ private:
     LayerId layer_ = kNoLayer;
     const Selection* selection_ = nullptr;
     std::vector<StrokePoint> points_;
-    std::unique_ptr<Command> preview_;  // applied-to-doc provisional stroke (Paint or MaskPaint)
+    std::unique_ptr<Command> preview_;  // applied-to-doc provisional stroke (batched-rebuild path)
+    std::unique_ptr<LiveStroke>
+        live_;            // incremental stroke (per-pixel ops); null on the batched path
     Rect strokeDirty_{};  // cumulative dirty bounds of the live preview (see accessor)
 };
 

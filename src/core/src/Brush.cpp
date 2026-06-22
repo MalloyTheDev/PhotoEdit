@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -51,7 +53,10 @@ constexpr std::size_t kMaxStrokeTiles = 4096;
 // skipped. Keeps center +/- radius and col*kTileSize comfortably within int.
 constexpr float kCoordBound = static_cast<float>(1 << 26);  // ~67M
 
-void stampDab(CoverageMap& cov, Vec2 center, float radius, float hardness, float flow) {
+// Stamp one dab's coverage into `cov`. If `touched` is non-null, every tile key written to is
+// recorded there (the incremental LiveStroke uses it to re-composite only the tiles a new dab hit).
+void stampDab(CoverageMap& cov, Vec2 center, float radius, float hardness, float flow,
+              std::set<CoverageKey>* touched = nullptr) {
     // C1: reject non-finite/absurd coordinates before the float->int casts (which
     // are UB for NaN/Inf/out-of-range values).
     if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(radius)) return;
@@ -82,6 +87,7 @@ void stampDab(CoverageMap& cov, Vec2 center, float radius, float hardness, float
                                  std::vector<float>(static_cast<std::size_t>(kTilePixels), 0.0f))
                          .first;
             }
+            if (touched != nullptr) touched->insert(key);
             std::vector<float>& buf = it->second;
 
             const int lx = x - col * kTileSize;
@@ -90,6 +96,82 @@ void stampDab(CoverageMap& cov, Vec2 center, float radius, float hardness, float
             b = b + c * (1.0f - b);  // Porter-Duff 'over' on stroke coverage (caps at 1)
         }
     }
+}
+
+// One pixel of a brush op: given the destination pixel `dst` and the effective coverage `a`
+// (already capped at opacity and gated by the selection), write the new pixel into `out`. Returns
+// false to leave the pixel unchanged (Dodge/Burn skip fully-transparent pixels). `sampleS0(x, y)`
+// yields the PRE-STROKE pixel at a document coordinate — Clone's source; the batched flush reads
+// the store (which is at S0 during the flush), the incremental LiveStroke reads its per-tile
+// snapshot. Shared by both paths so their output is byte-identical. (px, py) is the destination
+// document coordinate.
+template <class SampleS0>
+[[nodiscard]] bool brushOpPixel(PaintOp op, const Rgbaf& dst, float a, const Rgbaf& color,
+                                float colorA, BlendMode blendMode, int px, int py, int cloneOffX,
+                                int cloneOffY, SampleS0&& sampleS0, Rgbaf& out) {
+    out = dst;
+    switch (op) {
+        case PaintOp::Paint: {
+            const Rgbaf src{color.r, color.g, color.b, a * colorA};
+            out = compositeOver(blendMode, dst, src, 1.0f);
+            return true;
+        }
+        case PaintOp::Erase:
+            out.a = dst.a * (1.0f - a);  // reduce alpha
+            return true;
+        case PaintOp::Dodge:
+        case PaintOp::Burn: {
+            // Tone tools adjust RGB of existing content, weighted by coverage; alpha is preserved
+            // and fully transparent pixels are left alone (their RGB is moot).
+            if (dst.a <= 0.0f) return false;
+            const float k = a * kToneExposure;
+            if (op == PaintOp::Dodge) {  // lighten toward white
+                // max(0, 1-dst) keeps dodge monotonic on F32/HDR pixels (super-white left alone).
+                out.r = dst.r + k * std::max(0.0f, 1.0f - dst.r);
+                out.g = dst.g + k * std::max(0.0f, 1.0f - dst.g);
+                out.b = dst.b + k * std::max(0.0f, 1.0f - dst.b);
+            } else {  // burn: darken toward black
+                out.r = dst.r * (1.0f - k);
+                out.g = dst.g * (1.0f - k);
+                out.b = dst.b * (1.0f - k);
+            }
+            return true;
+        }
+        case PaintOp::Clone: {
+            // Sample the PRE-STROKE source pixel at the fixed stroke offset (no feedback even where
+            // source and dest overlap) and composite over the destination at the brush coverage.
+            // Gate the source coord range (cloneStroke is callable with an arbitrary offset) so the
+            // int64->int cast can't overflow; outside it there is no content, so read transparent.
+            constexpr int64_t kCloneSampleBound = 1 << 26;  // ~67M, well within int
+            const int64_t sx = static_cast<int64_t>(px) - static_cast<int64_t>(cloneOffX);
+            const int64_t sy = static_cast<int64_t>(py) - static_cast<int64_t>(cloneOffY);
+            Rgbaf srcF{};
+            if (sx > -kCloneSampleBound && sx < kCloneSampleBound && sy > -kCloneSampleBound &&
+                sy < kCloneSampleBound) {
+                srcF = sampleS0(static_cast<int>(sx), static_cast<int>(sy));
+            }
+            if (blendMode == BlendMode::Normal) {
+                // Straight-alpha source-over WITHOUT clamping RGB, so cloning preserves HDR/super-
+                // white on an F32 layer. Identical to compositeOver(Normal) for in-gamut values.
+                const float sa = clamp01(srcF.a) * a;
+                const float ba = clamp01(dst.a);
+                const float outA = sa + ba * (1.0f - sa);
+                if (outA > 0.0f) {
+                    const float inv = 1.0f / outA;
+                    out.r = (srcF.r * sa + dst.r * ba * (1.0f - sa)) * inv;
+                    out.g = (srcF.g * sa + dst.g * ba * (1.0f - sa)) * inv;
+                    out.b = (srcF.b * sa + dst.b * ba * (1.0f - sa)) * inv;
+                    out.a = outA;
+                } else {
+                    out = Rgbaf{};
+                }
+            } else {
+                out = compositeOver(blendMode, dst, srcF, a);
+            }
+            return true;
+        }
+    }
+    return true;
 }
 
 // Composite the accumulated stroke coverage into `store` at its native depth: for
@@ -115,90 +197,24 @@ std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& st
         if (before) *after = *before;  // start from prior pixels (else transparent)
 
         bool changed = false;
+        const auto sampleS0 = [&store](int x, int y) { return toFloat(store.pixel(x, y)); };
         for (std::size_t idx = 0; idx < static_cast<std::size_t>(kTilePixels); ++idx) {
             float a = std::min(buf[idx], opacity);
             if (a <= 0.0f) continue;
+            const int lx = static_cast<int>(idx % static_cast<std::size_t>(kTileSize));
+            const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
+            const int px = baseX + lx;
+            const int py = baseY + ly;
             if (gate) {
                 // Confine the stroke to the active selection (soft edges for free).
-                const int lx = static_cast<int>(idx % static_cast<std::size_t>(kTileSize));
-                const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
-                a *= selection->coverage(baseX + lx, baseY + ly);
+                a *= selection->coverage(px, py);
                 if (a <= 0.0f) continue;
             }
             const Rgbaf dst = toFloat(after->px[idx]);
-            Rgbaf out = dst;
-            switch (op) {
-                case PaintOp::Paint: {
-                    const Rgbaf src{color.r, color.g, color.b, a * colorA};
-                    out = compositeOver(blendMode, dst, src, 1.0f);
-                    break;
-                }
-                case PaintOp::Erase:
-                    out.a = dst.a * (1.0f - a);  // reduce alpha
-                    break;
-                case PaintOp::Dodge:
-                case PaintOp::Burn: {
-                    // Tone tools adjust RGB of existing content, weighted by coverage; alpha is
-                    // preserved and fully transparent pixels are left alone (their RGB is moot).
-                    if (dst.a <= 0.0f) continue;
-                    const float k = a * kToneExposure;
-                    if (op == PaintOp::Dodge) {  // lighten toward white
-                        // max(0, 1-dst) keeps dodge monotonic on F32/HDR pixels: a super-white
-                        // value (dst > 1, preserved by the float store) is left unchanged rather
-                        // than darkened. For the in-gamut [0,1] case this is identical to (1-dst).
-                        out.r = dst.r + k * std::max(0.0f, 1.0f - dst.r);
-                        out.g = dst.g + k * std::max(0.0f, 1.0f - dst.g);
-                        out.b = dst.b + k * std::max(0.0f, 1.0f - dst.b);
-                    } else {  // burn: darken toward black (dst*(1-k) shrinks any value toward 0)
-                        out.r = dst.r * (1.0f - k);
-                        out.g = dst.g * (1.0f - k);
-                        out.b = dst.b * (1.0f - k);
-                    }
-                    break;
-                }
-                case PaintOp::Clone: {
-                    // Sample the layer's pre-stroke pixels (the store is at its S0 state during the
-                    // flush — the controller reverts the preview before each rebuild, so there is
-                    // no feedback even where source and dest overlap) at the fixed stroke offset,
-                    // and composite over the destination at the brush coverage.
-                    const int lx = static_cast<int>(idx % static_cast<std::size_t>(kTileSize));
-                    const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
-                    // Compute the source coordinate in int64 and gate its range: cloneStroke is a
-                    // public engine entry callable directly with an arbitrary offset, so
-                    // baseX+lx-cloneOffX must not be allowed to signed-overflow int. Outside a sane
-                    // bound the source has no content anyway, so read transparent.
-                    constexpr int64_t kCloneSampleBound = 1 << 26;  // ~67M, well within int
-                    const int64_t sx =
-                        static_cast<int64_t>(baseX) + lx - static_cast<int64_t>(cloneOffX);
-                    const int64_t sy =
-                        static_cast<int64_t>(baseY) + ly - static_cast<int64_t>(cloneOffY);
-                    Rgbaf srcF{};
-                    if (sx > -kCloneSampleBound && sx < kCloneSampleBound &&
-                        sy > -kCloneSampleBound && sy < kCloneSampleBound) {
-                        srcF = toFloat(store.pixel(static_cast<int>(sx), static_cast<int>(sy)));
-                    }
-                    if (blendMode == BlendMode::Normal) {
-                        // Straight-alpha source-over WITHOUT clamping the source/backdrop RGB, so
-                        // cloning faithfully reproduces HDR/super-white values on an F32 layer
-                        // (compositeOver clamps them to 1.0). Identical to compositeOver(Normal)
-                        // for the in-gamut [0,1] case, since blendChannel(Normal) is the source.
-                        const float sa = clamp01(srcF.a) * a;
-                        const float ba = clamp01(dst.a);
-                        const float outA = sa + ba * (1.0f - sa);
-                        if (outA > 0.0f) {
-                            const float inv = 1.0f / outA;
-                            out.r = (srcF.r * sa + dst.r * ba * (1.0f - sa)) * inv;
-                            out.g = (srcF.g * sa + dst.g * ba * (1.0f - sa)) * inv;
-                            out.b = (srcF.b * sa + dst.b * ba * (1.0f - sa)) * inv;
-                            out.a = outA;
-                        } else {
-                            out = Rgbaf{};
-                        }
-                    } else {
-                        out = compositeOver(blendMode, dst, srcF, a);
-                    }
-                    break;
-                }
+            Rgbaf out;
+            if (!brushOpPixel(op, dst, a, color, colorA, blendMode, px, py, cloneOffX, cloneOffY,
+                              sampleS0, out)) {
+                continue;
             }
             const Pixel newPx = fromFloat<Pixel>(out);
             if (!pixelEqual(newPx, after->px[idx])) {
@@ -356,6 +372,207 @@ float coverageAt(const CoverageMap& cov, int x, int y) {
     const int ly = y - row * kTileSize;
     return it->second[static_cast<std::size_t>(ly) * kTileSize + static_cast<std::size_t>(lx)];
 }
+
+// Incremental live stroke for the per-pixel ops (see LiveStroke in Brush.hpp). Holds the
+// accumulated coverage and a pre-stroke snapshot of every touched tile; extend() stamps only the
+// new dabs and re-composites only the tiles a new dab hit, each from its snapshot with the full
+// coverage — so the result is byte-identical to the batched flushStroke, just linear over the
+// stroke. Stabilization is NOT supported here (callers use the batched path when
+// BrushSettings::stabilize > 0).
+template <class Pixel>
+class LiveStrokeImpl final : public LiveStroke {
+public:
+    LiveStrokeImpl(LayerId layer, TileStoreT<Pixel>& store, const BrushSettings& brush, Rgbaf color,
+                   PaintOp op, std::string name, int cloneOffX, int cloneOffY,
+                   const Selection* selection)
+        : layer_(layer),
+          store_(store),
+          color_(color),
+          blendMode_(brush.blendMode),
+          op_(op),
+          name_(std::move(name)),
+          cloneOffX_(cloneOffX),
+          cloneOffY_(cloneOffY),
+          selection_(selection),
+          hardness_(clamp01(brush.hardness)),
+          flow_(clamp01(brush.flow)),
+          opacity_(clamp01(brush.opacity)),
+          pressureSize_(brush.pressureControlsSize) {
+        const float d = std::isfinite(brush.diameter) ? brush.diameter : 20.0f;
+        diameter_ = std::clamp(d, 0.1f, kMaxBrushDiameter);
+        step_ = std::max(1.0f, std::max(0.01f, brush.spacing) * diameter_);
+    }
+
+    Rect extend(std::span<const StrokePoint> points) override {
+        std::set<CoverageKey> touched;
+        stampNew(points, touched);
+        return flushTiles(touched);
+    }
+
+    std::unique_ptr<PaintCommand> finish() override {
+        std::vector<typename PaintCommand::DeltaT<Pixel>> deltas;
+        Rect dirty{};
+        for (const CoverageKey& key : changed_) {
+            const TileCoord coord{key.first, key.second};
+            deltas.push_back(
+                typename PaintCommand::DeltaT<Pixel>{coord, s0_[key], store_.sharedTile(coord)});
+            dirty = dirty.united(tileBounds(coord));
+        }
+        if (deltas.empty()) return nullptr;
+        return std::make_unique<PaintCommand>(layer_, dirty, std::move(deltas), name_);
+    }
+
+    void cancel() override {
+        for (auto& [key, snap] : s0_) store_.setTile(TileCoord{key.first, key.second}, snap);
+        s0_.clear();
+        cov_.clear();
+        changed_.clear();
+    }
+
+private:
+    // Capture the tile's pre-stroke content the first time the stroke touches it (the store still
+    // holds S0 then, since flushTiles only writes tiles AFTER snapshotting). The shared_ptr is COW:
+    // a later setTile() replaces the pointer, so the snapshot keeps pointing at the original
+    // pixels.
+    void ensureS0(const CoverageKey& key) {
+        if (s0_.find(key) == s0_.end()) {
+            s0_.emplace(key, store_.sharedTile(TileCoord{key.first, key.second}));
+        }
+    }
+
+    // Place the dabs for the path samples not yet consumed, mirroring buildCoverage's stepping
+    // (carrying prevPos_/distSinceLast_ across calls) so the same dab sequence — hence the same
+    // accumulated coverage — is produced as the batched path.
+    void stampNew(std::span<const StrokePoint> points, std::set<CoverageKey>& touched) {
+        const auto dab = [&](Vec2 p, float pressure) {
+            if (dabCount_ >= kMaxDabsPerStroke) return;
+            ++dabCount_;
+            const float diam = pressureSize_ ? diameter_ * clamp01(pressure) : diameter_;
+            stampDab(cov_, p, std::max(0.5f, diam * 0.5f), hardness_, flow_, &touched);
+        };
+        std::size_t i = consumed_;
+        if (!started_ && i < points.size()) {
+            dab(points[0].pos, points[0].pressure);
+            prevPos_ = points[0].pos;
+            prevPressure_ = points[0].pressure;
+            started_ = true;
+            i = 1;
+        }
+        for (; i < points.size(); ++i) {
+            const Vec2 bpos = points[i].pos;
+            const float bpr = points[i].pressure;
+            const float dx = bpos.x - prevPos_.x;
+            const float dy = bpos.y - prevPos_.y;
+            const float segLen = std::sqrt(dx * dx + dy * dy);
+            if (segLen > 1e-6f) {
+                float consumed = 0.0f;
+                while (distSinceLast_ + (segLen - consumed) >= step_ &&
+                       dabCount_ < kMaxDabsPerStroke) {
+                    const float advance = step_ - distSinceLast_;
+                    consumed += advance;
+                    const float t = consumed / segLen;
+                    dab(Vec2{prevPos_.x + dx * t, prevPos_.y + dy * t},
+                        prevPressure_ + (bpr - prevPressure_) * t);
+                    distSinceLast_ = 0.0f;
+                }
+                distSinceLast_ += (segLen - consumed);
+            }
+            prevPos_ = bpos;
+            prevPressure_ = bpr;
+        }
+        consumed_ = points.size();
+    }
+
+    // Re-composite each tile whose coverage changed this extend, from its pre-stroke snapshot with
+    // the FULL accumulated coverage (same as flushStroke does per tile). Returns the dirtied
+    // region.
+    Rect flushTiles(const std::set<CoverageKey>& touched) {
+        Rect dirty{};
+        const float colorA = clamp01(color_.a);
+        const bool gate = selection_ != nullptr && selection_->active();
+        // Clone reads its source from S0: the snapshot if the tile was touched, else the live store
+        // (an untouched tile still holds its pre-stroke pixels).
+        const auto sampleS0 = [this](int x, int y) -> Rgbaf {
+            const int col = floorDiv(x, kTileSize);
+            const int row = floorDiv(y, kTileSize);
+            const auto it = s0_.find(CoverageKey{col, row});
+            if (it != s0_.end()) {
+                if (!it->second) return Rgbaf{};
+                const int lx = x - col * kTileSize;
+                const int ly = y - row * kTileSize;
+                return toFloat(it->second->px[static_cast<std::size_t>(ly) * kTileSize +
+                                              static_cast<std::size_t>(lx)]);
+            }
+            return toFloat(store_.pixel(x, y));
+        };
+        for (const CoverageKey& key : touched) {
+            ensureS0(key);  // snapshot S0 before we overwrite the tile
+            const TileCoord coord{key.first, key.second};
+            const int baseX = coord.col * kTileSize;
+            const int baseY = coord.row * kTileSize;
+            const std::vector<float>& buf = cov_.at(key);
+            auto out = std::make_shared<TileDataT<Pixel>>();
+            if (s0_[key])
+                *out = *s0_[key];  // start from the pre-stroke snapshot (else transparent)
+            bool changed = false;
+            for (std::size_t idx = 0; idx < static_cast<std::size_t>(kTilePixels); ++idx) {
+                float a = std::min(buf[idx], opacity_);
+                if (a <= 0.0f) continue;
+                const int lx = static_cast<int>(idx % static_cast<std::size_t>(kTileSize));
+                const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
+                const int px = baseX + lx;
+                const int py = baseY + ly;
+                if (gate) {
+                    a *= selection_->coverage(px, py);
+                    if (a <= 0.0f) continue;
+                }
+                const Rgbaf dst = toFloat(out->px[idx]);
+                Rgbaf o;
+                if (!brushOpPixel(op_, dst, a, color_, colorA, blendMode_, px, py, cloneOffX_,
+                                  cloneOffY_, sampleS0, o)) {
+                    continue;
+                }
+                const Pixel np = fromFloat<Pixel>(o);
+                if (!pixelEqual(np, out->px[idx])) {
+                    out->px[idx] = np;
+                    changed = true;
+                }
+            }
+            store_.setTile(coord, out);  // apply the freshly composited tile to the layer (live)
+            if (changed) {
+                changed_.insert(key);
+                dirty = dirty.united(tileBounds(coord));
+            }
+        }
+        return dirty;
+    }
+
+    LayerId layer_;
+    TileStoreT<Pixel>& store_;
+    Rgbaf color_;
+    BlendMode blendMode_;
+    PaintOp op_;
+    std::string name_;
+    int cloneOffX_;
+    int cloneOffY_;
+    const Selection* selection_;
+    float hardness_;
+    float flow_;
+    float opacity_;
+    bool pressureSize_;
+    float diameter_ = 20.0f;
+    float step_ = 1.0f;
+
+    CoverageMap cov_;                                              // accumulated coverage
+    std::map<CoverageKey, std::shared_ptr<TileDataT<Pixel>>> s0_;  // pre-stroke snapshot per tile
+    std::set<CoverageKey> changed_;  // tiles whose pixels actually changed (the committed deltas)
+    std::size_t consumed_ = 0;       // input points already stamped
+    bool started_ = false;
+    Vec2 prevPos_{};
+    float prevPressure_ = 1.0f;
+    float distSinceLast_ = 0.0f;
+    int64_t dabCount_ = 0;
+};
 
 }  // namespace
 
@@ -778,6 +995,64 @@ std::unique_ptr<PaintCommand> cloneStroke(Document& doc, LayerId layerId,
                                           int offsetY, const Selection* selection) {
     return buildStroke(doc, layerId, settings, Rgbaf{}, points, PaintOp::Clone, "Clone Stamp",
                        offsetX, offsetY, selection);
+}
+
+LiveStroke::~LiveStroke() = default;
+
+namespace {
+// Build a depth-matched LiveStrokeImpl for the layer (nullptr if not a pixel layer), mirroring how
+// buildStroke dispatches flushStroke over the store's bit depth.
+std::unique_ptr<LiveStroke> beginLive(Document& doc, LayerId layerId, const BrushSettings& settings,
+                                      Rgbaf color, PaintOp op, std::string name, int offX, int offY,
+                                      const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    auto* pl = static_cast<PixelLayer*>(layer);
+    switch (pl->depth()) {
+        case BitDepth::U16:
+            return std::make_unique<LiveStrokeImpl<Rgba16>>(layerId, pl->tiles16(), settings, color,
+                                                            op, std::move(name), offX, offY,
+                                                            selection);
+        case BitDepth::F32:
+            return std::make_unique<LiveStrokeImpl<Rgbaf>>(
+                layerId, pl->tilesF(), settings, color, op, std::move(name), offX, offY, selection);
+        case BitDepth::U8:
+        default:
+            return std::make_unique<LiveStrokeImpl<Rgba8>>(
+                layerId, pl->tiles(), settings, color, op, std::move(name), offX, offY, selection);
+    }
+}
+}  // namespace
+
+std::unique_ptr<LiveStroke> beginPaintStroke(Document& doc, LayerId layerId,
+                                             const BrushSettings& settings, Rgbaf color,
+                                             const Selection* selection) {
+    return beginLive(doc, layerId, settings, color, PaintOp::Paint, "Brush", 0, 0, selection);
+}
+
+std::unique_ptr<LiveStroke> beginEraseStroke(Document& doc, LayerId layerId,
+                                             const BrushSettings& settings,
+                                             const Selection* selection) {
+    return beginLive(doc, layerId, settings, Rgbaf{}, PaintOp::Erase, "Eraser", 0, 0, selection);
+}
+
+std::unique_ptr<LiveStroke> beginDodgeStroke(Document& doc, LayerId layerId,
+                                             const BrushSettings& settings,
+                                             const Selection* selection) {
+    return beginLive(doc, layerId, settings, Rgbaf{}, PaintOp::Dodge, "Dodge", 0, 0, selection);
+}
+
+std::unique_ptr<LiveStroke> beginBurnStroke(Document& doc, LayerId layerId,
+                                            const BrushSettings& settings,
+                                            const Selection* selection) {
+    return beginLive(doc, layerId, settings, Rgbaf{}, PaintOp::Burn, "Burn", 0, 0, selection);
+}
+
+std::unique_ptr<LiveStroke> beginCloneStroke(Document& doc, LayerId layerId,
+                                             const BrushSettings& settings, int offsetX,
+                                             int offsetY, const Selection* selection) {
+    return beginLive(doc, layerId, settings, Rgbaf{}, PaintOp::Clone, "Clone Stamp", offsetX,
+                     offsetY, selection);
 }
 
 }  // namespace pe
