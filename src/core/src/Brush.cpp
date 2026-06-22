@@ -538,8 +538,19 @@ private:
                     changed = true;
                 }
             }
-            store_.setTile(coord, out);  // apply the freshly composited tile to the layer (live)
             if (changed) {
+                // Mirror the batched flushStroke: write the store ONLY when a pixel actually moved.
+                // Writing an unchanged tile would materialize a present (often all-transparent)
+                // tile where the batched path leaves it ABSENT — e.g. an Erase/Dodge/Burn/Clone dab
+                // whose footprint clips a tile that is absent at S0 and stays transparent. That
+                // spurious tile is not in changed_, so finish() never captures it and undo cannot
+                // remove it, and it needlessly breaks the snapshot's COW sharing. Gating on
+                // `changed` is safe: coverage is monotonic non-decreasing and every flush
+                // recomposites the full tile from S0, so a tile only ever transitions
+                // absent->changed, never changed->unchanged; a tile written in an earlier extend
+                // always recomputes changed==true on re-flush.
+                store_.setTile(coord,
+                               out);  // apply the freshly composited tile to the layer (live)
                 changed_.insert(key);
                 dirty = dirty.united(tileBounds(coord));
             }

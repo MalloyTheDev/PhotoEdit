@@ -99,6 +99,20 @@ std::unique_ptr<LiveStroke> PaintToolController::createLive(Document& doc) {
     }
 }
 
+bool PaintToolController::liveTargetValid(Document& doc) const {
+    // The live path is only ever used for pixel-layer ops (createLive returns nullptr for MaskPaint
+    // and the region-bake brushes), so a still-paintable target is a present Pixel layer.
+    const Layer* l = doc.findLayer(layer_);
+    return l != nullptr && l->kind() == LayerKind::Pixel;
+}
+
+void PaintToolController::resetStroke() noexcept {
+    stroking_ = false;
+    points_.clear();
+    layer_ = kNoLayer;
+    selection_ = nullptr;
+}
+
 void PaintToolController::clearPreview(Document& doc) {
     if (preview_) {
         preview_->undo(doc);  // restore the touched tiles to their pre-stroke state
@@ -149,6 +163,15 @@ bool PaintToolController::begin(Document& doc, StrokePoint p, const Selection* s
 
 void PaintToolController::extend(Document& doc, StrokePoint p) {
     if (!stroking_) return;
+    if (live_ && !liveTargetValid(doc)) {
+        // The target layer was removed/replaced between samples (a contract violation). The live
+        // stroke borrows that layer's tile store by reference, so touching it now would be a
+        // use-after-free; drop the stroke instead (the LiveStroke destructor frees only its own
+        // buffers). This matches the batched path, which re-resolves by id and degrades to a no-op.
+        live_.reset();
+        resetStroke();
+        return;
+    }
     points_.push_back(p);
     if (live_) {
         // Incremental: stamp only the new dabs and recomposite just the tiles they touched.
@@ -169,8 +192,9 @@ bool PaintToolController::end(Document& doc) {
     if (live_) {
         // The layer already holds the final pixels; finish() yields the byte-exact command (its
         // before == the pre-stroke snapshots). Pushing it re-applies a no-op and notifies
-        // observers.
-        cmd = live_->finish();
+        // observers. If the target layer vanished mid-stroke, drop the stroke without dereferencing
+        // its now-dangling store (commits nothing).
+        if (liveTargetValid(doc)) cmd = live_->finish();
         live_.reset();
     } else if (preview_) {
         // Reuse the preview as the committed command: revert it (tiles back to S0) and hand it to
@@ -178,9 +202,7 @@ bool PaintToolController::end(Document& doc) {
         preview_->undo(doc);
         cmd = std::move(preview_);
     }
-    points_.clear();
-    layer_ = kNoLayer;
-    selection_ = nullptr;
+    resetStroke();
 
     if (cmd == nullptr) return false;  // stroke deposited nothing
     doc.history().push(std::move(cmd));
@@ -190,15 +212,15 @@ bool PaintToolController::end(Document& doc) {
 void PaintToolController::cancel(Document& doc) {
     if (!stroking_) return;
     if (live_) {
-        live_->cancel();  // restore every touched tile to its pre-stroke snapshot
+        // Restore every touched tile to its pre-stroke snapshot — but only if the target layer is
+        // still here; if it vanished mid-stroke its store reference dangles, so just drop the
+        // stroke.
+        if (liveTargetValid(doc)) live_->cancel();
         live_.reset();
     } else {
         clearPreview(doc);
     }
-    stroking_ = false;
-    points_.clear();
-    layer_ = kNoLayer;
-    selection_ = nullptr;
+    resetStroke();
 }
 
 }  // namespace pe

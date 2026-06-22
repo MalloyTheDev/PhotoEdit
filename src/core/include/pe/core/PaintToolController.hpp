@@ -101,6 +101,14 @@ private:
     // Clone source->dest offset locked to the stroke's first point (validated/clamped). False if no
     // source is set or the first point is non-finite. Shared by buildStroke and createLive.
     [[nodiscard]] bool cloneOffset(int& offX, int& offY) const;
+    // Whether the live stroke's target layer (layer_) still resolves to a paintable pixel layer.
+    // A LiveStroke borrows the layer's tile store by reference for the whole stroke; if a
+    // concurrent command removed or replaced that layer between samples (a contract violation, but
+    // one the batched rebuild path tolerated by re-resolving by id), dereferencing the store would
+    // be a use-after-free. extend/end/cancel consult this and drop the live stroke instead.
+    [[nodiscard]] bool liveTargetValid(Document& doc) const;
+    // Clear all per-stroke state (shared by end/cancel/abandon).
+    void resetStroke() noexcept;
 
     BrushSettings brush_{};
     Rgbaf color_{0.0f, 0.0f, 0.0f, 1.0f};  // opaque black foreground default
