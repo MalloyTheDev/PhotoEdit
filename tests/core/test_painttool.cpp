@@ -86,6 +86,36 @@ PE_TEST(painttool_multisample_stroke_is_single_undo_step) {
     PE_CHECK_EQ(alphaAt(*doc, base, 56, 32), 0);
 }
 
+PE_TEST(painttool_live_stroke_dropped_when_target_layer_removed_midstroke) {
+    // Contract violation: a layer is removed mid-stroke. The incremental live stroke borrows that
+    // layer's tile store by reference, so the controller must drop the stroke rather than touch the
+    // freed store (run under ASan to actually catch a dangling-store dereference). A second layer
+    // keeps the document valid after the removal.
+    auto doc = Document::createBlank(Size{64, 64});
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<PixelLayer>("Other"));
+    const LayerId target = doc->activeLayer();  // the base layer the stroke paints
+
+    PaintToolController tool;
+    tool.setBrush(hardBrush(12));
+    tool.setColor(kRedF);
+
+    PE_CHECK(tool.begin(*doc, pt(8, 32)));
+    tool.extend(*doc, pt(24, 32));  // a live dab lands on the target's store
+    PE_CHECK(tool.isStroking());
+
+    {
+        auto removed =
+            doc->cmdRemoveTopLevel(target);  // drop the unique_ptr -> layer + store freed
+        PE_CHECK(removed != nullptr);
+    }
+    PE_CHECK(doc->findLayer(target) == nullptr);
+
+    tool.extend(*doc, pt(40, 32));  // guard fires: drop without dereferencing the freed store
+    PE_CHECK(!tool.isStroking());   // stroke abandoned
+    PE_CHECK(!tool.end(*doc));      // nothing committed
+    PE_CHECK_EQ(doc->history().undoDepth(), 0u);
+}
+
 PE_TEST(painttool_preview_visible_before_commit) {
     auto doc = Document::createBlank(Size{64, 64});
     const LayerId base = doc->activeLayer();

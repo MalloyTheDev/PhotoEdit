@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <random>
 #include <span>
 #include <vector>
 
@@ -416,6 +417,105 @@ PE_TEST(livestroke_dodge_f32_matches_batched_native) {
             return beginDodgeStroke(d, l, s, sel);
         },
         sampleF32, b, /*chunk=*/2);
+}
+
+PE_TEST(livestroke_f32_repaint_fuzz_matches_batched) {
+    // F32 + paint color == backdrop: the unclamped float recombination is not bit-monotone, so an
+    // intermediate flush can nudge a pixel ~1 ULP off S0 while the final full-coverage flush
+    // recomputes exactly S0. The store-write gate must restore S0 in that case, else the live store
+    // strands the intermediate value and diverges from the batched flushStroke (which composites
+    // once at the final coverage). The strand is a knife-edge float coincidence, so sweep many
+    // seeded color==backdrop strokes fed ONE point per extend (maximizing intermediate flushes);
+    // each must leave the native F32 store byte-identical to the batched stroke. (compositeImage
+    // would clamp to U8 and hide the ~1e-8 strand.)
+    std::mt19937 rng(0x11ABE5u);
+    std::uniform_real_distribution<float> pos(4.0f, 60.0f);
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    for (int s = 0; s < 400; ++s) {
+        const Rgbaf bg{0.02f + 0.96f * unit(rng), 0.02f + 0.96f * unit(rng),
+                       0.02f + 0.96f * unit(rng), 1.0f};
+        BrushSettings b;
+        b.diameter = 6.0f + 8.0f * unit(rng);  // small brush + low flow => near-zero coverage edges
+        b.hardness = 0.5f + 0.5f * unit(rng);
+        b.opacity = 0.4f + 0.4f * unit(rng);
+        b.flow = 0.2f + 0.4f * unit(rng);
+        b.spacing = 0.15f + 0.2f * unit(rng);
+        std::vector<StrokePoint> pts;
+        const int n = 4 + (s % 6);
+        for (int i = 0; i < n; ++i) pts.push_back({{pos(rng), pos(rng)}, 1.0f});
+
+        const auto build = [&](LayerId& l) {
+            auto d = Document::createBlank(Size{kW, kH}, ColorMode::RGB, BitDepth::F32);
+            l = d->activeLayer();
+            static_cast<PixelLayer*>(d->findLayer(l))->tilesF().fillRect(Rect{0, 0, kW, kH}, bg);
+            return d;
+        };
+        LayerId la = kNoLayer;
+        auto da = build(la);
+        auto cmdA = paintStroke(*da, la, b, bg, pts, nullptr);  // color == backdrop
+        if (cmdA != nullptr) cmdA->execute(*da);
+        const std::vector<float> ref = sampleF32(*da, la);
+
+        LayerId lb = kNoLayer;
+        auto db = build(lb);
+        auto stroke = beginPaintStroke(*db, lb, b, bg, nullptr);
+        PE_CHECK(stroke != nullptr);
+        std::vector<StrokePoint> acc;
+        for (const StrokePoint& p : pts) {  // one point per extend => maximal intermediate flushes
+            acc.push_back(p);
+            (void)stroke->extend(acc);
+        }
+        (void)stroke->finish();
+        PE_CHECK(sampleF32(*db, lb) == ref);  // live store byte-identical to batched (no strand)
+    }
+}
+
+PE_TEST(livestroke_no_spurious_tiles_f32_dodge) {
+    // Depth analog of livestroke_no_spurious_tiles_on_absent_tile_erase: a Dodge dab clipping an
+    // absent F32 tile (transparent dst => brushOpPixel returns false => unchanged) must not
+    // materialize it, and undo must restore the pre-stroke tile set.
+    const BrushSettings b = brush(60);
+    const auto layout = [](Document& d, LayerId& l) {
+        l = d.activeLayer();
+        static_cast<PixelLayer*>(d.findLayer(l))
+            ->tilesF()
+            .fillRect(Rect{0, 0, 200, 64}, Rgbaf{0.3f, 0.5f, 0.7f, 1.0f});
+    };
+    std::vector<StrokePoint> pts;
+    for (int i = 0; i <= 20; ++i) {
+        pts.push_back({{210.0f + static_cast<float>(i) * 4.5f, 32.0f}, 1.0f});
+    }
+    const TileCoord col1{1, 0};
+
+    auto da = Document::createBlank(Size{400, 64}, ColorMode::RGB, BitDepth::F32);
+    LayerId la = kNoLayer;
+    layout(*da, la);
+    auto* pla = static_cast<PixelLayer*>(da->findLayer(la));
+    const std::size_t preTiles = pla->tilesF().tileCount();
+    auto cmdA = dodgeStroke(*da, la, b, pts, nullptr);
+    if (cmdA != nullptr) cmdA->execute(*da);
+
+    auto db = Document::createBlank(Size{400, 64}, ColorMode::RGB, BitDepth::F32);
+    LayerId lb = kNoLayer;
+    layout(*db, lb);
+    auto* plb = static_cast<PixelLayer*>(db->findLayer(lb));
+    auto stroke = beginDodgeStroke(*db, lb, b, nullptr);
+    PE_CHECK(stroke != nullptr);
+    std::vector<StrokePoint> acc;
+    for (const StrokePoint& p : pts) {
+        acc.push_back(p);
+        (void)stroke->extend(acc);
+    }
+    auto cmdB = stroke->finish();
+
+    PE_CHECK(plb->tilesF().tileCount() == pla->tilesF().tileCount());
+    PE_CHECK(!plb->tilesF().hasTileAt(col1));
+    if (cmdB != nullptr) {
+        db->history().push(std::move(cmdB));
+        db->history().undo();
+    }
+    PE_CHECK(plb->tilesF().tileCount() == preTiles);
+    PE_CHECK(!plb->tilesF().hasTileAt(col1));
 }
 
 PE_TEST(livestroke_paint_u16_matches_batched_native) {

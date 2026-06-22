@@ -539,20 +539,26 @@ private:
                 }
             }
             if (changed) {
-                // Mirror the batched flushStroke: write the store ONLY when a pixel actually moved.
-                // Writing an unchanged tile would materialize a present (often all-transparent)
-                // tile where the batched path leaves it ABSENT — e.g. an Erase/Dodge/Burn/Clone dab
-                // whose footprint clips a tile that is absent at S0 and stays transparent. That
-                // spurious tile is not in changed_, so finish() never captures it and undo cannot
-                // remove it, and it needlessly breaks the snapshot's COW sharing. Gating on
-                // `changed` is safe: coverage is monotonic non-decreasing and every flush
-                // recomposites the full tile from S0, so a tile only ever transitions
-                // absent->changed, never changed->unchanged; a tile written in an earlier extend
-                // always recomputes changed==true on re-flush.
-                store_.setTile(coord,
-                               out);  // apply the freshly composited tile to the layer (live)
+                store_.setTile(coord, out);  // off-S0: commit the latest full-coverage recomposite
                 changed_.insert(key);
                 dirty = dirty.united(tileBounds(coord));
+            } else {
+                // The recomposite at the current coverage equals S0, so the store must hold S0
+                // here, exactly as the batched flushStroke does (it composites once at the final
+                // coverage and writes nothing for a tile that ends == S0). Restore the S0 snapshot
+                // rather than leaving the store as-is, because:
+                //   (a) a tile ABSENT at S0 must not be materialized — setTile(null) erases it (an
+                //       Erase/Dodge/Burn/Clone dab clipping an absent, still-transparent tile);
+                //   (b) an EARLIER flush of this same tile may have written an off-S0 value: the
+                //       unclamped float recombination is not bit-monotone on an F32 store, so a
+                //       pixel can land ~1 ULP off S0 at an intermediate coverage and recompute
+                //       exactly S0 at a higher one. Restoring reverts that strand so the live store
+                //       stays byte-identical to the batched result. (U8/U16 quantization absorbs
+                //       the jitter; the F32 identity store exposes it.)
+                // If this reverts a tile an earlier flush had marked changed, re-dirty it so the
+                // preview repaints, and drop it from the committed delta set.
+                store_.setTile(coord, s0_[key]);  // s0_[key] may be null => erases the tile
+                if (changed_.erase(key) != 0) dirty = dirty.united(tileBounds(coord));
             }
         }
         return dirty;

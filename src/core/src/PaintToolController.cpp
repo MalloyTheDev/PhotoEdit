@@ -166,9 +166,12 @@ void PaintToolController::extend(Document& doc, StrokePoint p) {
     if (live_ && !liveTargetValid(doc)) {
         // The target layer was removed/replaced between samples (a contract violation). The live
         // stroke borrows that layer's tile store by reference, so touching it now would be a
-        // use-after-free; drop the stroke instead (the LiveStroke destructor frees only its own
-        // buffers). This matches the batched path, which re-resolves by id and degrades to a no-op.
+        // use-after-free; abandon the stroke instead (the LiveStroke destructor frees only its own
+        // buffers, never the borrowed store). The batched path degrades to a per-sample no-op here
+        // (its command re-resolves by id) but keeps stroking; the live path cannot, so it drops the
+        // whole stroke.
         live_.reset();
+        strokeDirty_ = Rect{};  // no live preview remains; don't leave a stale dirty region
         resetStroke();
         return;
     }
