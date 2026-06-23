@@ -209,4 +209,51 @@ private:
     Document& doc, LayerId layerId, const BrushSettings& settings,
     std::span<const StrokePoint> points, float targetGray, const Selection* selection = nullptr);
 
+// An interactive, INCREMENTAL brush stroke for the per-pixel ops (Brush / Eraser / Dodge / Burn /
+// Clone). The batched *Stroke() functions above re-rasterize the WHOLE stroke from every sample,
+// which is O(stroke length) per sample and so O(N^2) over a long drag. A LiveStroke instead keeps
+// the accumulated coverage and a pre-stroke snapshot of each touched tile, so extend() stamps only
+// the new dabs and re-composites only the tiles whose coverage changed — linear over the stroke.
+//
+// The result is byte-identical to the batched path (coverage accumulation is order-independent and
+// each tile is always composited from its pre-stroke snapshot with the full coverage; Clone samples
+// its source from those snapshots, so there is no feedback). extend() applies the new dabs straight
+// to the layer and returns the newly-dirtied document region; finish() returns the same one-step,
+// byte-exact PaintCommand the batched call would (the layer already holds the final pixels, so
+// pushing it to History re-applies a no-op and undo restores the snapshots); cancel() reverts.
+//
+// Created at stroke start; the factory returns nullptr if `layerId` is not a pixel layer. The
+// caller must finish() or cancel() before destroying the document. Stabilization is NOT handled
+// here — use the batched paintStroke/... path when BrushSettings::stabilize > 0.
+class LiveStroke {
+public:
+    virtual ~LiveStroke();
+    // Add the stroke's accumulated samples (the caller passes the full path each time; the
+    // LiveStroke stamps only the dabs beyond what it has already placed). Returns the region
+    // dirtied this call.
+    [[nodiscard]] virtual Rect extend(std::span<const StrokePoint> points) = 0;
+    // Commit: the byte-exact PaintCommand for the whole stroke (nullptr if nothing was painted).
+    [[nodiscard]] virtual std::unique_ptr<PaintCommand> finish() = 0;
+    // Abort: restore every touched tile to its pre-stroke snapshot. Commits nothing.
+    virtual void cancel() = 0;
+};
+
+[[nodiscard]] std::unique_ptr<LiveStroke> beginPaintStroke(Document& doc, LayerId layerId,
+                                                           const BrushSettings& settings,
+                                                           Rgbaf color,
+                                                           const Selection* selection = nullptr);
+[[nodiscard]] std::unique_ptr<LiveStroke> beginEraseStroke(Document& doc, LayerId layerId,
+                                                           const BrushSettings& settings,
+                                                           const Selection* selection = nullptr);
+[[nodiscard]] std::unique_ptr<LiveStroke> beginDodgeStroke(Document& doc, LayerId layerId,
+                                                           const BrushSettings& settings,
+                                                           const Selection* selection = nullptr);
+[[nodiscard]] std::unique_ptr<LiveStroke> beginBurnStroke(Document& doc, LayerId layerId,
+                                                          const BrushSettings& settings,
+                                                          const Selection* selection = nullptr);
+[[nodiscard]] std::unique_ptr<LiveStroke> beginCloneStroke(Document& doc, LayerId layerId,
+                                                           const BrushSettings& settings,
+                                                           int offsetX, int offsetY,
+                                                           const Selection* selection = nullptr);
+
 }  // namespace pe

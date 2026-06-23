@@ -38,25 +38,9 @@ std::unique_ptr<Command> PaintToolController::buildStroke(Document& doc) const {
         case Mode::Heal:
             return healStroke(doc, layer_, brush_, points_, selection_);
         case Mode::Clone: {
-            if (!cloneSourceValid_ || points_.empty()) return nullptr;  // no source anchor set
-            // Lock the source->dest offset to the stroke's first point (sampled every rebuild from
-            // points_[0], so it is stable across extend()). Validate + clamp the (untrusted,
-            // possibly tablet-garbage) first point before the float->int conversion: a non-finite
-            // or huge value would make lround out-of-range (float->int UB) and overflow the offset
-            // subtraction.
-            const double fx = points_[0].pos.x;
-            const double fy = points_[0].pos.y;
-            if (!std::isfinite(fx) || !std::isfinite(fy)) return nullptr;
-            constexpr double kBound = static_cast<double>(kMaxCanvasDimension);
-            const int px = static_cast<int>(std::lround(std::clamp(fx, -kBound, kBound)));
-            const int py = static_cast<int>(std::lround(std::clamp(fy, -kBound, kBound)));
-            // Clamp the anchor to the canvas range too (setCloneSource doesn't), so the offset
-            // subtraction can't signed-overflow even via a direct, non-UI caller: both operands are
-            // now within +/-kMaxCanvasDimension, so the difference fits comfortably in int.
-            const int csx = std::clamp(cloneSource_.x, -kMaxCanvasDimension, kMaxCanvasDimension);
-            const int csy = std::clamp(cloneSource_.y, -kMaxCanvasDimension, kMaxCanvasDimension);
-            const int offX = px - csx;
-            const int offY = py - csy;
+            int offX = 0;
+            int offY = 0;
+            if (!cloneOffset(offX, offY)) return nullptr;  // no source anchor set / bad first point
             return cloneStroke(doc, layer_, brush_, points_, offX, offY, selection_);
         }
         case Mode::MaskPaint:
@@ -68,6 +52,65 @@ std::unique_ptr<Command> PaintToolController::buildStroke(Document& doc) const {
         default:
             return paintStroke(doc, layer_, brush_, color_, points_, selection_);
     }
+}
+
+bool PaintToolController::cloneOffset(int& offX, int& offY) const {
+    if (!cloneSourceValid_ || points_.empty()) return false;  // no source anchor set
+    // Lock the source->dest offset to the stroke's first point. Validate + clamp the (untrusted,
+    // possibly tablet-garbage) first point before the float->int conversion: a non-finite or huge
+    // value would make lround out-of-range (float->int UB) and overflow the offset subtraction.
+    const double fx = points_[0].pos.x;
+    const double fy = points_[0].pos.y;
+    if (!std::isfinite(fx) || !std::isfinite(fy)) return false;
+    constexpr double kBound = static_cast<double>(kMaxCanvasDimension);
+    const int px = static_cast<int>(std::lround(std::clamp(fx, -kBound, kBound)));
+    const int py = static_cast<int>(std::lround(std::clamp(fy, -kBound, kBound)));
+    // Clamp the anchor to the canvas range too (setCloneSource doesn't), so the offset subtraction
+    // can't signed-overflow even via a direct caller: both operands are within
+    // +/-kMaxCanvasDimension.
+    const int csx = std::clamp(cloneSource_.x, -kMaxCanvasDimension, kMaxCanvasDimension);
+    const int csy = std::clamp(cloneSource_.y, -kMaxCanvasDimension, kMaxCanvasDimension);
+    offX = px - csx;
+    offY = py - csy;
+    return true;
+}
+
+std::unique_ptr<LiveStroke> PaintToolController::createLive(Document& doc) {
+    // Stabilization smooths the whole path, which the incremental stamper doesn't model — fall back
+    // to the batched rebuild when it is on.
+    if (brush_.stabilize > 0.0f) return nullptr;
+    switch (mode_) {
+        case Mode::Brush:
+            return beginPaintStroke(doc, layer_, brush_, color_, selection_);
+        case Mode::Eraser:
+            return beginEraseStroke(doc, layer_, brush_, selection_);
+        case Mode::Dodge:
+            return beginDodgeStroke(doc, layer_, brush_, selection_);
+        case Mode::Burn:
+            return beginBurnStroke(doc, layer_, brush_, selection_);
+        case Mode::Clone: {
+            int offX = 0;
+            int offY = 0;
+            if (!cloneOffset(offX, offY)) return nullptr;  // no source -> nothing to clone
+            return beginCloneStroke(doc, layer_, brush_, offX, offY, selection_);
+        }
+        default:
+            return nullptr;  // Blur/Sharpen/Heal (region bake) and MaskPaint use the batched path
+    }
+}
+
+bool PaintToolController::liveTargetValid(Document& doc) const {
+    // The live path is only ever used for pixel-layer ops (createLive returns nullptr for MaskPaint
+    // and the region-bake brushes), so a still-paintable target is a present Pixel layer.
+    const Layer* l = doc.findLayer(layer_);
+    return l != nullptr && l->kind() == LayerKind::Pixel;
+}
+
+void PaintToolController::resetStroke() noexcept {
+    stroking_ = false;
+    points_.clear();
+    layer_ = kNoLayer;
+    selection_ = nullptr;
 }
 
 void PaintToolController::clearPreview(Document& doc) {
@@ -107,33 +150,62 @@ bool PaintToolController::begin(Document& doc, StrokePoint p, const Selection* s
     points_.clear();
     points_.push_back(p);
     strokeDirty_ = Rect{};  // fresh stroke: start the dirty-bounds accumulator empty
-    rebuildPreview(doc);
+    // The per-pixel ops use the incremental LiveStroke (linear over the stroke); everything else
+    // (region-bake brushes, mask paint, stabilized strokes) keeps the batched rebuild path.
+    live_ = createLive(doc);
+    if (live_) {
+        strokeDirty_ = strokeDirty_.united(live_->extend(points_));
+    } else {
+        rebuildPreview(doc);
+    }
     return true;
 }
 
 void PaintToolController::extend(Document& doc, StrokePoint p) {
     if (!stroking_) return;
-    // Revert the prior preview so the rebuild sees the original tiles again, then
-    // recompute the whole stroke (the brush engine resamples dabs along the path).
-    clearPreview(doc);
+    if (live_ && !liveTargetValid(doc)) {
+        // The target layer was removed/replaced between samples (a contract violation). The live
+        // stroke borrows that layer's tile store by reference, so touching it now would be a
+        // use-after-free; abandon the stroke instead (the LiveStroke destructor frees only its own
+        // buffers, never the borrowed store). The batched path degrades to a per-sample no-op here
+        // (its command re-resolves by id) but keeps stroking; the live path cannot, so it drops the
+        // whole stroke.
+        live_.reset();
+        strokeDirty_ = Rect{};  // no live preview remains; don't leave a stale dirty region
+        resetStroke();
+        return;
+    }
     points_.push_back(p);
-    rebuildPreview(doc);
+    if (live_) {
+        // Incremental: stamp only the new dabs and recomposite just the tiles they touched.
+        strokeDirty_ = strokeDirty_.united(live_->extend(points_));
+    } else {
+        // Batched: revert the prior preview so the rebuild sees the original tiles, then recompute
+        // the whole stroke (the region-bake/mask engines resample from scratch).
+        clearPreview(doc);
+        rebuildPreview(doc);
+    }
 }
 
 bool PaintToolController::end(Document& doc) {
     if (!stroking_) return false;
     stroking_ = false;
 
-    // Reuse the preview as the committed command: revert it (tiles back to S0) and
-    // hand it to History, which re-executes it from S0 — exactly one undo step.
     std::unique_ptr<Command> cmd;
-    if (preview_) {
+    if (live_) {
+        // The layer already holds the final pixels; finish() yields the byte-exact command (its
+        // before == the pre-stroke snapshots). Pushing it re-applies a no-op and notifies
+        // observers. If the target layer vanished mid-stroke, drop the stroke without dereferencing
+        // its now-dangling store (commits nothing).
+        if (liveTargetValid(doc)) cmd = live_->finish();
+        live_.reset();
+    } else if (preview_) {
+        // Reuse the preview as the committed command: revert it (tiles back to S0) and hand it to
+        // History, which re-executes it from S0 — exactly one undo step.
         preview_->undo(doc);
         cmd = std::move(preview_);
     }
-    points_.clear();
-    layer_ = kNoLayer;
-    selection_ = nullptr;
+    resetStroke();
 
     if (cmd == nullptr) return false;  // stroke deposited nothing
     doc.history().push(std::move(cmd));
@@ -142,11 +214,16 @@ bool PaintToolController::end(Document& doc) {
 
 void PaintToolController::cancel(Document& doc) {
     if (!stroking_) return;
-    clearPreview(doc);
-    stroking_ = false;
-    points_.clear();
-    layer_ = kNoLayer;
-    selection_ = nullptr;
+    if (live_) {
+        // Restore every touched tile to its pre-stroke snapshot — but only if the target layer is
+        // still here; if it vanished mid-stroke its store reference dangles, so just drop the
+        // stroke.
+        if (liveTargetValid(doc)) live_->cancel();
+        live_.reset();
+    } else {
+        clearPreview(doc);
+    }
+    resetStroke();
 }
 
 }  // namespace pe
