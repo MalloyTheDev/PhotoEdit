@@ -882,6 +882,7 @@ pe::TextModel modelFromDialog(const QString& text, const QFont& font, const QCol
 void MainWindow::onAddText(const QPointF& docPos) {
     if (doc_ == nullptr) return;
     TextDialog dlg(this);
+    dlg.setColor(fgColor_);  // start the ink swatch at the current foreground color
     if (dlg.exec() != QDialog::Accepted) return;
     const QString text = dlg.text();
     if (text.trimmed().isEmpty()) return;  // whitespace-only renders no ink -> no layer
@@ -891,7 +892,7 @@ void MainWindow::onAddText(const QPointF& docPos) {
     // anchored top-left at the click (rasterOrigin == model.origin) so re-edits don't shift it.
     const pe::Point origin{static_cast<int>(std::lround(docPos.x())),
                            static_cast<int>(std::lround(docPos.y()))};
-    const pe::TextModel model = modelFromDialog(text, dlg.font(), fgColor_, origin);
+    const pe::TextModel model = modelFromDialog(text, dlg.font(), dlg.color(), origin);
     pe::PixelBuffer raster = rasterizeText(model);
     if (raster.isEmpty()) {
         statusBar()->showMessage(QStringLiteral("Text is too large to rasterize."), 4000);
@@ -915,21 +916,21 @@ void MainWindow::editTextLayer(pe::LayerId id) {
     // glyphs from snapping. The in-app producer keeps them equal, so this is a no-op there.
     const pe::Point rasterOrigin = textLayer->rasterOrigin();
 
-    // Reopen the dialog seeded from the layer's current text + font.
+    // Reopen the dialog seeded from the layer's current text + font + ink color.
     TextDialog dlg(this);
     QFont font(QString::fromStdString(current.fontFamily));
     font.setPixelSize(current.pixelSize);
     font.setBold(current.bold);
     font.setItalic(current.italic);
-    dlg.setInitial(QString::fromStdString(current.text), font);
+    const QColor ink(current.color.r, current.color.g, current.color.b, current.color.a);
+    dlg.setInitial(QString::fromStdString(current.text), font, ink);
     if (dlg.exec() != QDialog::Accepted) return;
     const QString text = dlg.text();
     if (text.trimmed().isEmpty()) return;  // whitespace-only renders no ink
 
-    // Keep the original origin + ink color (the dialog edits text/family/size only); re-rasterize
-    // and commit one undoable EditTextCommand.
-    const QColor ink(current.color.r, current.color.g, current.color.b, current.color.a);
-    const pe::TextModel model = modelFromDialog(text, dlg.font(), ink, current.origin);
+    // Keep the original origin; the dialog now edits text/family/size/bold/italic/color.
+    // Re-rasterize and commit one undoable EditTextCommand.
+    const pe::TextModel model = modelFromDialog(text, dlg.font(), dlg.color(), current.origin);
     pe::PixelBuffer raster = rasterizeText(model);
     if (raster.isEmpty()) {
         statusBar()->showMessage(QStringLiteral("Text is too large to rasterize."), 4000);
