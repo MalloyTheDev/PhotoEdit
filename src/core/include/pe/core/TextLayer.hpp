@@ -53,6 +53,12 @@ public:
     [[nodiscard]] const PixelBuffer& raster() const noexcept { return raster_; }
     [[nodiscard]] Point rasterOrigin() const noexcept { return rasterOrigin_; }
 
+    // Move the cached raster in document space without disturbing the model or the
+    // pixels. The crop command uses this: the origin is document-space, so a canvas
+    // origin change would otherwise leave the glyphs behind while the raster layers
+    // around them move.
+    void setRasterOrigin(Point p) noexcept { rasterOrigin_ = p; }
+
     // Atomically swap the whole content triple with the caller's (the undoable EditTextCommand
     // uses this so execute/undo are a single cheap swap).
     void swapContents(TextModel& model, PixelBuffer& raster, Point& rasterOrigin) noexcept {

@@ -1,7 +1,10 @@
 #include "pe/core/Commands.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/GroupLayer.hpp"
+#include "pe/core/Mask.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/SolidColorLayer.hpp"
+#include "pe/core/TextLayer.hpp"
 #include "pe_test.hpp"
 
 #include <memory>
@@ -152,4 +155,126 @@ PE_TEST(crop_refuses_when_content_exceeds_move_budget) {
     PE_CHECK_EQ(doc->canvasSize().width, 5000);  // refused: canvas unchanged
     PE_CHECK_EQ(doc->canvasSize().height, 5000);
     PE_CHECK_EQ(pl->tiles().pixel(10, 10), (Rgba8{1, 2, 3, 255}));  // content not moved
+}
+
+// ---------------------------------------------------------------------------
+// Non-pixel document-space geometry. Crop shifted pixel content but left masks,
+// text raster origins and fill bounds at their pre-crop coordinates, so every
+// masked pixel, glyph and fill rect ended up offset from the raster it belonged
+// to. The corruption was invisible in the tests above because none of them used
+// anything but a plain pixel layer.
+// ---------------------------------------------------------------------------
+
+PE_TEST(crop_shifts_a_layer_mask_with_its_pixels) {
+    auto doc = Document::createBlank(Size{64, 64});
+    PixelLayer* pl = base(*doc);
+    pl->tiles().setPixel(20, 18, Rgba8{200, 50, 50, 255});
+
+    auto mask = std::make_unique<Mask>();
+    mask->buffer().fillRect(Rect{20, 18, 4, 4}, MaskBuffer::kClear);  // hide the mark
+    pl->setMask(std::move(mask));
+
+    doc->history().push(std::make_unique<CropCommand>(Rect{10, 8, 30, 30}));
+
+    // The mark moved to (10,10); the mask that hides it must have moved with it.
+    const MaskBuffer& mb = base(*doc)->mask()->buffer();
+    PE_CHECK_EQ(static_cast<int>(mb.value(10, 10)), static_cast<int>(MaskBuffer::kClear));
+    // ...and must no longer be hiding whatever now sits at the old coordinates.
+    PE_CHECK_EQ(static_cast<int>(mb.value(20, 18)), static_cast<int>(MaskBuffer::kOpaque));
+
+    doc->history().undo();
+    const MaskBuffer& back = base(*doc)->mask()->buffer();
+    PE_CHECK_EQ(static_cast<int>(back.value(20, 18)), static_cast<int>(MaskBuffer::kClear));
+    PE_CHECK_EQ(static_cast<int>(back.value(10, 10)), static_cast<int>(MaskBuffer::kOpaque));
+}
+
+PE_TEST(crop_shifts_a_text_layer_raster_origin) {
+    auto doc = Document::createBlank(Size{64, 64});
+    PixelBuffer raster(4, 4, Rgba8{10, 20, 30, 255});
+    auto text = std::make_unique<TextLayer>(TextModel{}, std::move(raster), Point{20, 18});
+    const LayerId id = text->id();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(text));
+
+    doc->history().push(std::make_unique<CropCommand>(Rect{10, 8, 30, 30}));
+
+    auto* t = static_cast<TextLayer*>(doc->findLayer(id));
+    PE_CHECK(t != nullptr);
+    if (t == nullptr) return;
+    PE_CHECK_EQ(t->rasterOrigin().x, 10);
+    PE_CHECK_EQ(t->rasterOrigin().y, 10);
+
+    doc->history().undo();
+    t = static_cast<TextLayer*>(doc->findLayer(id));
+    PE_CHECK(t != nullptr);
+    if (t == nullptr) return;
+    PE_CHECK_EQ(t->rasterOrigin().x, 20);
+    PE_CHECK_EQ(t->rasterOrigin().y, 18);
+}
+
+PE_TEST(crop_shifts_a_solid_color_layer_bounds) {
+    auto doc = Document::createBlank(Size{64, 64});
+    auto fill = std::make_unique<SolidColorLayer>(Rgba8{0, 128, 255, 255}, Rect{20, 18, 12, 12});
+    const LayerId id = fill->id();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(fill));
+
+    doc->history().push(std::make_unique<CropCommand>(Rect{10, 8, 30, 30}));
+
+    auto* f = static_cast<SolidColorLayer*>(doc->findLayer(id));
+    PE_CHECK(f != nullptr);
+    if (f == nullptr) return;
+    PE_CHECK(f->bounds() == (Rect{10, 10, 12, 12}));
+
+    doc->history().undo();
+    f = static_cast<SolidColorLayer*>(doc->findLayer(id));
+    PE_CHECK(f != nullptr);
+    if (f == nullptr) return;
+    PE_CHECK(f->bounds() == (Rect{20, 18, 12, 12}));
+}
+
+PE_TEST(crop_shifts_a_mask_on_a_layer_nested_in_a_group) {
+    // Masks live on the base Layer, so any kind can carry one at any depth. The
+    // pixel-content walk already recursed; the geometry walk has to as well.
+    auto doc = Document::createBlank(Size{64, 64});
+    auto inner = std::make_unique<PixelLayer>("inner");
+    const LayerId innerId = inner->id();
+    inner->tiles().setPixel(20, 18, Rgba8{9, 9, 9, 255});
+    auto mask = std::make_unique<Mask>();
+    mask->buffer().fillRect(Rect{20, 18, 4, 4}, MaskBuffer::kClear);
+    inner->setMask(std::move(mask));
+
+    auto group = std::make_unique<GroupLayer>("group");
+    group->addChild(std::move(inner));
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+
+    doc->history().push(std::make_unique<CropCommand>(Rect{10, 8, 30, 30}));
+
+    auto* l = doc->findLayer(innerId);
+    PE_CHECK(l != nullptr);
+    if (l == nullptr || l->mask() == nullptr) {
+        PE_CHECK(false);
+        return;
+    }
+    PE_CHECK_EQ(static_cast<int>(l->mask()->buffer().value(10, 10)),
+                static_cast<int>(MaskBuffer::kClear));
+    PE_CHECK_EQ(static_cast<int>(l->mask()->buffer().value(20, 18)),
+                static_cast<int>(MaskBuffer::kOpaque));
+}
+
+PE_TEST(crop_redo_reapplies_geometry_exactly_once) {
+    // execute() runs again on redo, so a geometry shift that accumulated instead of
+    // being recomputed would drift further on every undo/redo cycle.
+    auto doc = Document::createBlank(Size{64, 64});
+    auto fill = std::make_unique<SolidColorLayer>(Rgba8{0, 128, 255, 255}, Rect{20, 18, 12, 12});
+    const LayerId id = fill->id();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(fill));
+
+    doc->history().push(std::make_unique<CropCommand>(Rect{10, 8, 30, 30}));
+    for (int i = 0; i < 3; ++i) {
+        doc->history().undo();
+        doc->history().redo();
+    }
+    auto* f = static_cast<SolidColorLayer*>(doc->findLayer(id));
+    PE_CHECK(f != nullptr);
+    if (f == nullptr) return;
+    PE_CHECK(f->bounds() == (Rect{10, 10, 12, 12}));
 }

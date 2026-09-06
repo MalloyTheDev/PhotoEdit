@@ -38,6 +38,26 @@ public:
     // stay byte-exact rather than retaining a redundant fully-revealing tile.
     void compact(Rect region) noexcept;
 
+    // Shift all coverage by (dx, dy) in document space, leaving the vacated area
+    // reading kOpaque (absent). Used by the crop command, whose canvas-origin change
+    // moves every layer's pixels: the mask is stored in document space too, so
+    // without this it would stay behind and mask the wrong pixels.
+    //
+    // Returns false and leaves the buffer UNTOUCHED when the work would exceed
+    // `maxPixels`, or when the destination would leave the representable coordinate
+    // range. Callers that must not half-apply a multi-step edit check this first.
+    //
+    // Exactly invertible: translating by (dx, dy) then (-dx, -dy) restores the
+    // buffer byte for byte, because values are copied verbatim rather than
+    // resampled. The one normalization is that an allocated but entirely kOpaque
+    // tile is dropped, which compact() already documents as lossless.
+    [[nodiscard]] bool translate(int dx, int dy, int64_t maxPixels);
+
+    // Whether translate() with the same arguments would succeed, without mutating.
+    // A multi-layer edit (crop) checks every mask up front so it can refuse as a
+    // whole rather than shifting some layers and leaving others behind.
+    [[nodiscard]] bool canTranslate(int dx, int dy, int64_t maxPixels) const;
+
 private:
     using Key = std::pair<int, int>;
     using GrayTile = std::array<uint8_t, kTilePixels>;

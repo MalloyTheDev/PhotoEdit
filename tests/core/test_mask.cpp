@@ -1,9 +1,11 @@
 #include "pe/core/Compositor.hpp"
+#include "pe/core/Document.hpp"  // kMaxCanvasDimension
 #include "pe/core/Mask.hpp"
 #include "pe/core/Selection.hpp"
 #include "pe/core/SolidColorLayer.hpp"
 #include "pe_test.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <vector>
@@ -119,4 +121,113 @@ PE_TEST(layer_clone_deep_copies_mask) {
     // Mutating the clone's mask doesn't touch the original.
     clone->mask()->buffer().setValue(2, 2, MaskBuffer::kClear);
     PE_CHECK_EQ(layer->mask()->buffer().value(2, 2), MaskBuffer::kOpaque);
+}
+
+// ---------------------------------------------------------------------------
+// MaskBuffer::translate. The crop command relies on this to keep a layer mask
+// aligned with the pixels it masks when the canvas origin moves.
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr int64_t kAmpleBudget = 16'000'000;
+
+// A recognisable pattern: a hidden square with one distinct interior value, so a
+// translation that loses or resamples data is visible rather than plausible.
+MaskBuffer patternedMask() {
+    MaskBuffer m;
+    m.fillRect(Rect{10, 20, 30, 40}, MaskBuffer::kClear);
+    m.setValue(15, 25, 77);
+    return m;
+}
+}  // namespace
+
+PE_TEST(maskbuffer_translate_moves_coverage_by_the_delta) {
+    MaskBuffer m = patternedMask();
+    PE_CHECK(m.translate(7, -3, kAmpleBudget));
+
+    // Moved to the new position...
+    PE_CHECK_EQ(static_cast<int>(m.value(10 + 7, 20 - 3)), 0);
+    PE_CHECK_EQ(static_cast<int>(m.value(15 + 7, 25 - 3)), 77);
+    PE_CHECK_EQ(static_cast<int>(m.value(39 + 7, 59 - 3)), 0);
+    // ...and the vacated area reveals again (absent reads kOpaque).
+    PE_CHECK_EQ(static_cast<int>(m.value(10, 20)), 255);
+    PE_CHECK_EQ(static_cast<int>(m.value(15, 25)), 255);
+}
+
+PE_TEST(maskbuffer_translate_is_exactly_invertible) {
+    MaskBuffer m = patternedMask();
+    const std::size_t tilesBefore = m.tileCount();
+    const Rect boundsBefore = m.contentBounds();
+
+    PE_CHECK(m.translate(13, -29, kAmpleBudget));
+    PE_CHECK(m.translate(-13, 29, kAmpleBudget));
+
+    PE_CHECK_EQ(m.tileCount(), tilesBefore);
+    PE_CHECK(m.contentBounds() == boundsBefore);
+    for (int y = 18; y < 62; ++y) {
+        for (int x = 8; x < 42; ++x) {
+            const uint8_t expected = (x == 15 && y == 25) ? 77
+                                     : (x >= 10 && x < 40 && y >= 20 && y < 60)
+                                         ? MaskBuffer::kClear
+                                         : MaskBuffer::kOpaque;
+            PE_CHECK_EQ(static_cast<int>(m.value(x, y)), static_cast<int>(expected));
+        }
+    }
+}
+
+PE_TEST(maskbuffer_translate_tile_aligned_is_a_pure_rekey) {
+    // A whole-tile shift needs no per-pixel work, so it must succeed even with a
+    // budget far too small for the general path.
+    MaskBuffer m = patternedMask();
+    const std::size_t tilesBefore = m.tileCount();
+    PE_CHECK(m.translate(kTileSize * 2, -kTileSize, /*maxPixels=*/1));
+    PE_CHECK_EQ(m.tileCount(), tilesBefore);
+    PE_CHECK_EQ(static_cast<int>(m.value(15 + kTileSize * 2, 25 - kTileSize)), 77);
+    PE_CHECK_EQ(static_cast<int>(m.value(15, 25)), 255);
+}
+
+PE_TEST(maskbuffer_translate_over_budget_refuses_and_leaves_the_buffer_untouched) {
+    MaskBuffer m = patternedMask();
+    const std::size_t tilesBefore = m.tileCount();
+    const Rect boundsBefore = m.contentBounds();
+
+    PE_CHECK(!m.translate(1, 1, /*maxPixels=*/4));
+
+    // Refusal must be all-or-nothing: a half-translated mask is worse than none.
+    PE_CHECK_EQ(m.tileCount(), tilesBefore);
+    PE_CHECK(m.contentBounds() == boundsBefore);
+    PE_CHECK_EQ(static_cast<int>(m.value(15, 25)), 77);
+}
+
+PE_TEST(maskbuffer_translate_out_of_range_refuses) {
+    // The bound is inclusive: a destination edge landing exactly on
+    // +/-kMaxCanvasDimension is representable and allowed; one past it is not.
+    MaskBuffer m = patternedMask();
+    const Rect boundsBefore = m.contentBounds();
+
+    // contentBounds is tile-granular, so the right edge is what crosses first here.
+    PE_CHECK(!m.translate(kMaxCanvasDimension, 0, kAmpleBudget));
+    PE_CHECK(!m.translate(0, -(kMaxCanvasDimension + 1), kAmpleBudget));
+    PE_CHECK(m.contentBounds() == boundsBefore);
+
+    // Exactly on the bound succeeds, which is what makes the rejections above a
+    // boundary test rather than a vague "large numbers fail". Assert on a moved
+    // pixel rather than on contentBounds(), which is tile-granular and so snaps
+    // outward to the enclosing tile.
+    MaskBuffer edge = patternedMask();
+    const int toEdge = -(kMaxCanvasDimension + edge.contentBounds().top());
+    PE_CHECK(edge.translate(0, toEdge, kAmpleBudget));
+    PE_CHECK_EQ(static_cast<int>(edge.value(15, 25 + toEdge)), 77);
+    PE_CHECK_EQ(static_cast<int>(edge.value(15, 25)), 255);
+}
+
+PE_TEST(maskbuffer_translate_zero_and_empty_are_no_ops) {
+    MaskBuffer empty;
+    PE_CHECK(empty.translate(5, 5, kAmpleBudget));
+    PE_CHECK(empty.empty());
+
+    MaskBuffer m = patternedMask();
+    const std::size_t tilesBefore = m.tileCount();
+    PE_CHECK(m.translate(0, 0, /*maxPixels=*/0));
+    PE_CHECK_EQ(m.tileCount(), tilesBefore);
 }

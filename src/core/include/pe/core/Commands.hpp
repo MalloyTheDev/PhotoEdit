@@ -288,11 +288,20 @@ public:
     DocumentChange undo(Document&) override;
 
 private:
+    // Shift every non-pixel document-space placement by (dx, dy). Pixel content is
+    // handled by moves_; these are the geometries a crop would otherwise leave
+    // behind, making masks, glyphs and fills line up with the wrong pixels.
+    // Exactly invertible, so undo passes the opposite delta.
+    void shiftGeometry(Document& doc, int dx, int dy);
+
     Rect crop_;
     Size oldSize_{};
     bool captured_ = false;
     std::vector<std::unique_ptr<PaintCommand>> moves_;  // per-layer content shift to the origin
     Selection oldSel_;  // selection before crop, captured on first execute, restored on undo
+    std::vector<LayerId> maskLayers_;  // layers carrying a mask buffer to shift
+    std::vector<LayerId> textLayers_;  // text layers whose raster origin must shift
+    std::vector<LayerId> fillLayers_;  // solid-color layers whose bounds must shift
 };
 
 }  // namespace pe

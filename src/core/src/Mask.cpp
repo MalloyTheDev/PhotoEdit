@@ -1,5 +1,7 @@
 #include "pe/core/Mask.hpp"
 
+#include "pe/core/Document.hpp"  // kMaxCanvasDimension
+
 #include "pe/core/Selection.hpp"
 
 #include <cstddef>
@@ -71,6 +73,64 @@ Rect MaskBuffer::contentBounds() const noexcept {
         bounds = bounds.united(tileBounds(TileCoord{key.first, key.second}));
     }
     return bounds;
+}
+
+bool MaskBuffer::canTranslate(int dx, int dy, int64_t maxPixels) const {
+    if ((dx == 0 && dy == 0) || tiles_.empty()) return true;
+
+    const Rect src = contentBounds();
+    if (src.isEmpty()) return true;
+
+    // The destination must stay inside the coordinate range the rest of the engine is
+    // bounded by; int64 throughout so the sums themselves cannot wrap. The bound is
+    // inclusive: an edge landing exactly on the limit is representable.
+    const int64_t limit = kMaxCanvasDimension;
+    const int64_t dstLeft = static_cast<int64_t>(src.left()) + dx;
+    const int64_t dstTop = static_cast<int64_t>(src.top()) + dy;
+    const int64_t dstRight = static_cast<int64_t>(src.right()) + dx;
+    const int64_t dstBottom = static_cast<int64_t>(src.bottom()) + dy;
+    if (dstLeft < -limit || dstTop < -limit || dstRight > limit || dstBottom > limit) return false;
+
+    // A whole-tile shift is a rekey, so it costs nothing per pixel and needs no budget.
+    if (dx % kTileSize == 0 && dy % kTileSize == 0) return true;
+
+    // contentBounds() is tile-granular, so a sparse mask can span a large box; the
+    // general path walks that box, which is what the budget bounds.
+    const int64_t area = static_cast<int64_t>(src.width) * static_cast<int64_t>(src.height);
+    return area <= maxPixels;
+}
+
+bool MaskBuffer::translate(int dx, int dy, int64_t maxPixels) {
+    if (!canTranslate(dx, dy, maxPixels)) return false;
+    if ((dx == 0 && dy == 0) || tiles_.empty()) return true;
+
+    const Rect src = contentBounds();
+    if (src.isEmpty()) return true;
+
+    // Tile-aligned shift: rekey the map, no per-pixel work.
+    if (dx % kTileSize == 0 && dy % kTileSize == 0) {
+        const int dcol = dx / kTileSize;
+        const int drow = dy / kTileSize;
+        std::map<Key, GrayTile> moved;
+        for (auto& [key, tile] : tiles_) {
+            moved.emplace(Key{key.first + dcol, key.second + drow}, tile);
+        }
+        tiles_ = std::move(moved);
+        return true;
+    }
+
+    // General case: rebuild pixel by pixel. canTranslate already bounded this.
+    MaskBuffer out;
+    for (int y = src.top(); y < src.bottom(); ++y) {
+        for (int x = src.left(); x < src.right(); ++x) {
+            const uint8_t v = value(x, y);
+            // Skip kOpaque so the result stays canonical: an absent tile already
+            // reads kOpaque, so writing it would only allocate a redundant tile.
+            if (v != kOpaque) out.setValue(x + dx, y + dy, v);
+        }
+    }
+    tiles_ = std::move(out.tiles_);
+    return true;
 }
 
 void MaskBuffer::compact(Rect region) noexcept {

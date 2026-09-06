@@ -1,5 +1,9 @@
 #include "pe/core/Commands.hpp"
 
+#include <cstdint>
+#include "pe/core/SolidColorLayer.hpp"
+#include "pe/core/TextLayer.hpp"
+
 #include "pe/core/Brush.hpp"  // PaintCommand (CropCommand composes per-layer moves)
 #include "pe/core/Document.hpp"
 #include "pe/core/Filter.hpp"      // moveLayerContent
@@ -30,6 +34,24 @@ DocumentChange structureChange(Rect region, LayerId id) {
 
 // Collect every PIXEL layer id in the tree (descending into groups), for the crop content
 // shift — a group's pixel children live in document space and must move with everything else.
+// Budget for shifting a mask during a crop. Matched to the pixel-move budget the
+// crop already depends on (kMaxFilterPixels), so a document that can have its pixels
+// shifted can have its masks shifted too, and the crop refuses as a whole otherwise.
+constexpr int64_t kMaxCropGeometryPixels = 16'000'000;
+
+// Every layer in the tree, groups included. collectPixelLayers deliberately returns
+// only paintable leaves; geometry shifting has to consider masks (which live on the
+// base Layer, so any kind can carry one), text origins and fill bounds.
+void collectAllLayers(std::span<const std::unique_ptr<Layer>> layers, std::vector<LayerId>& out) {
+    for (const auto& l : layers) {
+        if (l == nullptr) continue;
+        out.push_back(l->id());
+        if (l->kind() == LayerKind::Group) {
+            collectAllLayers(static_cast<const GroupLayer*>(l.get())->children(), out);
+        }
+    }
+}
+
 void collectPixelLayers(std::span<const std::unique_ptr<Layer>> layers, std::vector<LayerId>& out) {
     for (const auto& l : layers) {
         if (l == nullptr) continue;
@@ -534,6 +556,31 @@ DocumentChange SetSelectionCommand::undo(Document& doc) {
 CropCommand::CropCommand(Rect cropRect) : crop_(cropRect) {}
 CropCommand::~CropCommand() = default;
 
+void CropCommand::shiftGeometry(Document& doc, int dx, int dy) {
+    if (dx == 0 && dy == 0) return;
+    for (LayerId id : maskLayers_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->mask() == nullptr) continue;
+        // Already proven shiftable during capture, and translate is exactly
+        // invertible, so the undo direction cannot fail either.
+        (void)l->mask()->buffer().translate(dx, dy, kMaxCropGeometryPixels);
+    }
+    for (LayerId id : textLayers_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->kind() != LayerKind::Text) continue;
+        auto* t = static_cast<TextLayer*>(l);
+        const Point o = t->rasterOrigin();
+        t->setRasterOrigin(Point{o.x + dx, o.y + dy});
+    }
+    for (LayerId id : fillLayers_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->kind() != LayerKind::Fill) continue;
+        auto* f = static_cast<SolidColorLayer*>(l);
+        const Rect b = f->bounds();
+        f->setBounds(Rect{b.x + dx, b.y + dy, b.width, b.height});
+    }
+}
+
 DocumentChange CropCommand::execute(Document& doc) {
     if (!captured_) {
         captured_ = true;
@@ -565,8 +612,35 @@ DocumentChange CropCommand::execute(Document& doc) {
                     }
                 }
             }
+            // Non-pixel document-space geometry: masks (on any layer kind), text
+            // raster origins and fill bounds. Checked before anything is applied so
+            // an unshiftable mask refuses the whole crop rather than half-applying.
+            if (shiftable) {
+                std::vector<LayerId> all;
+                collectAllLayers(doc.topLevelLayers(), all);
+                for (LayerId id : all) {
+                    const Layer* l = doc.findLayer(id);
+                    if (l == nullptr) continue;
+                    const Mask* m = l->mask();
+                    if (m != nullptr && !m->buffer().empty()) {
+                        if (!m->buffer().canTranslate(-eff.x, -eff.y, kMaxCropGeometryPixels)) {
+                            shiftable = false;
+                            break;
+                        }
+                        maskLayers_.push_back(id);
+                    }
+                    if (l->kind() == LayerKind::Text) {
+                        textLayers_.push_back(id);
+                    } else if (l->kind() == LayerKind::Fill) {
+                        fillLayers_.push_back(id);
+                    }
+                }
+            }
             if (!shiftable) {
                 moves_.clear();  // none executed yet; abort to a no-op rather than half-crop
+                maskLayers_.clear();
+                textLayers_.clear();
+                fillLayers_.clear();
                 crop_ = Rect{};
             }
         }
@@ -575,6 +649,7 @@ DocumentChange CropCommand::execute(Document& doc) {
         return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
 
     for (auto& m : moves_) m->execute(doc);
+    shiftGeometry(doc, -crop_.x, -crop_.y);
     doc.cmdSetCanvasSize(Size{crop_.width, crop_.height});
     // Shift the active selection by the same -origin so it tracks the cropped content. Recomputed
     // from the captured original each time, so redo is exact (re-shifting an inactive sel is a
@@ -588,8 +663,9 @@ DocumentChange CropCommand::undo(Document& doc) {
     if (crop_.isEmpty())
         return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
 
-    doc.cmdSetCanvasSize(oldSize_);  // restore the canvas first
-    for (auto it = moves_.rbegin(); it != moves_.rend(); ++it) (*it)->undo(doc);  // unshift
+    doc.cmdSetCanvasSize(oldSize_);        // restore the canvas first
+    shiftGeometry(doc, crop_.x, crop_.y);  // unshift geometry
+    for (auto it = moves_.rbegin(); it != moves_.rend(); ++it) (*it)->undo(doc);  // unshift pixels
     doc.editableSelection() = oldSel_;  // restore the exact pre-crop selection
     doc.touchSelection();
     return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
