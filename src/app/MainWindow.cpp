@@ -823,7 +823,12 @@ void MainWindow::buildOptionsBar() {
         b->setAutoRaise(true);
         b->setToolTip(tip);
         b->setAccessibleName(tip);  // text is a bare glyph, so it is not a usable name
-        connect(b, &QToolButton::clicked, this, [this, slot] { (canvas_->*slot)(); });
+        // Connect straight to the canvas rather than through a lambda capturing a
+        // pointer-to-member: it is simpler, it ties the connection's lifetime to the
+        // canvas that actually serves it, and it avoids routing a member pointer
+        // through Qt's inlined functor machinery, which GCC flagged as possibly
+        // uninitialized and UBSan reported as an invalid vptr under the sanitizer lane.
+        connect(b, &QToolButton::clicked, canvas_, slot);
         return b;
     };
 
