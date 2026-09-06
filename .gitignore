@@ -1,5 +1,6 @@
-# Build output
-/build/
+# Build output. Anchored, so a source directory named "build" deeper in the tree is
+# unaffected, but every sibling tree at the root (build-core, build-vs, ...) is covered.
+/build*/
 /out/
 /cmake-build-*/
 *.o
@@ -18,6 +19,10 @@
 /.idea/
 *.user
 CMakeUserPresets.json
+
+# Local convenience launchers. Machine-specific (they hardcode a toolchain path),
+# so they stay out of the repository.
+/run-*.bat
 
 # OS
 Thumbs.db
