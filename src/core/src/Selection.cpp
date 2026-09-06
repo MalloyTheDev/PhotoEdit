@@ -41,6 +41,11 @@ bool rejectFill(Rect r) noexcept {
 }
 }  // namespace
 
+const Selection::GrayTile* Selection::findTile(TileCoord c) const noexcept {
+    auto it = tiles_.find(keyOf(c));
+    return it == tiles_.end() ? nullptr : &it->second;
+}
+
 uint8_t Selection::stored(int x, int y) const noexcept {
     const TileCoord c{floorDiv(x, kTileSize), floorDiv(y, kTileSize)};
     auto it = tiles_.find(keyOf(c));

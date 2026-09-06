@@ -332,9 +332,25 @@ std::unique_ptr<PaintCommand> bakePixelEditImpl(
     const int w = bb.width;
     const int h = bb.height;
     std::vector<Rgbaf> orig(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            orig[idx(x, y, w)] = toFloat(store.pixel(bb.left() + x, bb.top() + y));
+    // Walk the source tile by tile rather than in raster order. store.pixel() resolves
+    // the tile through a map lookup on every call, and a raster walk re-resolves it for
+    // every pixel; blocking by tile makes that one lookup per tile. Absent tiles read as
+    // transparent, exactly as store.pixel() would report them.
+    const TileSpan readSpan = tilesForRect(bb);
+    for (int row = readSpan.rowBegin; row < readSpan.rowEnd; ++row) {
+        for (int col = readSpan.colBegin; col < readSpan.colEnd; ++col) {
+            const TileCoord coord{col, row};
+            const Rect vis = tileBounds(coord).intersected(bb);
+            if (vis.isEmpty()) continue;
+            const TileDataT<Pixel>* tile = store.find(coord);
+            for (int y = vis.top(); y < vis.bottom(); ++y) {
+                for (int x = vis.left(); x < vis.right(); ++x) {
+                    const Pixel p = tile != nullptr
+                                        ? tile->at(tileLocalOffset(x), tileLocalOffset(y))
+                                        : Pixel{};
+                    orig[idx(x - bb.left(), y - bb.top(), w)] = toFloat(p);
+                }
+            }
         }
     }
     std::vector<Rgbaf> work = orig;  // the transform mutates this in place
@@ -354,13 +370,27 @@ std::unique_ptr<PaintCommand> bakePixelEditImpl(
             auto after = std::make_shared<TileDataT<Pixel>>();
             if (before) *after = *before;
 
+            // One lookup for the selection tile instead of one per gated pixel; `gate`
+            // already established active(), which is the precondition findTile carries.
+            // Absent means coverage 0 for the whole tile, but the loop still runs: with
+            // cov == 0 the lerp is not unconditionally the identity for a non-finite
+            // working value, and this must stay bit-identical.
+            const Selection::GrayTile* selTile = gate ? selection->findTile(coord) : nullptr;
+
             bool changed = false;
             for (int y = vis.top(); y < vis.bottom(); ++y) {
                 for (int x = vis.left(); x < vis.right(); ++x) {
                     const std::size_t si = idx(x - bb.left(), y - bb.top(), w);
                     Rgbaf out = work[si];
                     if (gate) {
-                        const float cov = selection->coverage(x, y);
+                        const float cov =
+                            selTile != nullptr
+                                ? static_cast<float>(
+                                      (*selTile)[static_cast<std::size_t>(tileLocalOffset(y)) *
+                                                     kTileSize +
+                                                 static_cast<std::size_t>(tileLocalOffset(x))]) /
+                                      255.0f
+                                : 0.0f;
                         const Rgbaf& o = orig[si];
                         out.r = o.r + (out.r - o.r) * cov;
                         out.g = o.g + (out.g - o.g) * cov;

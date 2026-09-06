@@ -79,9 +79,24 @@ public:
     [[nodiscard]] Rect tightBounds() const noexcept;
     [[nodiscard]] std::size_t tileCount() const noexcept { return tiles_.size(); }
 
+    // One tile's bytes, row-major, indexed tileLocalOffset(y) * kTileSize + tileLocalOffset(x).
+    using GrayTile = std::array<uint8_t, kTilePixels>;
+
+    // The stored coverage tile at `c`, or nullptr when it is absent (which reads as 0).
+    // Mirrors TileStoreT::find, including the nullptr-means-default convention.
+    //
+    // This exposes the STORED bytes, so it deliberately ignores active(): an inactive
+    // selection means "everything editable", which has no tile to return. Callers must
+    // have established active() themselves, which every gated loop already does, or
+    // handle the inactive case before asking.
+    //
+    // For a loop confined to one tile, resolving the tile once and indexing the array
+    // replaces one map lookup per pixel. coverage() stays the right call for scattered
+    // access.
+    [[nodiscard]] const GrayTile* findTile(TileCoord c) const noexcept;
+
 private:
     using Key = std::pair<int, int>;
-    using GrayTile = std::array<uint8_t, kTilePixels>;
     static constexpr Key keyOf(TileCoord c) noexcept { return {c.col, c.row}; }
 
     [[nodiscard]] uint8_t stored(int x, int y) const noexcept;  // 0 if absent
