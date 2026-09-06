@@ -22,3 +22,4 @@ and **Alternatives considered**.
 | [0005](0005-command-history-model.md) | Command-based mutation & tile-delta history | Accepted |
 | [0006](0006-headless-core-separation.md) | Headless engine core, UI as a client | Accepted |
 | [0007](0007-native-document-format.md) | A versioned native document format; PSD for interchange | Accepted |
+| [0008](0008-app-shell-as-a-library.md) | App shell as a library with a thin main | Accepted |

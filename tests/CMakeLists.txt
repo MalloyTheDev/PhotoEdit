@@ -50,3 +50,22 @@ target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)
 target_include_directories(pe_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_test(NAME pe_core_tests COMMAND pe_core_tests)
+
+# ---------------------------------------------------------------------------
+# Shell tests. Gated on PHOTOEDIT_BUILD_APP because the headless core lanes
+# configure with the app off and no Qt present; pe_app does not exist there.
+#
+# Same zero-dependency harness as the engine tests: these link pe_app but need
+# no QApplication, so they run in any lane that builds the shell.
+# ---------------------------------------------------------------------------
+if(PHOTOEDIT_BUILD_APP)
+    add_executable(pe_app_tests
+        test_main.cpp
+        app/test_theme.cpp
+    )
+
+    target_link_libraries(pe_app_tests PRIVATE PhotoEdit::App)
+    target_include_directories(pe_app_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+    add_test(NAME pe_app_tests COMMAND pe_app_tests)
+endif()

@@ -6,7 +6,18 @@
 #include <QRectF>
 #include <QSvgRenderer>
 
+// Q_INIT_RESOURCE expands to a call to a function rcc generates at global scope, so
+// it cannot be invoked from inside a namespace. This shim is the documented way to
+// keep the public entry point namespaced.
+static void peAppInitIconResources() {
+    Q_INIT_RESOURCE(icons);
+}
+
 namespace pe::app {
+
+void initIconResources() {
+    peAppInitIconResources();
+}
 
 QPixmap renderIcon(const QString& name, const QColor& color, int logical) {
     QByteArray data;

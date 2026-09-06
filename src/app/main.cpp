@@ -1,3 +1,4 @@
+#include "IconUtil.hpp"
 #include "MainWindow.hpp"
 #include "Theme.hpp"
 
@@ -8,6 +9,10 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("PhotoEdit"));
     QApplication::setOrganizationName(QStringLiteral("MalloyTheDev"));
+
+    // pe_app is a static library; without this the bundled glyphs are not
+    // registered and every tool button renders empty. See IconUtil.hpp.
+    pe::app::initIconResources();
 
     // Apply the theme before any widgets are shown; honor the last choice. Nocturne
     // (the flagship blue-grey) is the default for a fresh profile; themeFromInt folds
