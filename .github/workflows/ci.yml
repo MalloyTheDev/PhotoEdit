@@ -4,10 +4,17 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  # The engine decodes untrusted image files through six pinned native libraries, so
+  # waiting for someone to push before revalidating is too slow: a newly disclosed
+  # vulnerability or an upstream package regression should surface on its own.
+  schedule:
+    - cron: "17 5 * * 1"  # Mondays, 05:17 UTC
+  workflow_dispatch:
 
-# Cancel superseded runs on the same ref.
+# Cancel superseded runs on the same ref. Keyed by event as well, so the weekly
+# scheduled run cannot cancel an in-flight run for someone's push to the same branch.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:

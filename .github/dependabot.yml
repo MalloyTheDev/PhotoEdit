@@ -1,0 +1,14 @@
+# GitHub's dependency graph does not parse vcpkg.json, so this covers the one
+# ecosystem Dependabot can see here: the action versions the CI workflow pins.
+# The native decoders are pinned through vcpkg.json's builtin-baseline instead;
+# SECURITY.md documents how those are updated and where their advisories are.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "wiring"
