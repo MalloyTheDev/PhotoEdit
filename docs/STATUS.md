@@ -17,11 +17,13 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **468 engine cases + 8 shell cases, 0 failed**. The engine tests
+Test suite: **468 engine cases + 23 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built; they pin the theme contrast ratios, the stylesheet token
-substitution, and the icon-resource linkage.
+substitution, the icon-resource linkage, the menu surface (no top-level menu may be
+empty; one Window toggle per dock), the keyboard-shortcut set including collision
+detection, and the unsaved-changes guard.
 
 ## Milestones
 

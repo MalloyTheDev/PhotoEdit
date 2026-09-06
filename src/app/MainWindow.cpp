@@ -27,6 +27,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QColor>
 #include <QColorDialog>
 #include <QComboBox>
@@ -112,6 +113,7 @@ MainWindow::~MainWindow() {
     // destroyed when this body returns, but the child widgets are deleted later by
     // the QObject base destructor, so clearing them now avoids a dangling
     // removeObserver() in their destructors.
+    if (doc_ != nullptr) doc_->removeObserver(this);
     if (canvas_ != nullptr) canvas_->setDocument(nullptr);
     if (layers_ != nullptr) layers_->setDocument(nullptr);
     if (history_ != nullptr) history_->setDocument(nullptr);
@@ -120,14 +122,25 @@ MainWindow::~MainWindow() {
 
 void MainWindow::buildMenuBar() {
     auto* fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
-    fileMenu->addAction(QStringLiteral("&New"), this, &MainWindow::newDocument);
-    fileMenu->addAction(QStringLiteral("&Open..."), this, &MainWindow::openDocument);
+    fileMenu->addAction(QStringLiteral("&New"), QKeySequence::New, this, &MainWindow::newDocument);
+    fileMenu->addAction(QStringLiteral("&Open..."), QKeySequence::Open, this,
+                        &MainWindow::openDocument);
     fileMenu->addSeparator();
-    fileMenu->addAction(QStringLiteral("&Save"), this, &MainWindow::saveDocument);
-    fileMenu->addAction(QStringLiteral("Save &As..."), this, &MainWindow::saveDocumentAs);
-    fileMenu->addAction(QStringLiteral("E&xport As..."), this, &MainWindow::exportDocumentAs);
+    fileMenu->addAction(QStringLiteral("&Save"), QKeySequence::Save, this,
+                        &MainWindow::saveDocument);
+    fileMenu->addAction(QStringLiteral("Save &As..."), QKeySequence::SaveAs, this,
+                        &MainWindow::saveDocumentAs);
+    // No StandardKey for export; Ctrl+Shift+E is the common convention.
+    fileMenu->addAction(QStringLiteral("E&xport As..."),
+                        QKeySequence(QStringLiteral("Ctrl+Shift+E")), this,
+                        &MainWindow::exportDocumentAs);
     fileMenu->addSeparator();
-    fileMenu->addAction(QStringLiteral("E&xit"), qApp, &QApplication::quit);
+    // Explicit Ctrl+Q rather than QKeySequence::Quit: on Windows that standard key
+    // resolves to the unusable literal "Exit" rather than a chord.
+    // Routed through close() so closeEvent can guard unsaved work; connecting
+    // QApplication::quit directly bypassed the guard entirely.
+    fileMenu->addAction(QStringLiteral("E&xit"), QKeySequence(QStringLiteral("Ctrl+Q")), this,
+                        &MainWindow::close);
 
     auto* editMenu = menuBar()->addMenu(QStringLiteral("&Edit"));
     QAction* undoAct = editMenu->addAction(QStringLiteral("&Undo"), this, &MainWindow::undo);
@@ -390,28 +403,30 @@ void MainWindow::buildMenuBar() {
         });
     }
     auto* selMenu = menuBar()->addMenu(QStringLiteral("&Select"));
-    selMenu->addAction(QStringLiteral("Select All"), this, [this]() {
+    selMenu->addAction(QStringLiteral("Select All"), QKeySequence::SelectAll, this, [this]() {
         if (doc_) {
             Selection target;
             target.selectAll(doc_->canvasBounds());
             doc_->history().push(std::make_unique<SetSelectionCommand>(target));
         }
     });
-    selMenu->addAction(QStringLiteral("Deselect"), this, [this]() {
-        if (doc_) {
-            Selection target;
-            target.selectNone();
-            doc_->history().push(std::make_unique<SetSelectionCommand>(target));
-        }
-    });
+    selMenu->addAction(QStringLiteral("Deselect"), QKeySequence(QStringLiteral("Ctrl+D")), this,
+                       [this]() {
+                           if (doc_) {
+                               Selection target;
+                               target.selectNone();
+                               doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+                           }
+                       });
     selMenu->addSeparator();
-    selMenu->addAction(QStringLiteral("Invert Selection"), this, [this]() {
-        if (doc_) {
-            Selection target = doc_->selection();
-            target.invert(doc_->canvasBounds());
-            doc_->history().push(std::make_unique<SetSelectionCommand>(target));
-        }
-    });
+    selMenu->addAction(QStringLiteral("Invert Selection"),
+                       QKeySequence(QStringLiteral("Ctrl+Shift+I")), this, [this]() {
+                           if (doc_) {
+                               Selection target = doc_->selection();
+                               target.invert(doc_->canvasBounds());
+                               doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+                           }
+                       });
     selMenu->addSeparator();
     // Edge refinements. Each prompts for an amount, applies it to a copy of the active selection,
     // and pushes the result as one undo step — but only when it actually changed the selection, so
@@ -879,11 +894,13 @@ void MainWindow::chooseBackgroundColor() {
 }
 
 void MainWindow::newDocument() {
+    if (!confirmDiscard()) return;
     setDocument(pe::Document::createBlank(pe::Size{800, 600}), QString());
     statusBar()->showMessage(QStringLiteral("New 800x600 document"), 3000);
 }
 
 void MainWindow::openDocument() {
+    if (!confirmDiscard()) return;
     const QString path =
         QFileDialog::getOpenFileName(this, QStringLiteral("Open Image"), QString(), kOpenFilter);
     if (path.isEmpty()) return;
@@ -1376,7 +1393,9 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     if (layers_ != nullptr) layers_->setDocument(nullptr);
     if (history_ != nullptr) history_->setDocument(nullptr);
     if (properties_ != nullptr) properties_->setDocument(nullptr);
+    if (doc_ != nullptr) doc_->removeObserver(this);
     doc_ = std::move(doc);
+    if (doc_ != nullptr) doc_->addObserver(this);
     currentPath_ = std::move(path);
     canvas_->setDocument(doc_.get());
     if (layers_ != nullptr) layers_->setDocument(doc_.get());
@@ -1386,11 +1405,53 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     refreshDocTab();
 }
 
+bool MainWindow::confirmDiscard() {
+    // Nothing to lose: no document, or every change is already on disk.
+    if (doc_ == nullptr || !doc_->isDirty()) return true;
+
+    const QString name =
+        currentPath_.isEmpty() ? QStringLiteral("Untitled") : QFileInfo(currentPath_).fileName();
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(QStringLiteral("Unsaved changes"));
+    box.setText(QStringLiteral("Save changes to \"%1\" before closing?").arg(name));
+    box.setInformativeText(QStringLiteral("If you don't save, your changes will be lost."));
+    box.setStandardButtons(QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Save);
+
+    switch (box.exec()) {
+        case QMessageBox::Save:
+            // Only proceed if the write actually succeeded; a failed or cancelled
+            // Save As must not fall through to discarding the document.
+            return saveDocument();
+        case QMessageBox::Discard:
+            return true;
+        default:
+            return false;  // Cancel, or the dialog was closed
+    }
+}
+
+void MainWindow::closeEvent(QCloseEvent* e) {
+    if (confirmDiscard()) {
+        e->accept();
+    } else {
+        e->ignore();
+    }
+}
+
+void MainWindow::onDocumentChanged(const pe::Document& doc, const pe::DocumentChange& change) {
+    // Only the modified marker depends on this; the panels observe for their own data.
+    if (&doc != doc_.get()) return;
+    if (change.kind == pe::DocumentChange::Kind::DirtyState) refreshTitle();
+}
+
 void MainWindow::refreshTitle() {
     const QString name =
         currentPath_.isEmpty() ? QStringLiteral("Untitled") : QFileInfo(currentPath_).fileName();
+    // Leading marker for unsaved changes, matching the platform convention.
+    const QString shown = (doc_ != nullptr && doc_->isDirty()) ? QStringLiteral("*") + name : name;
     setWindowTitle(QStringLiteral("%1 — PhotoEdit %2")
-                       .arg(doc_ ? name : QStringLiteral("(no document)"))
+                       .arg(doc_ ? shown : QStringLiteral("(no document)"))
                        .arg(pe::Version::string()));
 }
 

@@ -65,6 +65,7 @@ if(PHOTOEDIT_BUILD_APP)
         app/app_test_main.cpp
         app/test_theme.cpp
         app/test_mainwindow.cpp
+        app/test_document_guard.cpp
     )
 
     target_link_libraries(pe_app_tests PRIVATE PhotoEdit::App)

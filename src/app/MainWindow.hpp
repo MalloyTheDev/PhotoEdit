@@ -2,7 +2,8 @@
 
 #include "Theme.hpp"
 
-#include "pe/core/Layer.hpp"  // pe::LayerId
+#include "pe/core/Document.hpp"  // pe::DocumentObserver (base class)
+#include "pe/core/Layer.hpp"     // pe::LayerId
 
 #include <QMainWindow>
 #include <QString>
@@ -10,6 +11,7 @@
 #include <memory>
 
 class QAction;
+class QCloseEvent;
 class QLabel;
 class QMenu;
 class QPointF;
@@ -17,10 +19,6 @@ class QSpinBox;
 class QToolBar;
 class QToolButton;
 class QWidget;
-
-namespace pe {
-class Document;
-}
 
 namespace pe::app {
 
@@ -34,14 +32,28 @@ class PropertiesPanel;
 // shows the active document on a CanvasView. Color, Properties, Layers and History are
 // real panels; Swatches, Gradients, Patterns, Adjustments, Libraries, Channels and
 // Paths are still placeholders. See docs/systems/24-ui-workspace.md.
-class MainWindow : public QMainWindow {
+class MainWindow : public QMainWindow, public pe::DocumentObserver {
     Q_OBJECT
 
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
+protected:
+    // Guards the window close against unsaved work. File > Exit routes through
+    // close() so this runs for both paths.
+    void closeEvent(QCloseEvent* e) override;
+
+    // The title carries the modified marker, so it has to track the dirty bit rather
+    // than only being refreshed when the document is swapped.
+    void onDocumentChanged(const pe::Document& doc, const pe::DocumentChange& change) override;
+
 private:
+    // Offers Save / Discard / Cancel when the current document has unsaved changes.
+    // Returns false only if the user cancels, in which case the caller must abort.
+    // True when there is nothing to lose, when the user saved, or when they discarded.
+    [[nodiscard]] bool confirmDiscard();
+
     void buildMenuBar();
     void buildToolBar();
     void buildOptionsBar();
