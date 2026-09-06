@@ -76,9 +76,11 @@ bool PaintToolController::cloneOffset(int& offX, int& offY) const {
 }
 
 std::unique_ptr<LiveStroke> PaintToolController::createLive(Document& doc) {
-    // Stabilization smooths the whole path, which the incremental stamper doesn't model — fall back
-    // to the batched rebuild when it is on.
-    if (brush_.stabilize > 0.0f) return nullptr;
+    // Stabilization used to force the batched rebuild here, on the grounds that it smooths
+    // the whole path. It does not: the smoother is a one-sided exponential filter, so
+    // sample i depends only on samples 0..i and the incremental stamper reproduces it by
+    // carrying one running position. Falling back cost five tools their incremental path
+    // for a setting exposed as a plain spin box.
     switch (mode_) {
         case Mode::Brush:
             return beginPaintStroke(doc, layer_, brush_, color_, selection_);

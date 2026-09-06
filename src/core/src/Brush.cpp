@@ -401,6 +401,9 @@ public:
         const float d = std::isfinite(brush.diameter) ? brush.diameter : 20.0f;
         diameter_ = std::clamp(d, 0.1f, kMaxBrushDiameter);
         step_ = std::max(1.0f, std::max(0.01f, brush.spacing) * diameter_);
+        // Same clamp buildCoverage applies: at exactly 1.0 every smoothed sample would
+        // collapse onto the first point.
+        stabAlpha_ = brush.stabilize > 0.0f ? std::min(brush.stabilize, 0.95f) : 0.0f;
     }
 
     Rect extend(std::span<const StrokePoint> points) override {
@@ -450,16 +453,28 @@ private:
             const float diam = pressureSize_ ? diameter_ * clamp01(pressure) : diameter_;
             stampDab(cov_, p, std::max(0.5f, diam * 0.5f), hardness_, flow_, &touched);
         };
+        // Stabilization is an exponential smoother over the path. It is CAUSAL: the
+        // smoothed sample i depends only on samples 0..i through the running `last`, so
+        // carrying that one value across extend() calls reproduces buildCoverage's
+        // stabPoints exactly, sample for sample. Each point is consumed once, in order,
+        // which is the only precondition the recurrence has.
+        const auto smooth = [this](Vec2 raw) {
+            if (!(stabAlpha_ > 0.0f)) return raw;  // also leaves non-finite input untouched
+            stabLast_.x = stabLast_.x * stabAlpha_ + raw.x * (1.0f - stabAlpha_);
+            stabLast_.y = stabLast_.y * stabAlpha_ + raw.y * (1.0f - stabAlpha_);
+            return stabLast_;
+        };
         std::size_t i = consumed_;
         if (!started_ && i < points.size()) {
-            dab(points[0].pos, points[0].pressure);
-            prevPos_ = points[0].pos;
+            stabLast_ = points[0].pos;  // buildCoverage seeds `last` with the first raw point
+            dab(smooth(points[0].pos), points[0].pressure);
+            prevPos_ = stabLast_;
             prevPressure_ = points[0].pressure;
             started_ = true;
             i = 1;
         }
         for (; i < points.size(); ++i) {
-            const Vec2 bpos = points[i].pos;
+            const Vec2 bpos = smooth(points[i].pos);
             const float bpr = points[i].pressure;
             const float dx = bpos.x - prevPos_.x;
             const float dy = bpos.y - prevPos_.y;
@@ -589,6 +604,8 @@ private:
     float prevPressure_ = 1.0f;
     float distSinceLast_ = 0.0f;
     int64_t dabCount_ = 0;
+    float stabAlpha_ = 0.0f;  // 0 disables smoothing; see stampNew
+    Vec2 stabLast_{};         // running smoothed position, carried across extend() calls
 };
 
 }  // namespace

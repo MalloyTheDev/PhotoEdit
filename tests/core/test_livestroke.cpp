@@ -533,3 +533,68 @@ PE_TEST(livestroke_paint_u16_matches_batched_native) {
         },
         sampleU16, b, /*chunk=*/3);
 }
+
+PE_TEST(livestroke_stabilized_paint_matches_batched) {
+    // Stabilization used to force the whole stroke onto the batched rebuild, on the
+    // stated grounds that it "smooths the whole path". It does not: the smoother is a
+    // one-sided exponential filter seeded from the first point, so smoothed sample i
+    // depends only on samples 0..i. The live stamper carries one running position and
+    // must therefore land on exactly the same dab sequence.
+    //
+    // Fed one point at a time, which is the case that would expose any dependence on
+    // seeing the whole path at once.
+    for (const float amount : {0.25f, 0.5f, 0.95f, 1.0f}) {
+        BrushSettings b = brush(14);
+        b.stabilize = amount;
+        checkParity(
+            "stabilized-paint",
+            [](Document& d, LayerId l, const BrushSettings& s, std::span<const StrokePoint> p,
+               const Selection* sel) {
+                return paintStroke(d, l, s, Rgbaf{0.9f, 0.1f, 0.2f, 1.0f}, p, sel);
+            },
+            [](Document& d, LayerId l, const BrushSettings& s, const Selection* sel) {
+                return beginPaintStroke(d, l, s, Rgbaf{0.9f, 0.1f, 0.2f, 1.0f}, sel);
+            },
+            b, nullptr, /*chunk=*/1);
+    }
+}
+
+PE_TEST(livestroke_stabilized_paint_matches_batched_in_chunks) {
+    // The same, fed in uneven batches: the running position has to survive being carried
+    // across extend() calls, not merely across points within one call.
+    BrushSettings b = brush(14);
+    b.stabilize = 0.6f;
+    for (const int chunk : {2, 3, 5}) {
+        checkParity(
+            "stabilized-paint-chunked",
+            [](Document& d, LayerId l, const BrushSettings& s, std::span<const StrokePoint> p,
+               const Selection* sel) {
+                return paintStroke(d, l, s, Rgbaf{0.9f, 0.1f, 0.2f, 1.0f}, p, sel);
+            },
+            [](Document& d, LayerId l, const BrushSettings& s, const Selection* sel) {
+                return beginPaintStroke(d, l, s, Rgbaf{0.9f, 0.1f, 0.2f, 1.0f}, sel);
+            },
+            b, nullptr, chunk);
+    }
+}
+
+PE_TEST(livestroke_stabilization_actually_changes_the_stroke) {
+    // Guard against a vacuous parity pass: if stabilize were silently ignored on BOTH
+    // paths the tests above would still be green. A smoothed stroke must differ from an
+    // unsmoothed one.
+    LayerId la = kNoLayer;
+    auto plain = gradientDoc(la);
+    auto cmdA = paintStroke(*plain, la, brush(14), Rgbaf{0.9f, 0.1f, 0.2f, 1.0f}, path(), nullptr);
+    PE_CHECK(cmdA != nullptr);
+    cmdA->execute(*plain);
+
+    BrushSettings b = brush(14);
+    b.stabilize = 0.9f;
+    LayerId lb = kNoLayer;
+    auto smoothed = gradientDoc(lb);
+    auto cmdB = paintStroke(*smoothed, lb, b, Rgbaf{0.9f, 0.1f, 0.2f, 1.0f}, path(), nullptr);
+    PE_CHECK(cmdB != nullptr);
+    cmdB->execute(*smoothed);
+
+    PE_CHECK(composite(*plain) != composite(*smoothed));
+}
