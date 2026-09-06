@@ -79,6 +79,12 @@ public:
     // everything the stroke touched.
     [[nodiscard]] Rect lastExtendBounds() const noexcept { return lastDirty_; }
 
+    // True once a stroke has grown past the bake budget of the engine behind the current
+    // mode (heal 2M px, blur/sharpen and mask paint 16M) and stopped accepting samples.
+    // What was painted up to that point still commits. A view can surface this so a
+    // stroke that stops following the cursor is explained rather than looking broken.
+    [[nodiscard]] bool strokeAtBudget() const noexcept { return batchedFrozen_; }
+
     // --- interactive stroke lifecycle (document-space, sub-pixel) ---
     // Begin a stroke on the document's active layer, gated by `selection` if it is
     // non-null and active. Returns false (and starts nothing) when already stroking
@@ -134,6 +140,10 @@ private:
         live_;            // incremental stroke (per-pixel ops); null on the batched path
     Rect strokeDirty_{};  // cumulative dirty bounds of the live preview (see accessor)
     Rect lastDirty_{};    // dirty bounds of the most recent sample only (see accessor)
+    // A batched stroke that outgrew its engine's per-operation budget: the preview is
+    // held at its last representable state and further samples are ignored, so the
+    // stroke still commits what it managed to paint. See strokeAtBudget().
+    bool batchedFrozen_ = false;
 };
 
 }  // namespace pe

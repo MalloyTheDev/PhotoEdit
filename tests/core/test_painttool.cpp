@@ -423,3 +423,45 @@ PE_TEST(painttool_cumulative_dirty_still_covers_the_whole_stroke) {
 
     tool.cancel(*doc);
 }
+
+PE_TEST(painttool_stroke_past_the_engine_budget_still_commits_what_it_painted) {
+    // The batched modes rebuild the whole stroke every sample, and each of their bake
+    // engines refuses outright once the stroke's bounding box passes a budget (heal
+    // 2M px, blur/sharpen and mask paint 16M). extend() had already reverted the last
+    // good preview before asking for the new one, so crossing that line threw the
+    // preview away and end() committed nothing: the entire stroke vanished on release.
+    // Freezing at the last representable state loses the tail; losing everything the
+    // user just drew is not a recoverable outcome.
+    auto doc = Document::createBlank(Size{1600, 1600});
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(Rect{0, 0, 1600, 1600}, Rgba8{120, 120, 120, 255});
+    pl->tiles().fillRect(Rect{90, 90, 24, 24}, Rgba8{255, 0, 0, 255});  // a blemish to heal
+
+    PaintToolController tool;
+    tool.setMode(PaintToolController::Mode::Heal);
+    tool.setBrush(hardBrush(24.0f));
+
+    PE_CHECK(tool.begin(*doc, StrokePoint{Vec2{100.0f, 100.0f}, 1.0f}, nullptr));
+    PE_CHECK(tool.strokeDirtyBounds().width > 0);  // the first dab previewed
+    PE_CHECK(!tool.strokeAtBudget());
+
+    // A long jump that still fits: the inflated heal region is about 1020 px square.
+    tool.extend(*doc, StrokePoint{Vec2{1000.0f, 1000.0f}, 1.0f});
+    PE_CHECK(!tool.strokeAtBudget());
+    const Rect afterFirst = tool.strokeDirtyBounds();
+    PE_CHECK(afterFirst.width > 0);
+
+    // And one that does not: about 1520 px square, past the 2M budget.
+    tool.extend(*doc, StrokePoint{Vec2{1550.0f, 1550.0f}, 1.0f});
+    PE_CHECK(tool.strokeAtBudget());  // frozen rather than blanked
+
+    // The stroke that was already on screen survives the refusal.
+    PE_CHECK(tool.strokeDirtyBounds().width >= afterFirst.width);
+    PE_CHECK(tool.end(*doc));  // committed, not silently dropped
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+
+    // And it is a real edit: the blemish was healed toward its surroundings.
+    PE_CHECK(pl->tiles().pixel(100, 100).r < 255);
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(100, 100), (Rgba8{255, 0, 0, 255}));  // undo restores it
+}

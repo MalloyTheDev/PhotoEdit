@@ -108,6 +108,7 @@ bool PaintToolController::liveTargetValid(Document& doc) const {
 
 void PaintToolController::resetStroke() noexcept {
     stroking_ = false;
+    batchedFrozen_ = false;
     points_.clear();
     layer_ = kNoLayer;
     selection_ = nullptr;
@@ -153,6 +154,7 @@ bool PaintToolController::begin(Document& doc, StrokePoint p, const Selection* s
     // The per-pixel ops use the incremental LiveStroke (linear over the stroke); everything else
     // (region-bake brushes, mask paint, stabilized strokes) keeps the batched rebuild path.
     lastDirty_ = Rect{};
+    batchedFrozen_ = false;
     live_ = createLive(doc);
     if (live_) {
         lastDirty_ = live_->extend(points_);
@@ -179,6 +181,10 @@ void PaintToolController::extend(Document& doc, StrokePoint p) {
         resetStroke();
         return;
     }
+    // Once the batched path has hit its engine's budget the stroke is frozen: further
+    // samples cannot be represented, so accepting them would only grow points_ and pay
+    // for rebuilds that are guaranteed to refuse.
+    if (batchedFrozen_) return;
     points_.push_back(p);
     if (live_) {
         // Incremental: stamp only the new dabs and recomposite just the tiles they touched.
@@ -186,9 +192,23 @@ void PaintToolController::extend(Document& doc, StrokePoint p) {
         strokeDirty_ = strokeDirty_.united(lastDirty_);
     } else {
         // Batched: revert the prior preview so the rebuild sees the original tiles, then recompute
-        // the whole stroke (the region-bake/mask engines resample from scratch).
-        clearPreview(doc);
+        // the whole stroke (the region-bake/mask engines resample from scratch). Hold on to the
+        // reverted command rather than dropping it, so a rebuild that refuses can put it back.
+        std::unique_ptr<Command> lastGood = std::move(preview_);
+        if (lastGood) lastGood->undo(doc);
         rebuildPreview(doc);
+        if (preview_ == nullptr && lastGood != nullptr) {
+            // The stroke outgrew this engine's per-operation budget (heal 2M px,
+            // blur/sharpen and mask paint 16M), so the bake refused. A previous rebuild
+            // had produced a command, and coverage only ever accumulates, so this cannot
+            // mean "nothing to do": it means the engine said no. Put the last
+            // representable preview back and freeze there. Leaving the layer bare made
+            // the preview vanish mid-drag and end() commit nothing, losing the whole
+            // stroke on release.
+            lastGood->execute(doc);
+            preview_ = std::move(lastGood);
+            batchedFrozen_ = true;
+        }
         // These engines resample the whole stroke on every sample, so everything under
         // it is genuinely dirty and there is no smaller delta to report. Making them
         // incremental is the paint-side counterpart, tracked separately.

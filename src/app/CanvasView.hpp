@@ -151,6 +151,9 @@ private:
     // that cannot start used to do nothing and say nothing, which is the same thing a
     // broken brush looks like.
     [[nodiscard]] QString paintUnavailableMessage() const;
+    // Why a stroke stopped following the cursor: it outgrew the bake budget of the engine
+    // behind the active tool and was frozen at its last representable state.
+    [[nodiscard]] QString strokeAtBudgetMessage() const;
     // Clone-tool press handling shared by the mouse and tablet paths. Alt-click sets the source
     // anchor (`docPt` in document space); a click with no source set shows a hint. Returns true if
     // the press was consumed (no stroke should begin), false to begin a clone stroke.

@@ -161,6 +161,28 @@ QString CanvasView::paintUnavailableMessage() const {
     return QStringLiteral("Cannot paint on this layer.");
 }
 
+QString CanvasView::strokeAtBudgetMessage() const {
+    // Names the tool, because the budget differs per engine and the user's next move is
+    // to shorten the stroke for that specific tool.
+    switch (tool_.mode()) {
+        case pe::PaintToolController::Mode::Heal:
+            return QStringLiteral(
+                "Healing stopped: that stroke covers too large an area. "
+                "Release and heal in shorter strokes.");
+        case pe::PaintToolController::Mode::Blur:
+        case pe::PaintToolController::Mode::Sharpen:
+            return QStringLiteral(
+                "Stroke stopped: it covers too large an area. "
+                "Release and work in shorter strokes.");
+        case pe::PaintToolController::Mode::MaskPaint:
+            return QStringLiteral(
+                "Mask stroke stopped: it covers too large an area. "
+                "Release and paint in shorter strokes.");
+        default:
+            return QStringLiteral("Stroke stopped: it covers too large an area.");
+    }
+}
+
 bool CanvasView::handleClonePress(const pe::PointD& docPt, bool altHeld) {
     if (altHeld) {
         // Alt-click sets the clone source anchor (no stroke); the next drag clones from it.
@@ -681,8 +703,10 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
         case QEvent::TabletRelease:
             if (tool_.isStroking()) {
                 const pe::Rect dirty = tool_.strokeDirtyBounds();  // capture before end() clears it
+                const bool atBudget = tool_.strokeAtBudget();
                 tool_.end(*doc_);
                 if (renderer_ != nullptr) renderer_->invalidate(dirty);  // covers no-deposit too
+                if (atBudget) emit toolMessage(strokeAtBudgetMessage());
                 update();
             }
             break;
@@ -1052,8 +1076,11 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
         return;
     }
     const pe::Rect dirty = tool_.strokeDirtyBounds();  // capture before end() clears it
+    const bool atBudget = tool_.strokeAtBudget();      // end() resets it
     tool_.end(*doc_);  // commits one undoable command; the renderer-observer marks it dirty
     if (renderer_ != nullptr) renderer_->invalidate(dirty);  // also covers a no-deposit stroke
+    // A stroke that stopped following the cursor needs to say why, or it reads as a freeze.
+    if (atBudget) emit toolMessage(strokeAtBudgetMessage());
     update();
 }
 
