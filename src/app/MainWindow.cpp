@@ -78,6 +78,9 @@ struct ToolDef {
     const char* label;
     CanvasView::Tool tool;
     const char* shortcut;
+    // One line naming the gesture, shown in the status bar beside the tool name.
+    // Empty for scaffolded tools, whose label already says they do nothing yet.
+    const char* hint;
 };
 }  // namespace
 
@@ -560,6 +563,12 @@ void MainWindow::populateWindowMenu() {
     }
 }
 
+void MainWindow::clearCursorPos() {
+    // Placeholder rather than an empty string so the readout does not change width
+    // as the pointer crosses the canvas edge.
+    if (posLabel_ != nullptr) posLabel_->setText(QStringLiteral("X -  Y -"));
+}
+
 void MainWindow::showAbout() {
     QMessageBox::about(
         this, QStringLiteral("About PhotoEdit"),
@@ -571,6 +580,7 @@ void MainWindow::showAbout() {
 
 void MainWindow::buildToolBar() {
     auto* tb = new QToolBar(QStringLiteral("Tools"), this);
+    tb->setObjectName(QStringLiteral("ToolStrip"));
     tb->setMovable(false);
     tb->setFloatable(false);
     tb->setIconSize(QSize(22, 22));
@@ -581,26 +591,35 @@ void MainWindow::buildToolBar() {
     // Brush/Eraser/Hand/Zoom/Marquee/Eyedropper/Move wired; others scaffolded.
     using Tool = CanvasView::Tool;
     const std::vector<std::vector<ToolDef>> groups = {
-        {{"move", "Move", Tool::Move, "V"},
-         {"marquee", "Rectangular Marquee", Tool::Marquee, "M"},
-         {"lasso", "Lasso", Tool::Lasso, "L"},
-         {"wand-sparkles", "Magic Wand", Tool::Wand, "W"}},
-        {{"crop", "Crop", Tool::Crop, "C"},
-         {"frame", "Frame", Tool::Inactive, "K"},
-         {"pipette", "Eyedropper", Tool::Eyedropper, "I"}},
-        {{"bandage", "Spot Healing Brush", Tool::Heal, "J"},
-         {"paintbrush", "Brush", Tool::Brush, "B"},
-         {"stamp", "Clone Stamp", Tool::Clone, "S"},
-         {"history", "History Brush", Tool::Inactive, "Y"},
-         {"eraser", "Eraser", Tool::Eraser, "E"},
-         {"blend", "Gradient", Tool::Gradient, "G"},
-         {"paint-bucket", "Paint Bucket", Tool::Bucket, ""}},
-        {{"droplet", "Blur", Tool::Blur, ""}, {"sun", "Dodge", Tool::Dodge, "O"}},
-        {{"pen-tool", "Pen", Tool::Inactive, "P"},
-         {"type", "Type", Tool::Type, "T"},
-         {"mouse-pointer-2", "Path Selection", Tool::Inactive, "A"},
-         {"shapes", "Shape", Tool::Inactive, "U"}},
-        {{"hand", "Hand", Tool::Hand, "H"}, {"zoom-in", "Zoom", Tool::Zoom, "Z"}},
+        {{"move", "Move", Tool::Move, "V", "Drag to move the active layer"},
+         {"marquee", "Rectangular Marquee", Tool::Marquee, "M",
+          "Drag to select a rectangle. Shift adds, Alt subtracts"},
+         {"lasso", "Lasso", Tool::Lasso, "L", "Drag to draw a freehand selection"},
+         {"wand-sparkles", "Magic Wand", Tool::Wand, "W",
+          "Click to select a similarly colored region"}},
+        {{"crop", "Crop", Tool::Crop, "C", "Drag to set the crop, then release to apply"},
+         {"frame", "Frame", Tool::Inactive, "K", ""},
+         {"pipette", "Eyedropper", Tool::Eyedropper, "I",
+          "Click to pick up a color from the canvas"}},
+        {{"bandage", "Spot Healing Brush", Tool::Heal, "J",
+          "Drag over a blemish to blend it into its surroundings"},
+         {"paintbrush", "Brush", Tool::Brush, "B", "Drag to paint with the foreground color"},
+         {"stamp", "Clone Stamp", Tool::Clone, "S",
+          "Alt-click to set a source, then drag to clone"},
+         {"history", "History Brush", Tool::Inactive, "Y", ""},
+         {"eraser", "Eraser", Tool::Eraser, "E", "Drag to erase to transparency"},
+         {"blend", "Gradient", Tool::Gradient, "G",
+          "Drag to draw a gradient from the foreground to the background color"},
+         {"paint-bucket", "Paint Bucket", Tool::Bucket, "",
+          "Click to fill a similarly colored region"}},
+        {{"droplet", "Blur", Tool::Blur, "", "Drag to soften detail. Hold Alt to sharpen"},
+         {"sun", "Dodge", Tool::Dodge, "O", "Drag to lighten. Hold Alt to burn"}},
+        {{"pen-tool", "Pen", Tool::Inactive, "P", ""},
+         {"type", "Type", Tool::Type, "T", "Click on the canvas to place text"},
+         {"mouse-pointer-2", "Path Selection", Tool::Inactive, "A", ""},
+         {"shapes", "Shape", Tool::Inactive, "U", ""}},
+        {{"hand", "Hand", Tool::Hand, "H", "Drag to pan the view"},
+         {"zoom-in", "Zoom", Tool::Zoom, "Z", "Click to zoom in. Alt-click to zoom out"}},
     };
 
     auto* toolGroup = new QActionGroup(this);
@@ -615,14 +634,13 @@ void MainWindow::buildToolBar() {
             a->setActionGroup(toolGroup);
             const bool wired = def.tool != Tool::Inactive;
             const QString shortcut = QString::fromUtf8(def.shortcut);
+            // The hint is the single source for "what does this tool do"; it feeds both
+            // the tooltip here and the status bar on selection, so the two cannot drift.
+            const QString hint = QString::fromUtf8(def.hint);
             QString tip = QString::fromUtf8(def.label);
             if (!shortcut.isEmpty()) tip += QStringLiteral("  (%1)").arg(shortcut);
-            if (def.tool == Tool::Dodge) tip += QStringLiteral("  —  hold Alt to Burn (darken)");
-            if (def.tool == Tool::Blur) tip += QStringLiteral("  —  hold Alt to Sharpen");
-            if (def.tool == Tool::Clone) tip += QStringLiteral("  —  Alt-click to set the source");
-            if (def.tool == Tool::Heal)
-                tip += QStringLiteral("  —  drag over a blemish to blend it into its surroundings");
-            if (!wired) tip += QStringLiteral("  — coming soon");
+            if (!hint.isEmpty()) tip += QStringLiteral("\n%1").arg(hint);
+            if (!wired) tip += QStringLiteral("\nNot yet implemented");
             a->setToolTip(tip);
             if (!shortcut.isEmpty()) a->setShortcut(QKeySequence(shortcut));
             const Tool tool = def.tool;
@@ -634,10 +652,14 @@ void MainWindow::buildToolBar() {
             } else if (def.tool == Tool::Wand) {
                 kind = OptKind::Wand;  // tolerance drives the magic-wand flood
             }
-            connect(a, &QAction::triggered, this, [this, tool, label, wired, kind] {
+            connect(a, &QAction::triggered, this, [this, tool, label, wired, kind, hint] {
                 canvas_->setTool(tool);
-                toolLabel_->setText(wired ? label
-                                          : QStringLiteral("%1 — not yet implemented").arg(label));
+                toolLabel_->setText(label);
+                // The hint answers "what do I do with this", which the bare tool name
+                // never did. Scaffolded tools say so here instead of in the name.
+                if (toolHintLabel_ != nullptr) {
+                    toolHintLabel_->setText(wired ? hint : QStringLiteral("Not yet implemented"));
+                }
                 updateOptionsBar(kind, label);
             });
             if (def.tool == Tool::Brush) brushAction = a;
@@ -1460,9 +1482,27 @@ void MainWindow::buildDockPanels() {
 
 void MainWindow::buildStatusBar() {
     toolLabel_ = new QLabel(QStringLiteral("Brush"), this);
+    toolLabel_->setObjectName(QStringLiteral("StatusToolName"));
+    toolHintLabel_ = new QLabel(QStringLiteral("Drag to paint with the foreground color"), this);
+    toolHintLabel_->setObjectName(QStringLiteral("StatusToolHint"));
+    posLabel_ = new QLabel(this);
+    posLabel_->setObjectName(QStringLiteral("StatusCursorPos"));
     zoomLabel_ = new QLabel(QStringLiteral("—"), this);
+
     statusBar()->addWidget(toolLabel_);
+    statusBar()->addWidget(toolHintLabel_, 1);  // takes the slack so the readouts stay right
+    statusBar()->addPermanentWidget(posLabel_);
     statusBar()->addPermanentWidget(zoomLabel_);
+    clearCursorPos();
+
+    // Live cursor position in document pixels, which is what a user measuring or
+    // aligning actually needs; the widget position would be meaningless at zoom.
+    connect(canvas_, &CanvasView::cursorMoved, this, [this](const QPointF& docPos) {
+        posLabel_->setText(QStringLiteral("X %1  Y %2")
+                               .arg(static_cast<int>(std::floor(docPos.x())))
+                               .arg(static_cast<int>(std::floor(docPos.y()))));
+    });
+    connect(canvas_, &CanvasView::cursorLeft, this, &MainWindow::clearCursorPos);
     connect(canvas_, &CanvasView::zoomChanged, this, [this](double pct) {
         zoomLabel_->setText(QStringLiteral("%1%").arg(pct, 0, 'f', 0));
         refreshDocTab();

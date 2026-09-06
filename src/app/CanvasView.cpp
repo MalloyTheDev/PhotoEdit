@@ -53,6 +53,10 @@ constexpr double kZoomStep = 1.25;  // per Zoom In/Out and per wheel notch
 CanvasView::CanvasView(QWidget* parent) : QWidget(parent), checker_(makeCheckerBrush()) {
     setMinimumSize(320, 240);
     setFocusPolicy(Qt::StrongFocus);  // so Free Transform receives Enter (commit) / Esc (cancel)
+    // Report the pointer position even with no button held, for the status-bar readout.
+    // Every branch of mouseMoveEvent is gated on a drag flag, so button-less moves fall
+    // through to the base class and do no work.
+    setMouseTracking(true);
     // A visible default: an opaque black, medium round tip.
     pe::BrushSettings b = tool_.brush();
     b.diameter = 24.0f;
@@ -829,7 +833,17 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
     }
 }
 
+void CanvasView::leaveEvent(QEvent* e) {
+    emit cursorLeft();
+    QWidget::leaveEvent(e);
+}
+
 void CanvasView::mouseMoveEvent(QMouseEvent* e) {
+    // Before the drag dispatch below, so the readout keeps up during a stroke too.
+    if (doc_ != nullptr) {
+        const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+        emit cursorMoved(QPointF(d.x, d.y));
+    }
     if (panning_) {
         const QPointF p = e->position();
         view_.panByView(p.x() - lastPanPos_.x(), p.y() - lastPanPos_.y());

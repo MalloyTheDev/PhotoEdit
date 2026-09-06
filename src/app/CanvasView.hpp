@@ -100,6 +100,11 @@ signals:
     void toolMessage(
         const QString& msg);  // transient status-bar feedback (e.g. a fill that no-ops)
     void textRequested(const QPointF& docPos);  // Type tool clicked at this doc-space point
+    // Live pointer position in DOCUMENT pixels, for the status-bar readout. Emitted on
+    // every move (mouse tracking is on), including mid-drag. Document space rather than
+    // widget space, because the widget position is meaningless at any zoom but 100%.
+    void cursorMoved(const QPointF& docPos);
+    void cursorLeft();  // pointer left the canvas; the readout should stop showing a stale point
     // Mask-edit was exited because a non-Brush tool became active (only the Brush paints masks).
     // MainWindow relays it so the Layers panel drops the focus ring; keeps the ring honest.
     void maskEditTargetCleared();
@@ -125,6 +130,7 @@ protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
+    void leaveEvent(QEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
     void wheelEvent(QWheelEvent*) override;
     void resizeEvent(QResizeEvent*) override;

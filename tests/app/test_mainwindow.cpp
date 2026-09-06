@@ -10,6 +10,7 @@
 
 #include <QAction>
 #include <QDockWidget>
+#include <QLabel>
 #include <QList>
 #include <QMenu>
 #include <QMenuBar>
@@ -143,6 +144,62 @@ PE_TEST(mainwindow_options_bar_buttons_announce_themselves) {
     }
     // Guard against the loop silently checking nothing if the buttons ever move.
     PE_CHECK(checked > 0);
+}
+
+PE_TEST(mainwindow_every_tool_says_what_it_does) {
+    // The status bar used to show the bare tool name, which answers "which tool" but
+    // never "what do I do with it". Every tool must now say something: wired tools a
+    // gesture hint, scaffolded ones that they are not implemented.
+    pe::app::MainWindow w;
+    QToolBar* strip = w.findChild<QToolBar*>(QStringLiteral("ToolStrip"));
+    QLabel* hint = w.findChild<QLabel*>(QStringLiteral("StatusToolHint"));
+    QLabel* name = w.findChild<QLabel*>(QStringLiteral("StatusToolName"));
+    PE_CHECK(strip != nullptr);
+    PE_CHECK(hint != nullptr);
+    PE_CHECK(name != nullptr);
+    if (strip == nullptr || hint == nullptr || name == nullptr) return;
+
+    int tools = 0;
+    for (QAction* a : strip->actions()) {
+        if (a->isSeparator() || !a->isCheckable()) continue;
+        ++tools;
+        a->trigger();
+        if (hint->text().isEmpty()) {
+            std::printf("    tool with no status hint: %s\n",
+                        plain(a->text()).toLocal8Bit().constData());
+            PE_CHECK(false);
+        }
+        // The name column stays the plain tool name; the hint carries the rest.
+        PE_CHECK_EQ(name->text(), plain(a->text()));
+    }
+    // The strip is expected to carry the full tool set, so a collapse to a couple of
+    // entries should fail rather than pass vacuously.
+    PE_CHECK(tools >= 20);
+}
+
+PE_TEST(mainwindow_tool_tooltips_carry_the_same_hint) {
+    // Tooltip and status bar are generated from one hint field, so they cannot drift.
+    pe::app::MainWindow w;
+    QToolBar* strip = w.findChild<QToolBar*>(QStringLiteral("ToolStrip"));
+    QLabel* hint = w.findChild<QLabel*>(QStringLiteral("StatusToolHint"));
+    PE_CHECK(strip != nullptr && hint != nullptr);
+    if (strip == nullptr || hint == nullptr) return;
+
+    for (QAction* a : strip->actions()) {
+        if (a->isSeparator() || !a->isCheckable()) continue;
+        a->trigger();
+        PE_CHECK(a->toolTip().contains(hint->text()));
+    }
+}
+
+PE_TEST(mainwindow_status_bar_has_a_cursor_readout) {
+    pe::app::MainWindow w;
+    QLabel* pos = w.findChild<QLabel*>(QStringLiteral("StatusCursorPos"));
+    PE_CHECK(pos != nullptr);
+    if (pos == nullptr) return;
+    // Off-canvas placeholder, so the readout never shows a stale coordinate.
+    PE_CHECK(!pos->text().isEmpty());
+    PE_CHECK(!pos->text().contains(QLatin1Char('0')));
 }
 
 PE_TEST(mainwindow_help_menu_offers_about) {

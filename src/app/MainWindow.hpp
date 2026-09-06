@@ -53,6 +53,7 @@ private:
     // since the toggles come from the docks themselves.
     void populateWindowMenu();
     void showAbout();
+    void clearCursorPos();  // blanks the position readout when the cursor is off-canvas
 
     // Which contextual control group the options bar shows for the active tool.
     enum class OptKind { None, Brush, Wand };
@@ -89,8 +90,10 @@ private:
     HistoryPanel* history_ = nullptr;
     ColorPanel* colorPanel_ = nullptr;
     PropertiesPanel* properties_ = nullptr;
-    QLabel* toolLabel_ = nullptr;  // status bar: active tool
-    QLabel* zoomLabel_ = nullptr;  // status bar: zoom percentage
+    QLabel* toolLabel_ = nullptr;      // status bar: active tool
+    QLabel* toolHintLabel_ = nullptr;  // status bar: what the active tool does
+    QLabel* posLabel_ = nullptr;       // status bar: cursor position in document pixels
+    QLabel* zoomLabel_ = nullptr;      // status bar: zoom percentage
 
     QMenu* windowMenu_ = nullptr;         // View-style panel toggles, filled after docks exist
     QToolBar* optionsBar_ = nullptr;      // contextual tool options (top)
