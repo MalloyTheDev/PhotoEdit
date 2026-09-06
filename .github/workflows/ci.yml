@@ -132,3 +132,44 @@ jobs:
         run: cmake --preset linux-core-dev
       - name: Run clang-tidy on the engine core
         run: clang-tidy -p build/linux-core-dev $(git ls-files 'src/core/src/*.cpp')
+
+  # ---------------------------------------------------------------------------
+  # Sanitizers over the Qt shell. The ASan/UBSan step in core-linux builds with
+  # PHOTOEDIT_BUILD_APP=OFF, so the engine has always been sanitized and src/app
+  # never was, despite being the layer with all the Qt ownership and observer
+  # lifetime coupling (MainWindow's destructor detaches four observers precisely to
+  # avoid a dangling removeObserver, a rule guarded only by a comment until now).
+  #
+  # This became possible when the shell became a library with its own test binary:
+  # pe_app_tests constructs a real MainWindow on the offscreen platform, so there
+  # is finally something to run under a sanitizer.
+  #
+  # detect_leaks is off: Qt is not built with ASan here and allocates one-time
+  # internals it never frees, so LeakSanitizer reports it rather than us. The
+  # use-after-free and UB checks, which are what this lane is actually for, stay on.
+  # ---------------------------------------------------------------------------
+  asan-app-linux:
+    name: Shell under ASan/UBSan (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt6 and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build qt6-base-dev libqt6svg6-dev
+      - name: Configure with sanitizers
+        run: >
+          cmake -B build/asan-app -S . -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DPHOTOEDIT_BUILD_APP=ON
+          -DPHOTOEDIT_BUILD_TESTS=ON
+          -DPHOTOEDIT_WERROR=OFF
+          "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer"
+      - name: Build
+        run: cmake --build build/asan-app
+      - name: Run the shell tests under the sanitizers
+        env:
+          QT_QPA_PLATFORM: offscreen
+          ASAN_OPTIONS: abort_on_error=1:detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build/asan-app -R pe_app_tests --output-on-failure

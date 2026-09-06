@@ -20,7 +20,7 @@ RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests la
 Test suite: **493 engine cases + 38 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
-app is built; they pin the theme contrast ratios, the stylesheet token
+app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
 substitution, the icon-resource linkage, the menu surface (no top-level menu may be
 empty; one Window toggle per dock), the keyboard-shortcut set including collision
 detection, and the unsaved-changes guard.
