@@ -119,6 +119,10 @@ jobs:
   # surfaces findings in the log. Non-blocking by design (continue-on-error) — the
   # config carries no WarningsAsErrors and the codebase has not been triaged to zero
   # findings, so this informs rather than gates. Promote to a gate after triage.
+  #
+  # Covers src/app as well as src/core. It could not before: the shell was a bare
+  # executable with no compile database of its own, and the engine-only preset does not
+  # configure Qt. ADR-0008 made it a library, so it can be built and analyzed here.
   # ---------------------------------------------------------------------------
   tidy-linux:
     name: clang-tidy (advisory)
@@ -126,12 +130,24 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - name: Install tools + libs (so codec/color headers resolve)
-        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-tidy pkg-config liblcms2-dev libpng-dev libturbojpeg0-dev zlib1g-dev libtiff-dev libwebp-dev
-      - name: Configure (exports compile_commands.json)
-        run: cmake --preset linux-core-dev
-      - name: Run clang-tidy on the engine core
-        run: clang-tidy -p build/linux-core-dev $(git ls-files 'src/core/src/*.cpp')
+      - name: Install tools + libs (so codec/color/Qt headers resolve)
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-tidy pkg-config liblcms2-dev libpng-dev libturbojpeg0-dev zlib1g-dev libtiff-dev libwebp-dev qt6-base-dev libqt6svg6-dev
+      # The app is built here purely so src/app has a compile database. The engine-only
+      # preset cannot analyze the shell: without Qt configured, every file in src/app
+      # fails at the first include rather than being analyzed.
+      - name: Configure with the app on (exports compile_commands.json)
+        run: >
+          cmake -B build/tidy -S . -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DPHOTOEDIT_BUILD_APP=ON
+          -DPHOTOEDIT_BUILD_TESTS=ON
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      # Generated sources (moc, qrc) must exist before analysis, or every file that
+      # includes a moc output is reported as a missing header rather than analyzed.
+      - name: Generate Qt sources
+        run: cmake --build build/tidy --target pe_app
+      - name: Run clang-tidy on the engine core and the shell
+        run: clang-tidy -p build/tidy $(git ls-files 'src/core/src/*.cpp' 'src/app/*.cpp')
 
   # ---------------------------------------------------------------------------
   # Sanitizers over the Qt shell. The ASan/UBSan step in core-linux builds with

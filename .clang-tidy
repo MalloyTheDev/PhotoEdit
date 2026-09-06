@@ -1,4 +1,8 @@
-# PhotoEdit clang-tidy config — advisory developer aid (run in CI, but not a hard gate).
+# PhotoEdit clang-tidy config: an advisory developer aid (run in CI, but not a hard gate).
+#
+# clang-analyzer-* is the path-sensitive analyzer. It is on because this codebase parses
+# untrusted image files, which is the case that family exists for. It found nothing on a
+# first sweep of src/app; that is the point of running it continuously rather than once.
 # Kept small and high-signal: no WarningsAsErrors, and no readability-identifier-naming
 # (the codebase uses the kCamelCase constant convention, which that check would flag
 # wholesale). The CI "clang-tidy (advisory)" lane runs this and surfaces findings; it does
@@ -10,6 +14,7 @@ Checks: >
   bugprone-*,
   performance-*,
   modernize-*,
+  clang-analyzer-*,
   -modernize-use-trailing-return-type,
   -modernize-avoid-c-arrays,
   -modernize-use-designated-initializers,
@@ -17,7 +22,7 @@ Checks: >
 
 WarningsAsErrors: ''
 
-HeaderFilterRegex: 'src/core/.*'
+HeaderFilterRegex: 'src/(core|app)/.*'
 
 CheckOptions:
   - key:   modernize-use-auto.IgnoreMacros
