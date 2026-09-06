@@ -384,3 +384,109 @@ PE_TEST(mainwindow_switching_theme_retints_the_tool_icons) {
 
     nocturne->trigger();  // leave the default active for the rest of the suite
 }
+
+// ---------------------------------------------------------------------------
+// Document-dependent actions. setEnabled appeared nowhere in MainWindow, so with
+// no document every menu item was live and clicking one did nothing at all:
+// refusal was indistinguishable from the feature being broken.
+// ---------------------------------------------------------------------------
+
+PE_TEST(mainwindow_document_menus_are_disabled_until_there_is_a_document) {
+    pe::app::MainWindow w;
+
+    const QStringList gated = {QStringLiteral("Image"), QStringLiteral("Layer"),
+                               QStringLiteral("Select"), QStringLiteral("Filter")};
+    for (const QString& name : gated) {
+        QMenu* m = topLevelMenu(w, name);
+        PE_CHECK(m != nullptr);
+        if (m == nullptr) continue;
+        if (m->isEnabled()) {
+            std::printf("    %s enabled with no document\n", name.toLocal8Bit().constData());
+            PE_CHECK(false);
+        }
+    }
+
+    // Menus that must stay usable: File to create or open, View and Window for the
+    // workspace, Help for About.
+    for (const QString& name : {QStringLiteral("File"), QStringLiteral("View"),
+                                QStringLiteral("Window"), QStringLiteral("Help")}) {
+        QMenu* m = topLevelMenu(w, name);
+        PE_CHECK(m != nullptr && m->isEnabled());
+    }
+
+    PE_CHECK(triggerFileAction(w, QStringLiteral("New")));
+    for (const QString& name : gated) {
+        QMenu* m = topLevelMenu(w, name);
+        PE_CHECK(m != nullptr && m->isEnabled());
+    }
+}
+
+PE_TEST(mainwindow_save_and_export_are_disabled_until_there_is_a_document) {
+    pe::app::MainWindow w;
+    QMenu* file = topLevelMenu(w, QStringLiteral("File"));
+    PE_CHECK(file != nullptr);
+    if (file == nullptr) return;
+
+    auto actionNamed = [file](const QString& label) -> QAction* {
+        for (QAction* a : file->actions()) {
+            if (plain(a->text()).compare(label, Qt::CaseInsensitive) == 0) return a;
+        }
+        return nullptr;
+    };
+
+    const QStringList gated = {QStringLiteral("Save"), QStringLiteral("Save As..."),
+                               QStringLiteral("Export As...")};
+    for (const QString& label : gated) {
+        QAction* a = actionNamed(label);
+        PE_CHECK(a != nullptr);
+        if (a != nullptr) PE_CHECK(!a->isEnabled());
+    }
+    // New, Open and Exit have to work with nothing open.
+    for (const QString& label :
+         {QStringLiteral("New"), QStringLiteral("Open..."), QStringLiteral("Exit")}) {
+        QAction* a = actionNamed(label);
+        PE_CHECK(a != nullptr && a->isEnabled());
+    }
+
+    PE_CHECK(triggerFileAction(w, QStringLiteral("New")));
+    for (const QString& label : gated) {
+        QAction* a = actionNamed(label);
+        PE_CHECK(a != nullptr && a->isEnabled());
+    }
+}
+
+PE_TEST(mainwindow_undo_and_redo_track_the_history) {
+    pe::app::MainWindow w;
+    QMenu* edit = topLevelMenu(w, QStringLiteral("Edit"));
+    PE_CHECK(edit != nullptr);
+    if (edit == nullptr) return;
+
+    QAction* undo = nullptr;
+    QAction* redo = nullptr;
+    for (QAction* a : edit->actions()) {
+        if (plain(a->text()).compare(QStringLiteral("Undo"), Qt::CaseInsensitive) == 0) undo = a;
+        if (plain(a->text()).compare(QStringLiteral("Redo"), Qt::CaseInsensitive) == 0) redo = a;
+    }
+    PE_CHECK(undo != nullptr && redo != nullptr);
+    if (undo == nullptr || redo == nullptr) return;
+
+    PE_CHECK(!undo->isEnabled());  // nothing open, nothing to undo
+    PE_CHECK(!redo->isEnabled());
+
+    PE_CHECK(triggerFileAction(w, QStringLiteral("New")));
+    PE_CHECK(!undo->isEnabled());  // a fresh document has an empty history
+
+    QMenu* select = topLevelMenu(w, QStringLiteral("Select"));
+    PE_CHECK(select != nullptr);
+    if (select == nullptr) return;
+    for (QAction* a : select->actions()) {
+        if (plain(a->text()).compare(QStringLiteral("Select All"), Qt::CaseInsensitive) == 0) {
+            a->trigger();
+        }
+    }
+    PE_CHECK(undo->isEnabled());  // one committed command
+    PE_CHECK(!redo->isEnabled());
+
+    undo->trigger();
+    PE_CHECK(redo->isEnabled());  // and now there is something to redo
+}

@@ -71,6 +71,10 @@ private:
     void refreshZoomStrip();
     // Bundled glyphs are tinted when rendered, so a theme change has to rebuild them.
     void retintIcons();
+    // Enables or disables everything that needs an open document, and keeps Undo and
+    // Redo matching the history. Nothing was ever disabled before, so refusing an
+    // operation was indistinguishable from it being broken.
+    void updateActionStates();
     void clearCursorPos();  // blanks the position readout when the cursor is off-canvas
 
     // Which contextual control group the options bar shows for the active tool.
@@ -129,6 +133,13 @@ private:
     };
     std::vector<ThemedIcon> themedIcons_;
     std::vector<ThemedButton> themedButtons_;
+
+    // Menus and actions that need an open document. Held so updateActionStates()
+    // can gate them in one place rather than each call site guarding itself silently.
+    std::vector<QMenu*> docMenus_;
+    std::vector<QAction*> docActions_;
+    QAction* undoAct_ = nullptr;
+    QAction* redoAct_ = nullptr;
 
     QMenu* windowMenu_ = nullptr;         // View-style panel toggles, filled after docks exist
     QToolBar* optionsBar_ = nullptr;      // contextual tool options (top)

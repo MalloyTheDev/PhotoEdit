@@ -107,6 +107,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     updateOptionsBar(OptKind::Brush, QStringLiteral("Brush"));  // Brush is the default tool
     refreshTitle();
+    // The window opens with no document, and setDocument has not run, so the initial
+    // disabled state has to be applied here or the very case this fixes stays broken.
+    updateActionStates();
 }
 
 MainWindow::~MainWindow() {
@@ -127,14 +130,14 @@ void MainWindow::buildMenuBar() {
     fileMenu->addAction(QStringLiteral("&Open..."), QKeySequence::Open, this,
                         &MainWindow::openDocument);
     fileMenu->addSeparator();
-    fileMenu->addAction(QStringLiteral("&Save"), QKeySequence::Save, this,
-                        &MainWindow::saveDocument);
-    fileMenu->addAction(QStringLiteral("Save &As..."), QKeySequence::SaveAs, this,
-                        &MainWindow::saveDocumentAs);
+    docActions_.push_back(fileMenu->addAction(QStringLiteral("&Save"), QKeySequence::Save, this,
+                                              &MainWindow::saveDocument));
+    docActions_.push_back(fileMenu->addAction(QStringLiteral("Save &As..."), QKeySequence::SaveAs,
+                                              this, &MainWindow::saveDocumentAs));
     // No StandardKey for export; Ctrl+Shift+E is the common convention.
-    fileMenu->addAction(QStringLiteral("E&xport As..."),
-                        QKeySequence(QStringLiteral("Ctrl+Shift+E")), this,
-                        &MainWindow::exportDocumentAs);
+    docActions_.push_back(fileMenu->addAction(QStringLiteral("E&xport As..."),
+                                              QKeySequence(QStringLiteral("Ctrl+Shift+E")), this,
+                                              &MainWindow::exportDocumentAs));
     fileMenu->addSeparator();
     // Explicit Ctrl+Q rather than QKeySequence::Quit: on Windows that standard key
     // resolves to the unusable literal "Exit" rather than a chord.
@@ -144,10 +147,10 @@ void MainWindow::buildMenuBar() {
                         &MainWindow::close);
 
     auto* editMenu = menuBar()->addMenu(QStringLiteral("&Edit"));
-    QAction* undoAct = editMenu->addAction(QStringLiteral("&Undo"), this, &MainWindow::undo);
-    undoAct->setShortcut(QKeySequence::Undo);
-    QAction* redoAct = editMenu->addAction(QStringLiteral("&Redo"), this, &MainWindow::redo);
-    redoAct->setShortcut(QKeySequence::Redo);
+    undoAct_ = editMenu->addAction(QStringLiteral("&Undo"), this, &MainWindow::undo);
+    undoAct_->setShortcut(QKeySequence::Undo);
+    redoAct_ = editMenu->addAction(QStringLiteral("&Redo"), this, &MainWindow::redo);
+    redoAct_->setShortcut(QKeySequence::Redo);
     editMenu->addSeparator();
     QAction* freeTransformAct =
         editMenu->addAction(QStringLiteral("Free &Transform"), this, [this] {
@@ -171,6 +174,7 @@ void MainWindow::buildMenuBar() {
     const auto sel = [this] { return &doc_->selection(); };  // active selection (gates edits)
 
     auto* imageMenu = menuBar()->addMenu(QStringLiteral("&Image"));
+    docMenus_.push_back(imageMenu);
     {
         auto* adj = imageMenu->addMenu(QStringLiteral("Adjustments"));
         adj->addAction(QStringLiteral("Brightness/Contrast..."), this, [this, runEffect] {
@@ -278,6 +282,7 @@ void MainWindow::buildMenuBar() {
     }
     {
         auto* layerMenu = menuBar()->addMenu(QStringLiteral("&Layer"));
+        docMenus_.push_back(layerMenu);
         QAction* groupAct = layerMenu->addAction(QStringLiteral("&Group Layers"), this, [this] {
             if (layers_ != nullptr) layers_->groupSelected();
         });
@@ -404,6 +409,7 @@ void MainWindow::buildMenuBar() {
         });
     }
     auto* selMenu = menuBar()->addMenu(QStringLiteral("&Select"));
+    docMenus_.push_back(selMenu);
     selMenu->addAction(QStringLiteral("Select All"), QKeySequence::SelectAll, this, [this]() {
         if (doc_) {
             Selection target;
@@ -465,6 +471,7 @@ void MainWindow::buildMenuBar() {
         refineSelection([rad, canvas](Selection& s) { s.feather(rad, canvas); });
     });
     auto* filterMenu = menuBar()->addMenu(QStringLiteral("F&ilter"));
+    docMenus_.push_back(filterMenu);
     {
         filterMenu->addAction(QStringLiteral("Gaussian Blur..."), this, [this, runEffect] {
             runEffect(QStringLiteral("Gaussian Blur"),
@@ -583,6 +590,20 @@ void MainWindow::clearCursorPos() {
     // Placeholder rather than an empty string so the readout does not change width
     // as the pointer crosses the canvas edge.
     if (posLabel_ != nullptr) posLabel_->setText(QStringLiteral("X -  Y -"));
+}
+
+void MainWindow::updateActionStates() {
+    const bool hasDoc = doc_ != nullptr;
+    for (QMenu* m : docMenus_) {
+        if (m != nullptr) m->setEnabled(hasDoc);
+    }
+    for (QAction* a : docActions_) {
+        if (a != nullptr) a->setEnabled(hasDoc);
+    }
+    // Undo and Redo track the history rather than merely the document, so they grey
+    // out at the ends of the stack instead of silently doing nothing.
+    if (undoAct_ != nullptr) undoAct_->setEnabled(hasDoc && doc_->history().canUndo());
+    if (redoAct_ != nullptr) redoAct_->setEnabled(hasDoc && doc_->history().canRedo());
 }
 
 void MainWindow::showAbout() {
@@ -1469,6 +1490,7 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     refreshTitle();
     refreshDocTab();
     refreshZoomStrip();
+    updateActionStates();
 }
 
 bool MainWindow::confirmDiscard() {
@@ -1509,6 +1531,8 @@ void MainWindow::onDocumentChanged(const pe::Document& doc, const pe::DocumentCh
     // Only the modified marker depends on this; the panels observe for their own data.
     if (&doc != doc_.get()) return;
     if (change.kind == pe::DocumentChange::Kind::DirtyState) refreshTitle();
+    // Any committed change can move the undo/redo boundaries.
+    updateActionStates();
 }
 
 void MainWindow::refreshTitle() {
