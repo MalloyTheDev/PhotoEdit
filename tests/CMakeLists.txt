@@ -59,9 +59,12 @@ add_test(NAME pe_core_tests COMMAND pe_core_tests)
 # no QApplication, so they run in any lane that builds the shell.
 # ---------------------------------------------------------------------------
 if(PHOTOEDIT_BUILD_APP)
+    # Its own entry point rather than tests/test_main.cpp: these construct real
+    # widgets, so they need a QApplication (created on the offscreen platform).
     add_executable(pe_app_tests
-        test_main.cpp
+        app/app_test_main.cpp
         app/test_theme.cpp
+        app/test_mainwindow.cpp
     )
 
     target_link_libraries(pe_app_tests PRIVATE PhotoEdit::App)

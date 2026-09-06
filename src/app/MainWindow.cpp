@@ -99,6 +99,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     buildCentral();     // document tab strip + canvas
     buildDockPanels();  // tabbed panel groups on the right
     buildStatusBar();
+    populateWindowMenu();  // needs the docks, so it runs after buildDockPanels
 
     updateOptionsBar(OptKind::Brush, QStringLiteral("Brush"));  // Brush is the default tool
     refreshTitle();
@@ -521,8 +522,52 @@ void MainWindow::buildMenuBar() {
         connect(a, &QAction::triggered, this, [this, id] { setTheme(id); });
     }
 
-    menuBar()->addMenu(QStringLiteral("&Window"));
-    menuBar()->addMenu(QStringLiteral("&Help"));
+    // Filled by populateWindowMenu() once the docks exist; a dock's toggle action is
+    // owned by the dock, so there is nothing to add until they are constructed.
+    windowMenu_ = menuBar()->addMenu(QStringLiteral("&Window"));
+
+    QMenu* helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
+    helpMenu->addAction(QStringLiteral("&About PhotoEdit..."), this, &MainWindow::showAbout);
+}
+
+void MainWindow::populateWindowMenu() {
+    if (windowMenu_ == nullptr) return;
+    windowMenu_->clear();
+
+    // Grouped to match the three stacked panel columns on the right, so the menu
+    // reads in the same order the panels appear.
+    const QStringList groups[] = {
+        {QStringLiteral("Color"), QStringLiteral("Swatches"), QStringLiteral("Gradients"),
+         QStringLiteral("Patterns")},
+        {QStringLiteral("Properties"), QStringLiteral("Adjustments"), QStringLiteral("Libraries")},
+        {QStringLiteral("Layers"), QStringLiteral("Channels"), QStringLiteral("Paths"),
+         QStringLiteral("History")},
+    };
+
+    const QList<QDockWidget*> docks = findChildren<QDockWidget*>();
+    bool firstGroup = true;
+    for (const QStringList& group : groups) {
+        if (!firstGroup) windowMenu_->addSeparator();
+        firstGroup = false;
+        for (const QString& title : group) {
+            for (QDockWidget* d : docks) {
+                if (d->objectName() != title) continue;
+                // toggleViewAction() is checkable and already tracks visibility both
+                // ways, so closing a panel unchecks its entry with no extra wiring.
+                windowMenu_->addAction(d->toggleViewAction());
+                break;
+            }
+        }
+    }
+}
+
+void MainWindow::showAbout() {
+    QMessageBox::about(
+        this, QStringLiteral("About PhotoEdit"),
+        QStringLiteral("<h3>PhotoEdit %1</h3>"
+                       "<p>A color-managed, tile-based image editor.</p>"
+                       "<p>Engine %1 &middot; Qt %2</p>")
+            .arg(QString::fromUtf8(pe::Version::string()), QString::fromUtf8(qVersion())));
 }
 
 void MainWindow::buildToolBar() {
@@ -1330,7 +1375,10 @@ void MainWindow::buildDockPanels() {
     auto makeDock = [this](const QString& title, QWidget* content) {
         auto* dock = new QDockWidget(title, this);
         dock->setObjectName(title);
-        dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+        // Closable so the Window menu toggles actually do something. The native title
+        // bar stays hidden (the tab is the header), so the Window menu is the way back.
+        dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable |
+                          QDockWidget::DockWidgetClosable);
         dock->setTitleBarWidget(new QWidget(dock));  // hide native title; tabs are the header
         dock->setWidget(content);
         return dock;

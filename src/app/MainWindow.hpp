@@ -11,6 +11,7 @@
 
 class QAction;
 class QLabel;
+class QMenu;
 class QPointF;
 class QSpinBox;
 class QToolBar;
@@ -47,6 +48,10 @@ private:
     void buildDockPanels();
     void buildStatusBar();
     void setTheme(ThemeId id);
+    // Fills the Window menu with one toggle per dock. Must run after buildDockPanels,
+    // since the toggles come from the docks themselves.
+    void populateWindowMenu();
+    void showAbout();
 
     // Which contextual control group the options bar shows for the active tool.
     enum class OptKind { None, Brush, Move, Wand };
@@ -86,6 +91,7 @@ private:
     QLabel* toolLabel_ = nullptr;  // status bar: active tool
     QLabel* zoomLabel_ = nullptr;  // status bar: zoom percentage
 
+    QMenu* windowMenu_ = nullptr;         // View-style panel toggles, filled after docks exist
     QToolBar* optionsBar_ = nullptr;      // contextual tool options (top)
     QLabel* optToolName_ = nullptr;       // options bar: active tool name
     QWidget* brushOptions_ = nullptr;     // options bar: brush size/opacity group
