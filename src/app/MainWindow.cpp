@@ -511,16 +511,13 @@ void MainWindow::buildMenuBar() {
     viewMenu->addSeparator();
     QMenu* themeMenu = viewMenu->addMenu(QStringLiteral("&Theme"));
     auto* themeGroup = new QActionGroup(this);
-    const struct {
-        ThemeId id;
-        const char* label;
-    } themes[] = {{ThemeId::Graphite, "Graphite"}, {ThemeId::Slate, "Slate"}};
-    for (const auto& t : themes) {
-        QAction* a = themeMenu->addAction(QString::fromUtf8(t.label));
+    // Labels come from themeName() so the menu cannot drift from the theme's own
+    // name, and a new theme appears here without touching this loop.
+    for (const ThemeId id : kAllThemes) {
+        QAction* a = themeMenu->addAction(QString::fromUtf8(themeName(id)));
         a->setCheckable(true);
-        a->setChecked(currentTheme() == t.id);
+        a->setChecked(currentTheme() == id);
         themeGroup->addAction(a);
-        const ThemeId id = t.id;
         connect(a, &QAction::triggered, this, [this, id] { setTheme(id); });
     }
 

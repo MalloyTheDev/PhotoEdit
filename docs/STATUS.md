@@ -62,12 +62,15 @@ The engine is no longer headless-only; the Qt6 app provides a real
 
 ### Visual design system (dark pro theme)
 
-The app has a committed visual identity modeled on the classic Photoshop neutral-grey
-UI: a Fusion-based dark theme applied as a `QPalette` + generated QSS, flat and
-monochrome (the accent shows only on menu highlights / input focus; the active tool
-and selected row read as a lighter-grey cell). **Two switchable variants** (View ▸
-Theme), persisted via `QSettings`: *Graphite* (medium neutral grey — the default) and
-*Charcoal* (a darker neutral grey). The chrome is the scaffold the rest of the toolset
+The app has a committed visual identity: a Fusion-based dark theme applied as a
+`QPalette` + generated QSS. The accent is a light hue used as a line, not a flood: it
+carries keyboard focus, the active tool, the selected row and the active panel tab as
+an outline or underline, because a lightness step alone is not resolvable at the
+contrast the chrome runs at. **Three switchable variants** (View ▸ Theme), persisted
+via `QSettings`: *Nocturne* (the flagship blue-grey ground, the default), *Graphite*
+(medium neutral grey) and *Charcoal* (a darker neutral grey). Every theme is held to
+WCAG 2.1: text and secondary text clear 4.5:1 on each surface, and the accent and the
+control-outline role clear 3:1. The chrome is the scaffold the rest of the toolset
 wires into: a left **tool strip** (Move / Marquee / Lasso / Wand / Crop / Eyedropper /
 Brush / Eraser / Bucket / Type / Hand / Zoom) with bundled Lucide SVG icons
 (`icons.qrc`, ISC, re-tinted via `IconUtil`) — Brush/Eraser/Hand/Zoom are wired, the

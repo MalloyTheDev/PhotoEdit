@@ -9,16 +9,14 @@ int main(int argc, char** argv) {
     QApplication::setApplicationName(QStringLiteral("PhotoEdit"));
     QApplication::setOrganizationName(QStringLiteral("MalloyTheDev"));
 
-    // Apply the dark theme before any widgets are shown; honor the last choice
-    // (Graphite — the Photoshop medium-grey — is the default).
+    // Apply the theme before any widgets are shown; honor the last choice. Nocturne
+    // (the flagship blue-grey) is the default for a fresh profile; themeFromInt folds
+    // an unrecognised persisted id rather than trusting the stored value.
     const int saved =
         QSettings()
-            .value(QStringLiteral("theme"), static_cast<int>(pe::app::ThemeId::Graphite))
+            .value(QStringLiteral("theme"), static_cast<int>(pe::app::ThemeId::Nocturne))
             .toInt();
-    const pe::app::ThemeId theme = saved == static_cast<int>(pe::app::ThemeId::Slate)
-                                       ? pe::app::ThemeId::Slate
-                                       : pe::app::ThemeId::Graphite;
-    pe::app::applyTheme(app, theme);
+    pe::app::applyTheme(app, pe::app::themeFromInt(saved));
 
     pe::app::MainWindow window;
     window.show();
