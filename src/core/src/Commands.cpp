@@ -535,7 +535,10 @@ SetSelectionCommand::SetSelectionCommand(Selection target) : newSel_(std::move(t
 
 DocumentChange SetSelectionCommand::execute(Document& doc) {
     if (!captured_) {
-        oldSel_ = doc.selection();  // capture the prior selection once, for undo
+        // Capture the prior selection once, for undo. Moved rather than copied: the very
+        // next line overwrites the live selection anyway, and the mask can be hundreds of
+        // megabytes on a large canvas. Redo skips this, so oldSel_ stays the ORIGINAL.
+        oldSel_ = std::move(doc.editableSelection());
         captured_ = true;
     }
     // Mutate the selection, then let History notify the returned Selection change ONCE. (Don't also

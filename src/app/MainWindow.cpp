@@ -427,31 +427,33 @@ void MainWindow::buildMenuBar() {
     }
     auto* selMenu = menuBar()->addMenu(QStringLiteral("&Select"));
     docMenus_.push_back(selMenu);
-    selMenu->addAction(QStringLiteral("Select All"), standardOr(QKeySequence::SelectAll, "Ctrl+A"),
-                       this, [this]() {
-                           if (doc_) {
-                               Selection target;
-                               target.selectAll(doc_->canvasBounds());
-                               doc_->history().push(std::make_unique<SetSelectionCommand>(target));
-                           }
-                       });
-    selMenu->addAction(QStringLiteral("Deselect"), QKeySequence(QStringLiteral("Ctrl+D")), this,
-                       [this]() {
-                           if (doc_) {
-                               Selection target;
-                               target.selectNone();
-                               doc_->history().push(std::make_unique<SetSelectionCommand>(target));
-                           }
-                       });
+    selMenu->addAction(
+        QStringLiteral("Select All"), standardOr(QKeySequence::SelectAll, "Ctrl+A"), this,
+        [this]() {
+            if (doc_) {
+                Selection target;
+                target.selectAll(doc_->canvasBounds());
+                doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(target)));
+            }
+        });
+    selMenu->addAction(
+        QStringLiteral("Deselect"), QKeySequence(QStringLiteral("Ctrl+D")), this, [this]() {
+            if (doc_) {
+                Selection target;
+                target.selectNone();
+                doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(target)));
+            }
+        });
     selMenu->addSeparator();
-    selMenu->addAction(QStringLiteral("Invert Selection"),
-                       QKeySequence(QStringLiteral("Ctrl+Shift+I")), this, [this]() {
-                           if (doc_) {
-                               Selection target = doc_->selection();
-                               target.invert(doc_->canvasBounds());
-                               doc_->history().push(std::make_unique<SetSelectionCommand>(target));
-                           }
-                       });
+    selMenu->addAction(
+        QStringLiteral("Invert Selection"), QKeySequence(QStringLiteral("Ctrl+Shift+I")), this,
+        [this]() {
+            if (doc_) {
+                Selection target = doc_->selection();
+                target.invert(doc_->canvasBounds());
+                doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(target)));
+            }
+        });
     selMenu->addSeparator();
     // Edge refinements. Each prompts for an amount, applies it to a copy of the active selection,
     // and pushes the result as one undo step — but only when it actually changed the selection, so
@@ -461,7 +463,7 @@ void MainWindow::buildMenuBar() {
         Selection target = doc_->selection();
         apply(target);
         if (!(target == doc_->selection())) {
-            doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+            doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(target)));
         }
     };
     selMenu->addAction(QStringLiteral("Grow..."), this, [this, refineSelection]() {

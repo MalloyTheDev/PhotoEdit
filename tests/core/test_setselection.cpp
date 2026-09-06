@@ -94,3 +94,29 @@ PE_TEST(crop_still_notifies_both_selection_and_structure) {
     PE_CHECK(obs.structure >= 1);  // canvas resized (LayerStructure notify)
     doc->removeObserver(&obs);
 }
+
+PE_TEST(setselection_undo_restores_a_nontrivial_prior_selection) {
+    // execute() moves the live selection into its undo slot rather than copying it, so
+    // the capture-once guard has to hold: a second undo/redo cycle must still restore
+    // the FIRST selection, not whatever was live at the time of the redo.
+    auto doc = Document::createBlank(Size{64, 64});
+
+    Selection first;
+    first.selectRect(Rect{4, 4, 8, 8});
+    doc->history().push(std::make_unique<SetSelectionCommand>(std::move(first)));
+
+    Selection second;
+    second.selectRect(Rect{32, 32, 8, 8});
+    doc->history().push(std::make_unique<SetSelectionCommand>(std::move(second)));
+
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        doc->history().undo();  // back to `first`
+        PE_CHECK(doc->selection().active());
+        PE_CHECK_EQ(static_cast<int>(doc->selection().value(6, 6)), 255);
+        PE_CHECK_EQ(static_cast<int>(doc->selection().value(35, 35)), 0);
+
+        doc->history().redo();  // forward to `second`
+        PE_CHECK_EQ(static_cast<int>(doc->selection().value(35, 35)), 255);
+        PE_CHECK_EQ(static_cast<int>(doc->selection().value(6, 6)), 0);
+    }
+}

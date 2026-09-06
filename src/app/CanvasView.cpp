@@ -777,7 +777,8 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
             pe::Selection sel =
                 pe::magicWandSelection(buf, static_cast<int>(std::lround(d.x)),
                                        static_cast<int>(std::lround(d.y)), wandTolerance_);
-            if (sel.active()) doc_->history().push(std::make_unique<SetSelectionCommand>(sel));
+            if (sel.active())
+                doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(sel)));
         }
         return;
     }
@@ -982,7 +983,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
                 } else {
                     target.selectRect(liveMarquee_);
                 }
-                doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+                doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(target)));
                 // command will execute, snapshot old, notify
             }
         }
@@ -996,7 +997,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
             Selection target;
             target.selectPolygon(lassoPts_);
             if (target.active()) {
-                doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+                doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(target)));
             }
         }
         lassoPts_.clear();
