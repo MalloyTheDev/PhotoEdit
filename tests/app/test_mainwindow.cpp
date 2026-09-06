@@ -14,6 +14,8 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QString>
+#include <QToolBar>
+#include <QToolButton>
 
 #include <cstdio>
 
@@ -102,6 +104,45 @@ PE_TEST(mainwindow_docks_are_closable) {
     for (QDockWidget* d : docks) {
         PE_CHECK(d->features().testFlag(QDockWidget::DockWidgetClosable));
     }
+}
+
+PE_TEST(mainwindow_options_bar_buttons_announce_themselves) {
+    // The four utility buttons took their tooltip straight from the icon filename,
+    // so hovering showed the literal string "share-2". Icon-only buttons also carry
+    // no text, so without an accessible name assistive technology announces nothing.
+    pe::app::MainWindow w;
+    QToolBar* optionsBar = w.findChild<QToolBar*>(QStringLiteral("OptionsBar"));
+    PE_CHECK(optionsBar != nullptr);
+    if (optionsBar == nullptr) return;
+
+    const QList<QToolButton*> buttons = optionsBar->findChildren<QToolButton*>();
+    PE_CHECK(!buttons.isEmpty());
+    int checked = 0;
+    for (QToolButton* b : buttons) {
+        // QToolBar creates its own children (the overflow extension button); Qt names
+        // those with a "qt_" prefix, and they are not ours to label.
+        if (b->objectName().startsWith(QStringLiteral("qt_"))) continue;
+        ++checked;
+
+        const QString name = b->accessibleName().isEmpty() ? b->text() : b->accessibleName();
+        if (name.isEmpty()) {
+            std::printf("    options-bar button with no accessible name (objectName=%s)\n",
+                        b->objectName().toLocal8Bit().constData());
+            PE_CHECK(false);
+        }
+        // An icon resource name is all lowercase with no spaces ("share-2", "cloud").
+        // Real user-facing text has a capital or a space; require one.
+        const QString tip = b->toolTip();
+        const bool looksLikeAnIconName =
+            !tip.isEmpty() && tip == tip.toLower() && !tip.contains(QLatin1Char(' '));
+        if (looksLikeAnIconName) {
+            std::printf("    tooltip looks like an icon filename: %s\n",
+                        tip.toLocal8Bit().constData());
+            PE_CHECK(false);
+        }
+    }
+    // Guard against the loop silently checking nothing if the buttons ever move.
+    PE_CHECK(checked > 0);
 }
 
 PE_TEST(mainwindow_help_menu_offers_about) {

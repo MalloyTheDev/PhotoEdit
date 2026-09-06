@@ -56,7 +56,6 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -632,8 +631,6 @@ void MainWindow::buildToolBar() {
             if (def.tool == Tool::Brush || def.tool == Tool::Eraser || def.tool == Tool::Dodge ||
                 def.tool == Tool::Clone || def.tool == Tool::Blur || def.tool == Tool::Heal) {
                 kind = OptKind::Brush;  // size/opacity drive the brush footprint + strength
-            } else if (std::string_view(def.icon) == "move") {
-                kind = OptKind::Move;
             } else if (def.tool == Tool::Wand) {
                 kind = OptKind::Wand;  // tolerance drives the magic-wand flood
             }
@@ -710,19 +707,6 @@ void MainWindow::buildOptionsBar() {
     connect(stabSpin, &QSpinBox::valueChanged, this,
             [this](int v) { canvas_->tool().brush().stabilize = static_cast<float>(v) / 100.0f; });
 
-    // Move-tool options — a decorative scaffold matching Photoshop's Move options.
-    moveOptions_ = new QWidget(optionsBar_);
-    auto* ml = new QHBoxLayout(moveOptions_);
-    ml->setContentsMargins(0, 0, 0, 0);
-    ml->setSpacing(8);
-    ml->addWidget(new QCheckBox(QStringLiteral("Auto-Select"), moveOptions_));
-    auto* selKind = new QComboBox(moveOptions_);
-    selKind->addItems({QStringLiteral("Layer"), QStringLiteral("Group")});
-    ml->addWidget(selKind);
-    ml->addWidget(new QCheckBox(QStringLiteral("Show Transform Controls"), moveOptions_));
-    moveOptAction_ = optionsBar_->addWidget(moveOptions_);
-    moveOptAction_->setVisible(false);
-
     // Magic-wand options — per-channel tolerance for the flood; shown only for the Wand tool.
     wandOptions_ = new QWidget(optionsBar_);
     auto* wl = new QHBoxLayout(wandOptions_);
@@ -739,15 +723,37 @@ void MainWindow::buildOptionsBar() {
     connect(wandTolSpin_, &QSpinBox::valueChanged, this,
             [this](int v) { canvas_->setWandTolerance(v); });
 
-    // Right-aligned utility icons (echoing the reference's top-bar actions).
+    // Right-aligned utility icons. These are not wired to anything yet, so they say
+    // so on click and carry the same "coming soon" hint the scaffolded tools use.
+    // They previously took their tooltip straight from the icon filename, which put
+    // the string "share-2" in front of the user.
+    struct UtilDef {
+        const char* icon;
+        const char* label;
+    };
+    static constexpr UtilDef kUtilities[] = {
+        {"search", "Search"},
+        {"share-2", "Share"},
+        {"cloud", "Cloud Documents"},
+        {"settings", "Preferences"},
+    };
+
     auto* rspacer = new QWidget(optionsBar_);
     rspacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     optionsBar_->addWidget(rspacer);
-    for (const char* ic : {"search", "share-2", "cloud", "settings"}) {
+    for (const UtilDef& def : kUtilities) {
+        const QString label = QString::fromUtf8(def.label);
         auto* b = new QToolButton(optionsBar_);
-        b->setIcon(renderIconAsIcon(QString::fromUtf8(ic), kToolIconColor, 18));
+        b->setIcon(renderIconAsIcon(QString::fromUtf8(def.icon), kToolIconColor, 18));
         b->setAutoRaise(true);
-        b->setToolTip(QString::fromUtf8(ic));
+        b->setToolTip(label + QStringLiteral("  (coming soon)"));
+        // Icon-only buttons carry no text, so assistive technology has nothing to
+        // announce without this.
+        b->setAccessibleName(label);
+        b->setAccessibleDescription(QStringLiteral("Not yet implemented"));
+        connect(b, &QToolButton::clicked, this, [this, label] {
+            statusBar()->showMessage(label + QStringLiteral(" is not yet implemented"), 4000);
+        });
         optionsBar_->addWidget(b);
     }
 }
@@ -779,7 +785,6 @@ void MainWindow::updateOptionsBar(OptKind kind, const QString& toolName) {
     // Toggle the toolbar ACTIONS, not the inner widgets — QToolBar lays widgets out
     // via their wrapping action, so hiding the widget alone leaves a gap/ghost.
     if (brushOptAction_ != nullptr) brushOptAction_->setVisible(kind == OptKind::Brush);
-    if (moveOptAction_ != nullptr) moveOptAction_->setVisible(kind == OptKind::Move);
     if (wandOptAction_ != nullptr) wandOptAction_->setVisible(kind == OptKind::Wand);
 }
 

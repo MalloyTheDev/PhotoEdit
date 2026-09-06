@@ -30,9 +30,10 @@ class HistoryPanel;
 class ColorPanel;
 class PropertiesPanel;
 
-// The top-level application window. Wires the File menu to the engine's document I/O
-// and shows the active document on a CanvasView. The dockable panels (layers, tools,
-// history, ...) are still placeholders. See docs/systems/24-ui-workspace.md.
+// The top-level application window. Wires the menus to the engine's document I/O and
+// shows the active document on a CanvasView. Color, Properties, Layers and History are
+// real panels; Swatches, Gradients, Patterns, Adjustments, Libraries, Channels and
+// Paths are still placeholders. See docs/systems/24-ui-workspace.md.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -54,7 +55,7 @@ private:
     void showAbout();
 
     // Which contextual control group the options bar shows for the active tool.
-    enum class OptKind { None, Brush, Move, Wand };
+    enum class OptKind { None, Brush, Wand };
     void updateOptionsBar(OptKind kind, const QString& toolName);
     void refreshDocTab();
     [[nodiscard]] QWidget* makeColorSwatches();
@@ -95,10 +96,8 @@ private:
     QToolBar* optionsBar_ = nullptr;      // contextual tool options (top)
     QLabel* optToolName_ = nullptr;       // options bar: active tool name
     QWidget* brushOptions_ = nullptr;     // options bar: brush size/opacity group
-    QWidget* moveOptions_ = nullptr;      // options bar: move-tool group
     QWidget* wandOptions_ = nullptr;      // options bar: magic-wand group
     QAction* brushOptAction_ = nullptr;   // toolbar action wrapping brushOptions_ (for show/hide)
-    QAction* moveOptAction_ = nullptr;    // toolbar action wrapping moveOptions_
     QAction* wandOptAction_ = nullptr;    // toolbar action wrapping wandOptions_
     QSpinBox* sizeSpin_ = nullptr;        // options bar: brush diameter
     QSpinBox* opacitySpinOpt_ = nullptr;  // options bar: brush opacity
