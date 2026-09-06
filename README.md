@@ -3,10 +3,19 @@
 A flagship-level, **Photoshop-class image editor**. Windows first; other
 platforms later. Built in deliberate, shippable steps rather than all-at-once.
 
-> Status: **Step 1 — foundations.** The architecture is fully documented and a
-> buildable skeleton (engine core + tests + Qt6 app shell + CI) is in place.
-> No image-editing features are implemented yet; see the
-> [roadmap](docs/03-roadmap-and-milestones.md).
+> Status: the headless engine is complete through **M7**: document and layer tree,
+> tiled copy-on-write storage, compositor, selections and masks, adjustment layers
+> and filters, ICC colour management on an 8/16/32-bit pipeline, and PNG, JPEG,
+> TIFF, WebP and the native layered `.pedoc` format (PSD is import-only, and reads
+> the merged composite rather than the layer stack). The Qt6 application is a
+> working editor: brush, eraser, clone, dodge and burn, blur and sharpen, spot
+> heal, bucket, gradient, marquee, lasso, magic wand, crop, type, free transform
+> and eyedropper, with a layers panel, masks, adjustment-layer editors, filters,
+> history, and open/save/export.
+>
+> [docs/STATUS.md](docs/STATUS.md) is the maintained, milestone-by-milestone record
+> of what is actually built. This README deliberately does not restate it, so only
+> one file can go stale.
 
 ## What this is
 
@@ -78,19 +87,21 @@ cmake/           Build helpers
 
 ## Roadmap (short form)
 
-The build order is engine-up, each milestone independently demoable:
+The build order is engine-up, each milestone independently demoable. For where each
+one actually stands, see [docs/STATUS.md](docs/STATUS.md); the list below is the
+order, not the progress.
 
-1. **M0 Foundations** *(this step)* — repo, build, core types, CI, docs
-2. **M1 Document & layers** — document model, tiled layer storage, compositor
-3. **M2 Canvas & view** — tile renderer, zoom/pan, GPU display path
-4. **M3 Painting** — brush engine, eraser, tools framework, history/undo
-5. **M4 Selections & masks** — selection masks, layer masks, marching ants
-6. **M5 Adjustments & filters** — non-destructive adjustment layers, filter engine
-7. **M6 Color management** — ICC, 16/32-bit, working spaces, soft proofing
-8. **M7 File formats** — native doc, PSD, PNG/JPEG/TIFF/WebP import/export
-9. **M8 Type, vector, smart objects** — text, paths/shapes, smart objects/filters
-10. **M9 Retouching & AI** — clone/heal, generative fill/expand
-11. **M10 Pro & platform** — automation, presets, print/prepress, plugins, cloud
+1. **M0 Foundations**: repo, build, core types, CI, docs
+2. **M1 Document & layers**: document model, tiled layer storage, compositor
+3. **M2 Canvas & view**: tile renderer, zoom/pan, GPU display path
+4. **M3 Painting**: brush engine, eraser, tools framework, history/undo
+5. **M4 Selections & masks**: selection masks, layer masks, marching ants
+6. **M5 Adjustments & filters**: non-destructive adjustment layers, filter engine
+7. **M6 Color management**: ICC, 16/32-bit, working spaces, soft proofing
+8. **M7 File formats**: native doc, PSD, PNG/JPEG/TIFF/WebP import/export
+9. **M8 Type, vector, smart objects**: text, paths/shapes, smart objects/filters
+10. **M9 Retouching & AI**: clone/heal, generative fill/expand
+11. **M10 Pro & platform**: automation, presets, print/prepress, plugins, cloud
 
 Full detail: [docs/03-roadmap-and-milestones.md](docs/03-roadmap-and-milestones.md).
 
