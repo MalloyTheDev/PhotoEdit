@@ -147,6 +147,10 @@ private:
     // Why a Bucket/Gradient fill returned no command, for status-bar feedback: the active layer
     // isn't paintable pixels, or the canvas exceeds the engine's per-op fill budget.
     [[nodiscard]] QString fillUnavailableMessage() const;
+    // Why PaintToolController::begin() refused, phrased for the status bar. A stroke
+    // that cannot start used to do nothing and say nothing, which is the same thing a
+    // broken brush looks like.
+    [[nodiscard]] QString paintUnavailableMessage() const;
     // Clone-tool press handling shared by the mouse and tablet paths. Alt-click sets the source
     // anchor (`docPt` in document space); a click with no source set shows a hint. Returns true if
     // the press was consumed (no stroke should begin), false to begin a clone stroke.

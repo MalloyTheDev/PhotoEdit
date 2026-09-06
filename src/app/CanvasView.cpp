@@ -146,6 +146,21 @@ QString CanvasView::fillUnavailableMessage() const {
     return QStringLiteral("Image is too large to fill in one step.");
 }
 
+QString CanvasView::paintUnavailableMessage() const {
+    // Mirrors the conditions PaintToolController::begin() rejects on: mask painting
+    // needs the active layer to carry a mask, everything else needs a pixel layer.
+    const pe::Layer* layer = doc_ != nullptr ? doc_->findLayer(doc_->activeLayer()) : nullptr;
+    if (layer == nullptr) return QStringLiteral("Select a layer to paint on.");
+    if (tool_.mode() == pe::PaintToolController::Mode::MaskPaint) {
+        return layer->mask() == nullptr ? QStringLiteral("This layer has no mask to paint on.")
+                                        : QStringLiteral("Cannot paint on this layer.");
+    }
+    if (layer->kind() != pe::LayerKind::Pixel) {
+        return QStringLiteral("Select a pixel layer to paint on.");
+    }
+    return QStringLiteral("Cannot paint on this layer.");
+}
+
 bool CanvasView::handleClonePress(const pe::PointD& docPt, bool altHeld) {
     if (altHeld) {
         // Alt-click sets the clone source anchor (no stroke); the next drag clones from it.
@@ -652,6 +667,8 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
             if (tool_.begin(*doc_, sp, &doc_->selection())) {
                 if (renderer_ != nullptr) renderer_->invalidate(tool_.lastExtendBounds());
                 update();
+            } else {
+                emit toolMessage(paintUnavailableMessage());
             }
             break;
         case QEvent::TabletMove:
@@ -830,6 +847,10 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
     if (tool_.begin(*doc_, sampleAt(e->position()), &doc_->selection())) {
         if (renderer_ != nullptr) renderer_->invalidate(tool_.lastExtendBounds());  // first dab
         update();
+    } else {
+        // Bucket and Gradient already report this case; the brush path silently did
+        // nothing, which is indistinguishable from the tool being broken.
+        emit toolMessage(paintUnavailableMessage());
     }
 }
 
