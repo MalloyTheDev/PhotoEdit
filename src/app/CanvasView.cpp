@@ -650,14 +650,14 @@ void CanvasView::tabletEvent(QTabletEvent* e) {
                                   : pe::PaintToolController::Mode::Blur);
             }
             if (tool_.begin(*doc_, sp, &doc_->selection())) {
-                if (renderer_ != nullptr) renderer_->invalidate(tool_.strokeDirtyBounds());
+                if (renderer_ != nullptr) renderer_->invalidate(tool_.lastExtendBounds());
                 update();
             }
             break;
         case QEvent::TabletMove:
             if (tool_.isStroking()) {
                 tool_.extend(*doc_, sp);
-                if (renderer_ != nullptr) renderer_->invalidate(tool_.strokeDirtyBounds());
+                if (renderer_ != nullptr) renderer_->invalidate(tool_.lastExtendBounds());
                 update();
             }
             break;
@@ -828,7 +828,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
     // refresh explicitly. begin() fails when there is no paintable active layer.
     // Pass the document selection so edits are gated.
     if (tool_.begin(*doc_, sampleAt(e->position()), &doc_->selection())) {
-        if (renderer_ != nullptr) renderer_->invalidate(tool_.strokeDirtyBounds());  // first dab
+        if (renderer_ != nullptr) renderer_->invalidate(tool_.lastExtendBounds());  // first dab
         update();
     }
 }
@@ -918,7 +918,10 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         return;
     }
     tool_.extend(*doc_, sampleAt(e->position()));
-    if (renderer_ != nullptr) renderer_->invalidate(tool_.strokeDirtyBounds());  // stroke footprint
+    // Just this sample's footprint. Invalidating the cumulative bounds re-composited
+    // every tile under the stroke on every sample, so repaint cost grew with the
+    // stroke; end() below still invalidates the whole thing.
+    if (renderer_ != nullptr) renderer_->invalidate(tool_.lastExtendBounds());
     update();
 }
 

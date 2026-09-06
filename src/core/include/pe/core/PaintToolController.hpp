@@ -71,6 +71,14 @@ public:
     // begin(); empty when no stroke is active or nothing has been painted yet.
     [[nodiscard]] Rect strokeDirtyBounds() const noexcept { return strokeDirty_; }
 
+    // The region touched by the MOST RECENT sample, rather than by the whole stroke
+    // so far. A view repainting per sample wants this one: invalidating the
+    // cumulative bounds re-composites every tile under the stroke on every sample,
+    // which is quadratic in sample count and, for a diagonal drag, quadratic in area
+    // too. end() and cancel() still want strokeDirtyBounds(), which covers
+    // everything the stroke touched.
+    [[nodiscard]] Rect lastExtendBounds() const noexcept { return lastDirty_; }
+
     // --- interactive stroke lifecycle (document-space, sub-pixel) ---
     // Begin a stroke on the document's active layer, gated by `selection` if it is
     // non-null and active. Returns false (and starts nothing) when already stroking
@@ -125,6 +133,7 @@ private:
     std::unique_ptr<LiveStroke>
         live_;            // incremental stroke (per-pixel ops); null on the batched path
     Rect strokeDirty_{};  // cumulative dirty bounds of the live preview (see accessor)
+    Rect lastDirty_{};    // dirty bounds of the most recent sample only (see accessor)
 };
 
 }  // namespace pe

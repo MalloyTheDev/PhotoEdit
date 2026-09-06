@@ -8,6 +8,7 @@
 #include "pe/core/Selection.hpp"
 #include "pe_test.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -358,4 +359,67 @@ PE_TEST(painttool_begin_after_cancel_recovers) {
     PE_CHECK(tool.end(*doc));
     PE_CHECK_EQ(alphaAt(*doc, base, 40, 40), 255);
     PE_CHECK_EQ(doc->history().undoDepth(), 1u);
+}
+
+// ---------------------------------------------------------------------------
+// Per-sample versus cumulative dirty bounds.
+//
+// LiveStroke::extend() already returns the region a single sample touched, but the
+// controller only exposed the running union. Views repainting per sample therefore
+// invalidated everything under the whole stroke every time, so repaint cost grew
+// with the stroke: quadratic in sample count, and quadratic in area for a diagonal
+// drag, since the union is a bounding rectangle.
+// ---------------------------------------------------------------------------
+
+PE_TEST(painttool_per_sample_dirty_stays_bounded_while_the_stroke_grows) {
+    // A canvas several tiles across, so the cumulative box can grow well past what a
+    // single dab can ever touch.
+    auto doc = Document::createBlank(Size{2048, 2048});
+    PaintToolController tool;
+    tool.setBrush(hardBrush(16.0f));
+    tool.setColor(kRedF);
+
+    PE_CHECK(tool.begin(*doc, StrokePoint{Vec2{10.0f, 10.0f}, 1.0f}, nullptr));
+
+    int widestSample = tool.lastExtendBounds().width;
+    for (int i = 1; i <= 80; ++i) {
+        const float d = 10.0f + static_cast<float>(i) * 24.0f;
+        tool.extend(*doc, StrokePoint{Vec2{d, d}, 1.0f});
+        widestSample = std::max(widestSample, tool.lastExtendBounds().width);
+    }
+
+    const Rect cumulative = tool.strokeDirtyBounds();
+    // The union spans most of the canvas after a long diagonal drag.
+    PE_CHECK(cumulative.width >= 1024);
+    // A single sample can never exceed the tiles one dab straddles, which for a brush
+    // narrower than a tile is at most two. That ceiling is a constant: it does not
+    // move as the stroke gets longer, which is the property that makes repaint linear
+    // rather than quadratic. Returning the cumulative box here would blow past it.
+    PE_CHECK(widestSample <= 2 * kTileSize);
+    PE_CHECK(widestSample < cumulative.width);
+
+    tool.cancel(*doc);
+}
+
+PE_TEST(painttool_cumulative_dirty_still_covers_the_whole_stroke) {
+    // end() and cancel() need the full footprint, so the cumulative accessor must
+    // keep growing even though the per-sample one does not.
+    auto doc = Document::createBlank(Size{2048, 2048});
+    PaintToolController tool;
+    tool.setBrush(hardBrush(16.0f));
+    tool.setColor(kRedF);
+
+    PE_CHECK(tool.begin(*doc, StrokePoint{Vec2{20.0f, 20.0f}, 1.0f}, nullptr));
+    const Rect afterFirst = tool.strokeDirtyBounds();
+    for (int i = 1; i <= 60; ++i) {
+        tool.extend(*doc, StrokePoint{Vec2{20.0f + static_cast<float>(i) * 30.0f, 20.0f}, 1.0f});
+    }
+    const Rect afterMany = tool.strokeDirtyBounds();
+
+    PE_CHECK(afterMany.width > afterFirst.width);
+    // And it still contains where the stroke started as well as where it ended.
+    PE_CHECK(afterMany.left() <= afterFirst.left());
+    PE_CHECK(afterMany.right() >= 1800);
+
+    tool.cancel(*doc);
 }

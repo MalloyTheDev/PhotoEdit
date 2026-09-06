@@ -152,11 +152,14 @@ bool PaintToolController::begin(Document& doc, StrokePoint p, const Selection* s
     strokeDirty_ = Rect{};  // fresh stroke: start the dirty-bounds accumulator empty
     // The per-pixel ops use the incremental LiveStroke (linear over the stroke); everything else
     // (region-bake brushes, mask paint, stabilized strokes) keeps the batched rebuild path.
+    lastDirty_ = Rect{};
     live_ = createLive(doc);
     if (live_) {
-        strokeDirty_ = strokeDirty_.united(live_->extend(points_));
+        lastDirty_ = live_->extend(points_);
+        strokeDirty_ = strokeDirty_.united(lastDirty_);
     } else {
         rebuildPreview(doc);
+        lastDirty_ = strokeDirty_;  // batched: the rebuild touches the whole stroke
     }
     return true;
 }
@@ -172,18 +175,24 @@ void PaintToolController::extend(Document& doc, StrokePoint p) {
         // whole stroke.
         live_.reset();
         strokeDirty_ = Rect{};  // no live preview remains; don't leave a stale dirty region
+        lastDirty_ = Rect{};
         resetStroke();
         return;
     }
     points_.push_back(p);
     if (live_) {
         // Incremental: stamp only the new dabs and recomposite just the tiles they touched.
-        strokeDirty_ = strokeDirty_.united(live_->extend(points_));
+        lastDirty_ = live_->extend(points_);
+        strokeDirty_ = strokeDirty_.united(lastDirty_);
     } else {
         // Batched: revert the prior preview so the rebuild sees the original tiles, then recompute
         // the whole stroke (the region-bake/mask engines resample from scratch).
         clearPreview(doc);
         rebuildPreview(doc);
+        // These engines resample the whole stroke on every sample, so everything under
+        // it is genuinely dirty and there is no smaller delta to report. Making them
+        // incremental is the paint-side counterpart, tracked separately.
+        lastDirty_ = strokeDirty_;
     }
 }
 
