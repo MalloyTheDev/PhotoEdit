@@ -534,3 +534,23 @@ PE_TEST(transform_preserves_superwhite_on_f32) {
     doc->history().push(transformLayerContent(*doc, base, Affine2D::scaling(2.0, 2.0)));
     PE_CHECK(pl->tilesF().pixel(10, 10).r > 3.0f);  // HDR survived the resample (not clamped to 1)
 }
+
+PE_TEST(filter_gaussian_tiny_positive_sigma_is_safe) {
+    // A tiny but positive, finite sigma passes the non-finite guard, and squaring it
+    // underflows to zero: the kernel becomes all NaN and the region comes out fully
+    // transparent instead of very slightly blurred. Selection::feather clamps for
+    // exactly this reason; the filter's kernel builder did not.
+    auto src = grayRow({0.0f, 1.0f, 0.0f, 1.0f, 0.0f});
+    std::vector<Rgbaf> dst(src.size());
+
+    for (const float sigma : {1e-30f, 1e-20f, 1e-8f, 1e-3f}) {
+        gaussianBlur(src, dst, 5, 1, sigma);
+        for (const Rgbaf& p : dst) {
+            PE_CHECK(std::isfinite(p.r));
+            PE_CHECK(std::isfinite(p.a));
+        }
+        // Well below one pixel of blur, so the result must still resemble the input
+        // rather than collapsing to transparent black.
+        for (std::size_t i = 0; i < src.size(); ++i) PE_CHECK_NEAR(dst[i].r, src[i].r);
+    }
+}

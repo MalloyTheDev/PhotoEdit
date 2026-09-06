@@ -122,7 +122,15 @@ void gaussianBlur(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h
                            ? kMaxKernelRadius
                            : std::max(1, static_cast<int>(wantRadius));
     std::vector<float> kernel(static_cast<std::size_t>(2 * radius + 1));
-    const float twoSigmaSq = 2.0f * sigma * sigma;
+    // Floor the sigma before squaring it. For a tiny positive value sigma*sigma
+    // underflows to zero, so the exponent at i == 0 becomes -0.0f/0.0f = NaN, every
+    // kernel entry normalizes to NaN, and the filtered region ends up fully
+    // transparent on an integer layer or NaN-filled on a float one. Selection::feather
+    // hit exactly this and carries the same clamp; this copy of the kernel builder
+    // never got it. The floor is far below any visible blur, so it changes no result
+    // that was previously correct.
+    const float safeSigma = std::max(sigma, 0.05f);
+    const float twoSigmaSq = 2.0f * safeSigma * safeSigma;
     float sum = 0.0f;
     for (int i = -radius; i <= radius; ++i) {
         const float wgt = std::exp(-static_cast<float>(i * i) / twoSigmaSq);
