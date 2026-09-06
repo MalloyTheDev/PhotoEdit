@@ -44,17 +44,25 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
             layer->applyTo(std::span<Rgbaf>(adjusted.data(), kTilePixels), coord);
 
             const Mask* mask = layer->mask();
-            const bool hasMask = mask != nullptr && mask->enabled();
+            // A mask that reveals everything at full strength multiplies by 1, so skip it
+            // outright rather than paying a lookup per pixel for no effect. The
+            // layer-mask path below has always had this guard; this one had not, so an
+            // adjustment carrying an empty mask (what maskFromSelection returns for an
+            // inactive selection) paid full price.
+            const bool hasMask = mask != nullptr && mask->enabled() && !mask->isFullyRevealing();
+            // The whole tile in one lookup instead of 65,536: the loop never leaves the
+            // tile at `coord`, so the mask tile is the same for every iteration. Absent
+            // reads as kOpaque, and that byte still goes through evaluateValue so invert
+            // and density apply to it exactly as before.
+            const MaskBuffer::GrayTile* maskTile =
+                hasMask ? mask->buffer().findTile(coord) : nullptr;
             const BlendMode mode = layer->blendMode();
             const float op = layer->opacity() * layer->fillOpacity();
-            const int baseX = coord.col * kTileSize;
-            const int baseY = coord.row * kTileSize;
             for (std::size_t i = 0; i < static_cast<std::size_t>(kTilePixels); ++i) {
                 float t = op;
                 if (hasMask) {
-                    const int lx = static_cast<int>(i % static_cast<std::size_t>(kTileSize));
-                    const int ly = static_cast<int>(i / static_cast<std::size_t>(kTileSize));
-                    t *= mask->evaluate(baseX + lx, baseY + ly);
+                    t *= mask->evaluateValue(maskTile != nullptr ? (*maskTile)[i]
+                                                                 : MaskBuffer::kOpaque);
                 }
                 if (t <= 0.0f) continue;
                 Rgbaf& a = acc[i];
@@ -85,18 +93,14 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
                 l->renderInto(coord, srcSpan);
             }
             const Mask* mask = l->mask();
-            if (mask != nullptr && mask->enabled()) {
-                const bool trivial =
-                    !mask->inverted() && mask->density() >= 1.0f && mask->buffer().empty();
-                if (!trivial) {
-                    const int bx = coord.col * kTileSize;
-                    const int by = coord.row * kTileSize;
-                    std::size_t i = 0;
-                    for (int ly = 0; ly < kTileSize; ++ly) {
-                        for (int lx = 0; lx < kTileSize; ++lx, ++i) {
-                            src[i].a *= mask->evaluate(bx + lx, by + ly);
-                        }
-                    }
+            if (mask != nullptr && mask->enabled() && !mask->isFullyRevealing()) {
+                // One lookup for the tile, then a flat index. `i` counts ly * kTileSize +
+                // lx, which is exactly the index MaskBuffer::value computes internally,
+                // so this reads the same byte for every pixel it used to.
+                const MaskBuffer::GrayTile* maskTile = mask->buffer().findTile(coord);
+                for (std::size_t i = 0; i < static_cast<std::size_t>(kTilePixels); ++i) {
+                    src[i].a *= mask->evaluateValue(maskTile != nullptr ? (*maskTile)[i]
+                                                                        : MaskBuffer::kOpaque);
                 }
             }
         };

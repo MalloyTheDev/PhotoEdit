@@ -22,7 +22,18 @@ public:
     static constexpr uint8_t kOpaque = 255;  // reveals
     static constexpr uint8_t kClear = 0;     // hides
 
+    // One tile's bytes, row-major, indexed localIndex(y) * kTileSize + localIndex(x).
+    using GrayTile = std::array<uint8_t, kTilePixels>;
+
     [[nodiscard]] uint8_t value(int x, int y) const noexcept;  // kOpaque if absent
+    // The whole tile at `c`, or nullptr when it is absent (which reads as kOpaque).
+    // Mirrors TileStoreT::find, including the nullptr-means-default convention.
+    //
+    // For callers whose loop is confined to one tile, which is every pixel loop in the
+    // compositor: resolving the tile once and indexing the array is the difference
+    // between one map lookup and 65,536 of them. value() stays the right call for
+    // scattered access.
+    [[nodiscard]] const GrayTile* findTile(TileCoord c) const noexcept;
     void setValue(int x, int y, uint8_t v);
     void fillRect(Rect r, uint8_t v);
 
@@ -60,7 +71,6 @@ public:
 
 private:
     using Key = std::pair<int, int>;
-    using GrayTile = std::array<uint8_t, kTilePixels>;
     static constexpr Key keyOf(TileCoord c) noexcept { return {c.col, c.row}; }
 
     std::map<Key, GrayTile> tiles_;
@@ -88,14 +98,28 @@ public:
     [[nodiscard]] const MaskBuffer& buffer() const noexcept { return buffer_; }
     [[nodiscard]] Rect contentBounds() const noexcept { return buffer_.contentBounds(); }
 
-    // Effective coverage in [0,1] at a document pixel: (value/255, inverted if set)
-    // scaled by density. Live feather is added in a later increment.
-    [[nodiscard]] float evaluate(int x, int y) const noexcept {
-        float m = static_cast<float>(buffer_.value(x, y)) / 255.0f;
+    // The invert + density transform, applied to a mask byte already in hand. Split out
+    // of evaluate() so a caller that resolved the tile itself can skip the per-pixel
+    // buffer lookup without duplicating this arithmetic: there is one copy of it, so
+    // the hoisted and per-pixel paths cannot drift.
+    [[nodiscard]] float evaluateValue(uint8_t v) const noexcept {
+        float m = static_cast<float>(v) / 255.0f;
         if (inverted_) m = 1.0f - m;
         // clamp01 keeps the result valid even if density_ were ever set out of
         // range by a future path (e.g. deserialization) that bypasses setDensity.
         return clamp01(m * density_);
+    }
+
+    // Effective coverage in [0,1] at a document pixel: (value/255, inverted if set)
+    // scaled by density. Live feather is added in a later increment.
+    [[nodiscard]] float evaluate(int x, int y) const noexcept {
+        return evaluateValue(buffer_.value(x, y));
+    }
+
+    // True when this mask reveals everything at full strength, so multiplying by it is
+    // a no-op and the caller can skip its loop entirely.
+    [[nodiscard]] bool isFullyRevealing() const noexcept {
+        return !inverted_ && density_ >= 1.0f && buffer_.empty();
     }
 
 private:

@@ -36,6 +36,11 @@ bool rejectFill(Rect r) noexcept {
 }
 }  // namespace
 
+const MaskBuffer::GrayTile* MaskBuffer::findTile(TileCoord c) const noexcept {
+    auto it = tiles_.find(keyOf(c));
+    return it == tiles_.end() ? nullptr : &it->second;
+}
+
 uint8_t MaskBuffer::value(int x, int y) const noexcept {
     const TileCoord c{floorDiv(x, kTileSize), floorDiv(y, kTileSize)};
     auto it = tiles_.find(keyOf(c));
