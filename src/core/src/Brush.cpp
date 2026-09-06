@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -68,6 +69,10 @@ void stampDab(CoverageMap& cov, Vec2 center, float radius, float hardness, float
     const int y1 = static_cast<int>(std::ceil(center.y + radius));
     const float invR = 1.0f / radius;
 
+    CoverageKey memoKey{};
+    CoverageMap::iterator memoIt = cov.end();
+    bool haveMemo = false;
+
     for (int y = y0; y <= y1; ++y) {
         for (int x = x0; x <= x1; ++x) {
             const float dx = (static_cast<float>(x) + 0.5f - center.x) * invR;
@@ -79,16 +84,25 @@ void stampDab(CoverageMap& cov, Vec2 center, float radius, float hardness, float
             const int col = floorDiv(x, kTileSize);
             const int row = floorDiv(y, kTileSize);
             const CoverageKey key{col, row};
-            auto it = cov.find(key);
-            if (it == cov.end()) {
-                // C2: bound total stroke-buffer memory; stop adding tiles past the cap.
-                if (cov.size() >= kMaxStrokeTiles) continue;
-                it = cov.emplace(key,
-                                 std::vector<float>(static_cast<std::size_t>(kTilePixels), 0.0f))
-                         .first;
+            // A dab straddles at most a handful of tiles and scans in raster order, so
+            // consecutive pixels almost always want the tile the previous one did. Both
+            // the map lookup and the touched-set insert were paid per covered pixel.
+            // std::map iterators survive emplace, so the memo stays valid.
+            if (!haveMemo || key != memoKey) {
+                auto found = cov.find(key);
+                if (found == cov.end()) {
+                    // C2: bound total stroke-buffer memory; stop adding tiles past the cap.
+                    if (cov.size() >= kMaxStrokeTiles) continue;
+                    found = cov.emplace(key, std::vector<float>(
+                                                 static_cast<std::size_t>(kTilePixels), 0.0f))
+                                .first;
+                }
+                if (touched != nullptr) touched->insert(key);
+                memoKey = key;
+                memoIt = found;
+                haveMemo = true;
             }
-            if (touched != nullptr) touched->insert(key);
-            std::vector<float>& buf = it->second;
+            std::vector<float>& buf = memoIt->second;
 
             const int lx = x - col * kTileSize;
             const int ly = y - row * kTileSize;
@@ -196,6 +210,11 @@ std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& st
         auto after = std::make_shared<TileDataT<Pixel>>();
         if (before) *after = *before;  // start from prior pixels (else transparent)
 
+        // One lookup for the whole tile instead of one per painted pixel: the loop never
+        // leaves `coord`. `gate` already established active(), which is the precondition
+        // findTile carries. Absent means coverage 0 across the tile.
+        const Selection::GrayTile* selTile = gate ? selection->findTile(coord) : nullptr;
+
         bool changed = false;
         const auto sampleS0 = [&store](int x, int y) { return toFloat(store.pixel(x, y)); };
         for (std::size_t idx = 0; idx < static_cast<std::size_t>(kTilePixels); ++idx) {
@@ -207,7 +226,11 @@ std::unique_ptr<PaintCommand> flushStroke(LayerId layerId, TileStoreT<Pixel>& st
             const int py = baseY + ly;
             if (gate) {
                 // Confine the stroke to the active selection (soft edges for free).
-                a *= selection->coverage(px, py);
+                a *= selTile != nullptr
+                         ? static_cast<float>((*selTile)[static_cast<std::size_t>(ly) * kTileSize +
+                                                         static_cast<std::size_t>(lx)]) /
+                               255.0f
+                         : 0.0f;
                 if (a <= 0.0f) continue;
             }
             const Rgbaf dst = toFloat(after->px[idx]);
@@ -362,15 +385,54 @@ Rect coverageBounds(const CoverageMap& cov) {
     return bb;
 }
 
-// Look up the accumulated coverage at document-space (x, y); 0 outside touched tiles.
-float coverageAt(const CoverageMap& cov, int x, int y) {
-    const int col = floorDiv(x, kTileSize);
-    const int row = floorDiv(y, kTileSize);
-    const auto it = cov.find(CoverageKey{col, row});
-    if (it == cov.end()) return 0.0f;
-    const int lx = x - col * kTileSize;
-    const int ly = y - row * kTileSize;
-    return it->second[static_cast<std::size_t>(ly) * kTileSize + static_cast<std::size_t>(lx)];
+// A one-tile memo over any of the engine's tiled containers, for a loop that walks a
+// region in raster order. Consecutive pixels in a row share a tile for runs of up to
+// kTileSize, so the associative lookup happens once per run instead of once per pixel:
+// a 4000 px wide row goes from 4000 lookups to 16. The answer is identical to the
+// per-pixel accessor, including the absent-tile value, which each container defines
+// differently (coverage 0, mask kOpaque, selection 0).
+//
+// The lookup runs only on a tile change, so the indirect call through std::function is
+// paid once per run and never per pixel.
+template <class Tile>
+class RasterTileCursor {
+public:
+    using Value = typename Tile::value_type;
+
+    RasterTileCursor(std::function<const Tile*(TileCoord)> lookup, Value absent)
+        : lookup_(std::move(lookup)), absent_(absent) {}
+
+    Value at(int x, int y) {
+        const int col = floorDiv(x, kTileSize);
+        const int row = floorDiv(y, kTileSize);
+        if (!have_ || col != col_ || row != row_) {
+            tile_ = lookup_(TileCoord{col, row});
+            col_ = col;
+            row_ = row;
+            have_ = true;
+        }
+        if (tile_ == nullptr) return absent_;
+        return (*tile_)[static_cast<std::size_t>(y - row * kTileSize) * kTileSize +
+                        static_cast<std::size_t>(x - col * kTileSize)];
+    }
+
+private:
+    std::function<const Tile*(TileCoord)> lookup_;
+    const Tile* tile_ = nullptr;
+    Value absent_;
+    int col_ = 0;
+    int row_ = 0;
+    bool have_ = false;
+};
+
+// A cursor over the stroke's accumulated coverage. Same answers as coverageAt.
+RasterTileCursor<std::vector<float>> coverageCursor(const CoverageMap& cov) {
+    return RasterTileCursor<std::vector<float>>(
+        [&cov](TileCoord c) -> const std::vector<float>* {
+            const auto it = cov.find(CoverageKey{c.col, c.row});
+            return it == cov.end() ? nullptr : &it->second;
+        },
+        0.0f);
 }
 
 // Incremental live stroke for the per-pixel ops (see LiveStroke in Brush.hpp). Holds the
@@ -526,6 +588,10 @@ private:
             const int baseX = coord.col * kTileSize;
             const int baseY = coord.row * kTileSize;
             const std::vector<float>& buf = cov_.at(key);
+            // One lookup for the whole tile. This runs for every touched tile on every
+            // extend(), so the per-pixel version re-walked the map for the same answer
+            // once per mouse-move for the life of the stroke.
+            const Selection::GrayTile* selTile = gate ? selection_->findTile(coord) : nullptr;
             auto out = std::make_shared<TileDataT<Pixel>>();
             if (s0_[key])
                 *out = *s0_[key];  // start from the pre-stroke snapshot (else transparent)
@@ -538,7 +604,7 @@ private:
                 const int px = baseX + lx;
                 const int py = baseY + ly;
                 if (gate) {
-                    a *= selection_->coverage(px, py);
+                    a *= selTile != nullptr ? static_cast<float>((*selTile)[idx]) / 255.0f : 0.0f;
                     if (a <= 0.0f) continue;
                 }
                 const Rgbaf dst = toFloat(out->px[idx]);
@@ -632,9 +698,10 @@ std::unique_ptr<PaintCommand> blurStroke(Document& doc, LayerId layerId, const B
         [&cov, opacity, left, top](std::span<Rgbaf> img, int w, int h) {
             std::vector<Rgbaf> blurred(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
             gaussianBlur(img, blurred, w, h, kBlurSigma);
+            auto cov_at = coverageCursor(cov);
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
-                    const float c = std::min(coverageAt(cov, left + x, top + y), opacity);
+                    const float c = std::min(cov_at.at(left + x, top + y), opacity);
                     if (c <= 0.0f) continue;
                     const std::size_t i =
                         static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
@@ -672,9 +739,10 @@ std::unique_ptr<PaintCommand> sharpenStroke(Document& doc, LayerId layerId, cons
         [&cov, opacity, left, top](std::span<Rgbaf> img, int w, int h) {
             std::vector<Rgbaf> sharpened(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
             unsharpMask(img, sharpened, w, h, kSharpenRadius, kSharpenAmount, kSharpenThreshold);
+            auto cov_at = coverageCursor(cov);
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
-                    const float c = std::min(coverageAt(cov, left + x, top + y), opacity);
+                    const float c = std::min(cov_at.at(left + x, top + y), opacity);
                     if (c <= 0.0f) continue;
                     const std::size_t i =
                         static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
@@ -728,14 +796,27 @@ std::unique_ptr<MaskPaintCommand> maskPaintStroke(Document& doc, LayerId layerId
     std::vector<std::uint8_t> after(static_cast<std::size_t>(area));
     bool changed = false;
     MaskBuffer& buf = mask->buffer();
+    // This loop is dense over the whole stroke bounding box, up to kMaxMaskBrushPixels,
+    // and it did three separate associative lookups per pixel: the mask byte, the stroke
+    // coverage, and the selection gate. All three walk in the same raster order.
+    auto cov_at = coverageCursor(cov);
+    RasterTileCursor<MaskBuffer::GrayTile> mask_at([&buf](TileCoord c) { return buf.findTile(c); },
+                                                   MaskBuffer::kOpaque);
+    RasterTileCursor<Selection::GrayTile> sel_at(
+        [selection](TileCoord c) {
+            return selection != nullptr ? selection->findTile(c) : nullptr;
+        },
+        static_cast<std::uint8_t>(0));
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
                                   static_cast<std::size_t>(x);
-            const std::uint8_t b = buf.value(left + x, top + y);
+            const std::uint8_t b = mask_at.at(left + x, top + y);
             before[i] = b;
-            float c = std::min(coverageAt(cov, left + x, top + y), opacity);
-            if (gate) c *= selection->coverage(left + x, top + y);
+            float c = std::min(cov_at.at(left + x, top + y), opacity);
+            // `gate` already established selection->active(), which is the precondition
+            // findTile carries: it reports stored coverage and ignores the active flag.
+            if (gate) c *= static_cast<float>(sel_at.at(left + x, top + y)) / 255.0f;
             std::uint8_t a = b;
             if (c > 0.0f) {
                 const float nv = static_cast<float>(b) + (target - static_cast<float>(b)) * c;
@@ -832,6 +913,7 @@ std::unique_ptr<PaintCommand> healStroke(Document& doc, LayerId layerId, const B
             // Premultiply, and accumulate the mean of the surrounding (known) pixels.
             Rgbaf knownSum{};
             int64_t knownCount = 0;
+            auto cov_at = coverageCursor(cov);
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
                     const std::size_t i =
@@ -839,7 +921,7 @@ std::unique_ptr<PaintCommand> healStroke(Document& doc, LayerId layerId, const B
                         static_cast<std::size_t>(x);
                     const Rgbaf& o = img[i];
                     p[i] = Rgbaf{o.a * o.r, o.a * o.g, o.a * o.b, o.a};  // premultiply
-                    const float c = std::min(coverageAt(cov, left + x, top + y), opacity);
+                    const float c = std::min(cov_at.at(left + x, top + y), opacity);
                     heal[i] = c;
                     if (c > 0.0f) {
                         hole[i] = 1;
