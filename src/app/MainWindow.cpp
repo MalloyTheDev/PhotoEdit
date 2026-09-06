@@ -124,15 +124,32 @@ MainWindow::~MainWindow() {
     if (properties_ != nullptr) properties_->setDocument(nullptr);
 }
 
+namespace {
+
+// QKeySequence's standard keys are per-platform tables, and some entries are empty
+// on some platforms: Quit and Deselect resolve to nothing usable on Windows, and
+// SaveAs resolves to nothing at all on Linux. Prefer the platform's own binding when
+// it has one, and fall back to the conventional chord so an action is never left
+// silently unbound on one platform.
+[[nodiscard]] QKeySequence standardOr(QKeySequence::StandardKey key, const char* fallback) {
+    const QKeySequence seq(key);
+    return seq.isEmpty() ? QKeySequence(QString::fromUtf8(fallback)) : seq;
+}
+
+}  // namespace
+
 void MainWindow::buildMenuBar() {
     auto* fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
-    fileMenu->addAction(QStringLiteral("&New"), QKeySequence::New, this, &MainWindow::newDocument);
-    fileMenu->addAction(QStringLiteral("&Open..."), QKeySequence::Open, this,
+    fileMenu->addAction(QStringLiteral("&New"), standardOr(QKeySequence::New, "Ctrl+N"), this,
+                        &MainWindow::newDocument);
+    fileMenu->addAction(QStringLiteral("&Open..."), standardOr(QKeySequence::Open, "Ctrl+O"), this,
                         &MainWindow::openDocument);
     fileMenu->addSeparator();
-    docActions_.push_back(fileMenu->addAction(QStringLiteral("&Save"), QKeySequence::Save, this,
+    docActions_.push_back(fileMenu->addAction(QStringLiteral("&Save"),
+                                              standardOr(QKeySequence::Save, "Ctrl+S"), this,
                                               &MainWindow::saveDocument));
-    docActions_.push_back(fileMenu->addAction(QStringLiteral("Save &As..."), QKeySequence::SaveAs,
+    docActions_.push_back(fileMenu->addAction(QStringLiteral("Save &As..."),
+                                              standardOr(QKeySequence::SaveAs, "Ctrl+Shift+S"),
                                               this, &MainWindow::saveDocumentAs));
     // No StandardKey for export; Ctrl+Shift+E is the common convention.
     docActions_.push_back(fileMenu->addAction(QStringLiteral("E&xport As..."),
@@ -410,13 +427,14 @@ void MainWindow::buildMenuBar() {
     }
     auto* selMenu = menuBar()->addMenu(QStringLiteral("&Select"));
     docMenus_.push_back(selMenu);
-    selMenu->addAction(QStringLiteral("Select All"), QKeySequence::SelectAll, this, [this]() {
-        if (doc_) {
-            Selection target;
-            target.selectAll(doc_->canvasBounds());
-            doc_->history().push(std::make_unique<SetSelectionCommand>(target));
-        }
-    });
+    selMenu->addAction(QStringLiteral("Select All"), standardOr(QKeySequence::SelectAll, "Ctrl+A"),
+                       this, [this]() {
+                           if (doc_) {
+                               Selection target;
+                               target.selectAll(doc_->canvasBounds());
+                               doc_->history().push(std::make_unique<SetSelectionCommand>(target));
+                           }
+                       });
     selMenu->addAction(QStringLiteral("Deselect"), QKeySequence(QStringLiteral("Ctrl+D")), this,
                        [this]() {
                            if (doc_) {
