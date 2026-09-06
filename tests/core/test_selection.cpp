@@ -355,3 +355,55 @@ PE_TEST(magic_wand_rejects_extreme_aspect_image) {
     PixelBuffer ok(8, 8, Rgba8{255, 0, 0, 255});
     PE_CHECK(magicWandSelection(ok, 0, 0, 10).active());
 }
+
+// ---------------------------------------------------------------------------
+// Inverting the two representations of "everything selected".
+//
+// An inactive selection means everything is editable: coverage() is 1.0 and
+// value() is 255 everywhere, and selectAll() says so explicitly when it falls back
+// to inactive. So inverting an inactive selection must select nothing, exactly as
+// inverting an explicit Select All does. invert() read stored() rather than the
+// effective value, which treats inactive as empty and so inverted it to a FULL
+// selection: inverting Select All left everything selected.
+// ---------------------------------------------------------------------------
+
+PE_TEST(selection_invert_of_inactive_selects_nothing) {
+    Selection s;
+    PE_CHECK(!s.active());
+    PE_CHECK_NEAR(s.coverage(5, 5), 1.0f);  // inactive reads as everything selected
+
+    s.invert(Rect{0, 0, 20, 20});
+
+    PE_CHECK(s.active());  // now a real selection, not the implicit everything
+    PE_CHECK_NEAR(s.coverage(0, 0), 0.0f);
+    PE_CHECK_NEAR(s.coverage(5, 5), 0.0f);
+    PE_CHECK_NEAR(s.coverage(19, 19), 0.0f);
+}
+
+PE_TEST(selection_invert_agrees_across_both_forms_of_select_all) {
+    // Inactive and an explicit Select All mean the same thing, so inverting them
+    // must give the same result. This is the invariant the bug broke.
+    const Rect canvas{0, 0, 20, 20};
+
+    Selection implicitAll;  // inactive
+    implicitAll.invert(canvas);
+
+    Selection explicitAll;
+    explicitAll.selectAll(canvas);
+    explicitAll.invert(canvas);
+
+    for (const int p : {0, 5, 19}) {
+        PE_CHECK_NEAR(implicitAll.coverage(p, p), explicitAll.coverage(p, p));
+        PE_CHECK_NEAR(implicitAll.coverage(p, p), 0.0f);
+    }
+}
+
+PE_TEST(selection_invert_twice_from_inactive_reselects_everything) {
+    Selection s;
+    const Rect canvas{0, 0, 20, 20};
+    s.invert(canvas);  // everything -> nothing
+    s.invert(canvas);  // nothing -> everything
+    PE_CHECK_NEAR(s.coverage(0, 0), 1.0f);
+    PE_CHECK_NEAR(s.coverage(5, 5), 1.0f);
+    PE_CHECK_NEAR(s.coverage(19, 19), 1.0f);
+}

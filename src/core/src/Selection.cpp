@@ -199,10 +199,16 @@ void Selection::intersectRect(Rect r) {
 
 void Selection::invert(Rect canvas) {
     if (rejectFill(canvas)) return;  // bounds the canvas iteration/allocation
+    // An inactive selection means everything is selected (coverage() is 1.0 and
+    // value() is 255 everywhere), so it inverts to nothing. Reading stored() here
+    // instead saw 0 for every absent tile and inverted that to 255, which made
+    // inverting Select All leave everything selected.
+    const bool wasActive = active_;
     active_ = true;
     for (int y = canvas.top(); y < canvas.bottom(); ++y) {
         for (int x = canvas.left(); x < canvas.right(); ++x) {
-            setValue(x, y, static_cast<uint8_t>(255 - stored(x, y)));
+            const uint8_t current = wasActive ? stored(x, y) : static_cast<uint8_t>(255);
+            setValue(x, y, static_cast<uint8_t>(255 - current));
         }
     }
     dropEmptyTiles();
