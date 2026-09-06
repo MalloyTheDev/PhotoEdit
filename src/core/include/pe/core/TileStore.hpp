@@ -83,6 +83,7 @@ public:
         auto it = tiles_.find(key);
         if (it == tiles_.end()) {
             it = tiles_.emplace(key, std::make_shared<Tile>()).first;
+            noteTileAdded(c);
             return *it->second;
         }
         // Copy-on-write: if any other owner (an undo snapshot or a duplicated layer)
@@ -117,22 +118,36 @@ public:
     void setTile(TileCoord c, std::shared_ptr<Tile> data) {
         const Key key = keyOf(c);
         if (data == nullptr) {
-            tiles_.erase(key);
+            // Only invalidate if something was actually removed, so a no-op erase
+            // does not force a rescan.
+            if (tiles_.erase(key) > 0) boundsDirty_ = true;
         } else {
+            const bool added = !tiles_.contains(key);
             tiles_[key] = std::move(data);
+            if (added) noteTileAdded(c);  // replacing in place cannot move the bounds
         }
     }
     [[nodiscard]] std::size_t tileCount() const noexcept { return tiles_.size(); }
     [[nodiscard]] bool empty() const noexcept { return tiles_.empty(); }
 
     // Smallest document-space rect covering all occupied tiles (empty if none).
+    //
+    // Cached, because the compositor calls this per layer per display tile as its
+    // cull test and a full map scan there costs one node visit per stored tile per
+    // tile drawn. Adding a tile can only grow the bounds, so that is maintained in
+    // O(1); removing one can shrink them, which cannot be, so removal marks the
+    // cache stale and the next read recomputes once.
     [[nodiscard]] Rect contentBounds() const noexcept {
-        Rect bounds{};
-        for (const auto& [key, data] : tiles_) {
-            (void)data;
-            bounds = bounds.united(tileBounds(TileCoord{key.first, key.second}));
+        if (boundsDirty_) {
+            Rect bounds{};
+            for (const auto& [key, data] : tiles_) {
+                (void)data;
+                bounds = bounds.united(tileBounds(TileCoord{key.first, key.second}));
+            }
+            bounds_ = bounds;
+            boundsDirty_ = false;
         }
-        return bounds;
+        return bounds_;
     }
 
     // A shallow copy that SHARES tiles (copy-on-write). This is the snapshot /
@@ -161,7 +176,18 @@ private:
     using Key = std::pair<int, int>;  // {col, row}, ordered for std::map
     static constexpr Key keyOf(TileCoord c) noexcept { return {c.col, c.row}; }
 
+    // Growth is monotonic, so a new tile only ever extends the bounds. While the
+    // cache is stale there is nothing to extend; the pending recompute covers it.
+    void noteTileAdded(TileCoord c) noexcept {
+        if (!boundsDirty_) bounds_ = bounds_.united(tileBounds(c));
+    }
+
     std::map<Key, std::shared_ptr<Tile>> tiles_;
+
+    // Mutable so contentBounds() can stay const and noexcept. Copying the store
+    // copies both, which is correct: the same tiles imply the same bounds.
+    mutable Rect bounds_{};
+    mutable bool boundsDirty_ = false;
 };
 
 // 8-bit storage is the default and what every existing caller uses; the 16-bit and
