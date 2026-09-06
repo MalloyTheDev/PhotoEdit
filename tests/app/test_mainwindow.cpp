@@ -216,3 +216,101 @@ PE_TEST(mainwindow_help_menu_offers_about) {
     }
     PE_CHECK(foundAbout);
 }
+
+// ---------------------------------------------------------------------------
+// The options-bar zoom strip and the document identity strip.
+//
+// Zoom was previously a dead label in the status bar: it reported the level but
+// offered no way to change it. The identity strip ended in the literal "RGB"
+// regardless of the document's actual colour mode and depth.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Drives a File menu entry by visible text; false if it is not there, so a rename
+// fails the test rather than silently skipping the setup.
+bool triggerFileAction(pe::app::MainWindow& w, const QString& label) {
+    QMenu* file = topLevelMenu(w, QStringLiteral("File"));
+    if (file == nullptr) return false;
+    for (QAction* a : file->actions()) {
+        if (plain(a->text()).compare(label, Qt::CaseInsensitive) == 0) {
+            a->trigger();
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+PE_TEST(mainwindow_zoom_strip_controls_exist_and_are_named) {
+    pe::app::MainWindow w;
+    for (const QString& name :
+         {QStringLiteral("ZoomOut"), QStringLiteral("ZoomIn"), QStringLiteral("ZoomFit")}) {
+        QToolButton* b = w.findChild<QToolButton*>(name);
+        PE_CHECK(b != nullptr);
+        if (b == nullptr) continue;
+        // The visible text is a bare glyph, so the accessible name carries the meaning.
+        PE_CHECK(!b->accessibleName().isEmpty());
+        PE_CHECK(!b->toolTip().isEmpty());
+    }
+    PE_CHECK(w.findChild<QLabel*>(QStringLiteral("ZoomValue")) != nullptr);
+    PE_CHECK(w.findChild<QLabel*>(QStringLiteral("CanvasSize")) != nullptr);
+}
+
+PE_TEST(mainwindow_zoom_buttons_actually_change_the_zoom) {
+    // The point of the change: the readout is now a control, not a display.
+    pe::app::MainWindow w;
+    PE_CHECK(triggerFileAction(w, QStringLiteral("New")));
+
+    QToolButton* in = w.findChild<QToolButton*>(QStringLiteral("ZoomIn"));
+    QToolButton* out = w.findChild<QToolButton*>(QStringLiteral("ZoomOut"));
+    QLabel* value = w.findChild<QLabel*>(QStringLiteral("ZoomValue"));
+    PE_CHECK(in != nullptr && out != nullptr && value != nullptr);
+    if (in == nullptr || out == nullptr || value == nullptr) return;
+
+    const QString atStart = value->text();
+    PE_CHECK(!atStart.isEmpty());
+
+    in->click();
+    const QString zoomedIn = value->text();
+    PE_CHECK(zoomedIn != atStart);  // the readout tracks the control
+
+    out->click();
+    PE_CHECK(value->text() != zoomedIn);  // and back the other way
+}
+
+PE_TEST(mainwindow_zoom_strip_is_blank_with_no_document) {
+    pe::app::MainWindow w;
+    QLabel* value = w.findChild<QLabel*>(QStringLiteral("ZoomValue"));
+    QLabel* size = w.findChild<QLabel*>(QStringLiteral("CanvasSize"));
+    PE_CHECK(value != nullptr && size != nullptr);
+    if (value == nullptr || size == nullptr) return;
+    // No document means no meaningful zoom or canvas size; showing a stale number
+    // would be worse than showing nothing.
+    PE_CHECK(value->text().isEmpty());
+    PE_CHECK(size->text().isEmpty());
+}
+
+PE_TEST(mainwindow_document_strip_reports_real_size_mode_and_depth) {
+    pe::app::MainWindow w;
+    QLabel* tab = w.findChild<QLabel*>(QStringLiteral("DocTab"));
+    PE_CHECK(tab != nullptr);
+    if (tab == nullptr) return;
+    PE_CHECK(tab->text().contains(QStringLiteral("No document")));
+
+    PE_CHECK(triggerFileAction(w, QStringLiteral("New")));
+
+    // New creates 800x600 RGB 8-bit. The dimensions can only come from the document,
+    // so they are what proves the strip is derived rather than hard-coded.
+    PE_CHECK(tab->text().contains(QStringLiteral("800")));
+    PE_CHECK(tab->text().contains(QStringLiteral("600")));
+    PE_CHECK(tab->text().contains(QStringLiteral("RGB/8")));
+
+    QLabel* size = w.findChild<QLabel*>(QStringLiteral("CanvasSize"));
+    PE_CHECK(size != nullptr);
+    if (size != nullptr) {
+        PE_CHECK(size->text().contains(QStringLiteral("800")));
+        PE_CHECK(size->text().contains(QStringLiteral("600")));
+    }
+}

@@ -1,5 +1,7 @@
 #include "PropertiesPanel.hpp"
 
+#include "PixelFormatNames.hpp"
+
 #include "pe/core/PixelFormat.hpp"
 
 #include <QFont>
@@ -12,38 +14,6 @@ namespace pe::app {
 namespace {
 
 constexpr auto kDash = "\xE2\x80\x94";  // em dash, shown for every value when no doc
-
-// Human-readable names for the document's color model and storage depth. These
-// mirror the menus a layered editor exposes for Image > Mode.
-[[nodiscard]] const char* colorModeName(pe::ColorMode mode) {
-    switch (mode) {
-        case pe::ColorMode::RGB:
-            return "RGB";
-        case pe::ColorMode::CMYK:
-            return "CMYK";
-        case pe::ColorMode::Gray:
-            return "Gray";
-        case pe::ColorMode::Lab:
-            return "Lab";
-        case pe::ColorMode::Indexed:
-            return "Indexed";
-        case pe::ColorMode::Bitmap:
-            return "Bitmap";
-    }
-    return "RGB";
-}
-
-[[nodiscard]] const char* bitDepthName(pe::BitDepth depth) {
-    switch (depth) {
-        case pe::BitDepth::U8:
-            return "8 Bits/Channel";
-        case pe::BitDepth::U16:
-            return "16 Bits/Channel";
-        case pe::BitDepth::F32:
-            return "32 Bits/Channel";
-    }
-    return "8 Bits/Channel";
-}
 
 // A small, bold, dim section header (object-named so the stylesheet can target it).
 [[nodiscard]] QLabel* makeSectionHeader(const QString& text, QWidget* parent) {

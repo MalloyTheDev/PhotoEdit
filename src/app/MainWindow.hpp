@@ -65,6 +65,9 @@ private:
     // since the toggles come from the docks themselves.
     void populateWindowMenu();
     void showAbout();
+    // Canvas dimensions and the zoom readout in the options bar. Driven by the
+    // document swap and by CanvasView::zoomChanged.
+    void refreshZoomStrip();
     void clearCursorPos();  // blanks the position readout when the cursor is off-canvas
 
     // Which contextual control group the options bar shows for the active tool.
@@ -102,10 +105,12 @@ private:
     HistoryPanel* history_ = nullptr;
     ColorPanel* colorPanel_ = nullptr;
     PropertiesPanel* properties_ = nullptr;
-    QLabel* toolLabel_ = nullptr;      // status bar: active tool
-    QLabel* toolHintLabel_ = nullptr;  // status bar: what the active tool does
-    QLabel* posLabel_ = nullptr;       // status bar: cursor position in document pixels
-    QLabel* zoomLabel_ = nullptr;      // status bar: zoom percentage
+    QLabel* toolLabel_ = nullptr;        // status bar: active tool
+    QLabel* toolHintLabel_ = nullptr;    // status bar: what the active tool does
+    QLabel* posLabel_ = nullptr;         // status bar: cursor position in document pixels
+    QLabel* zoomLabel_ = nullptr;        // status bar: zoom percentage
+    QLabel* canvasSizeLabel_ = nullptr;  // options bar: canvas dimensions
+    QLabel* zoomValueLabel_ = nullptr;   // options bar: zoom percentage
 
     QMenu* windowMenu_ = nullptr;         // View-style panel toggles, filled after docks exist
     QToolBar* optionsBar_ = nullptr;      // contextual tool options (top)

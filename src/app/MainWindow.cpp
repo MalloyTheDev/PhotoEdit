@@ -1,5 +1,7 @@
 #include "MainWindow.hpp"
 
+#include "PixelFormatNames.hpp"
+
 #include "CanvasView.hpp"
 #include "ColorPanel.hpp"
 #include "CurvesDialog.hpp"
@@ -778,6 +780,47 @@ void MainWindow::buildOptionsBar() {
     auto* rspacer = new QWidget(optionsBar_);
     rspacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     optionsBar_->addWidget(rspacer);
+
+    // Canvas size and a working zoom control. The zoom level was previously a dead
+    // label in the status bar: it reported the value but offered no way to change it,
+    // so zooming was reachable only from the View menu or the wheel.
+    auto* zoomGroup = new QWidget(optionsBar_);
+    zoomGroup->setObjectName(QStringLiteral("ZoomGroup"));
+    auto* zl = new QHBoxLayout(zoomGroup);
+    zl->setContentsMargins(0, 0, 0, 0);
+    zl->setSpacing(4);
+
+    canvasSizeLabel_ = new QLabel(zoomGroup);
+    canvasSizeLabel_->setObjectName(QStringLiteral("CanvasSize"));
+    zl->addWidget(canvasSizeLabel_);
+
+    auto makeZoomButton = [this, zoomGroup](const QString& text, const QString& name,
+                                            const QString& tip, void (CanvasView::*slot)()) {
+        auto* b = new QToolButton(zoomGroup);
+        b->setObjectName(name);
+        b->setText(text);
+        b->setAutoRaise(true);
+        b->setToolTip(tip);
+        b->setAccessibleName(tip);  // text is a bare glyph, so it is not a usable name
+        connect(b, &QToolButton::clicked, this, [this, slot] { (canvas_->*slot)(); });
+        return b;
+    };
+
+    zl->addWidget(makeZoomButton(QStringLiteral("−"), QStringLiteral("ZoomOut"),
+                                 QStringLiteral("Zoom out"), &CanvasView::zoomOut));
+    zoomValueLabel_ = new QLabel(zoomGroup);
+    zoomValueLabel_->setObjectName(QStringLiteral("ZoomValue"));
+    zoomValueLabel_->setAlignment(Qt::AlignCenter);
+    zoomValueLabel_->setMinimumWidth(52);  // stops the row shifting as digits change
+    zl->addWidget(zoomValueLabel_);
+    zl->addWidget(makeZoomButton(QStringLiteral("+"), QStringLiteral("ZoomIn"),
+                                 QStringLiteral("Zoom in"), &CanvasView::zoomIn));
+    zl->addWidget(makeZoomButton(QStringLiteral("Fit"), QStringLiteral("ZoomFit"),
+                                 QStringLiteral("Fit on screen"), &CanvasView::fitToWindow));
+
+    optionsBar_->addWidget(zoomGroup);
+    refreshZoomStrip();
+
     for (const UtilDef& def : kUtilities) {
         const QString label = QString::fromUtf8(def.label);
         auto* b = new QToolButton(optionsBar_);
@@ -825,6 +868,20 @@ void MainWindow::updateOptionsBar(OptKind kind, const QString& toolName) {
     if (wandOptAction_ != nullptr) wandOptAction_->setVisible(kind == OptKind::Wand);
 }
 
+void MainWindow::refreshZoomStrip() {
+    const bool hasDoc = doc_ != nullptr;
+    if (canvasSizeLabel_ != nullptr) {
+        canvasSizeLabel_->setText(hasDoc ? QStringLiteral("%1 × %2 px")
+                                               .arg(doc_->canvasSize().width)
+                                               .arg(doc_->canvasSize().height)
+                                         : QString());
+    }
+    if (zoomValueLabel_ != nullptr) {
+        zoomValueLabel_->setText(
+            hasDoc ? QStringLiteral("%1%").arg(canvas_->zoomPercent(), 0, 'f', 1) : QString());
+    }
+}
+
 void MainWindow::refreshDocTab() {
     if (docTab_ == nullptr) return;
     if (doc_ == nullptr) {
@@ -833,8 +890,15 @@ void MainWindow::refreshDocTab() {
     }
     const QString name =
         currentPath_.isEmpty() ? QStringLiteral("Untitled") : QFileInfo(currentPath_).fileName();
-    docTab_->setText(
-        QStringLiteral("   %1   %2%   RGB   ").arg(name).arg(canvas_->zoomPercent(), 0, 'f', 1));
+    // Colour mode and depth come from the document. This line previously ended in the
+    // literal string "RGB", so a Grayscale or 16-bit document described itself wrongly.
+    // Zoom moved to the options-bar control, which can actually change it.
+    docTab_->setText(QStringLiteral("   %1   %2 × %3 · %4/%5   ")
+                         .arg(name)
+                         .arg(doc_->canvasSize().width)
+                         .arg(doc_->canvasSize().height)
+                         .arg(QString::fromUtf8(colorModeName(doc_->colorMode())))
+                         .arg(bitDepthBits(doc_->bitDepth())));
 }
 
 QWidget* MainWindow::makeColorSwatches() {
@@ -1403,6 +1467,7 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     if (properties_ != nullptr) properties_->setDocument(doc_.get());
     refreshTitle();
     refreshDocTab();
+    refreshZoomStrip();
 }
 
 bool MainWindow::confirmDiscard() {
@@ -1564,6 +1629,7 @@ void MainWindow::buildStatusBar() {
                                .arg(static_cast<int>(std::floor(docPos.y()))));
     });
     connect(canvas_, &CanvasView::cursorLeft, this, &MainWindow::clearCursorPos);
+    connect(canvas_, &CanvasView::zoomChanged, this, [this](double) { refreshZoomStrip(); });
     connect(canvas_, &CanvasView::zoomChanged, this, [this](double pct) {
         zoomLabel_->setText(QStringLiteral("%1%").arg(pct, 0, 'f', 0));
         refreshDocTab();
