@@ -73,7 +73,6 @@ constexpr const char* kSaveFilter =
 
 // A calm light tint for resting tool icons (the active one is marked by an accent
 // outline, so the glyph itself stays restrained).
-const QColor kToolIconColor(0xbe, 0xc4, 0xcc);
 
 // One tool-strip entry. `tool` == Inactive marks a scaffolded, not-yet-wired tool.
 struct ToolDef {
@@ -645,8 +644,9 @@ void MainWindow::buildToolBar() {
         if (g > 0) tb->addSeparator();
         for (const ToolDef& def : groups[g]) {
             QAction* a =
-                tb->addAction(renderIconAsIcon(QString::fromUtf8(def.icon), kToolIconColor, 22),
+                tb->addAction(renderIconAsIcon(QString::fromUtf8(def.icon), themeIconColor(), 22),
                               QString::fromUtf8(def.label));
+            themedIcons_.push_back({a, QString::fromUtf8(def.icon), 22});
             a->setCheckable(true);
             a->setActionGroup(toolGroup);
             const bool wired = def.tool != Tool::Inactive;
@@ -824,7 +824,8 @@ void MainWindow::buildOptionsBar() {
     for (const UtilDef& def : kUtilities) {
         const QString label = QString::fromUtf8(def.label);
         auto* b = new QToolButton(optionsBar_);
-        b->setIcon(renderIconAsIcon(QString::fromUtf8(def.icon), kToolIconColor, 18));
+        b->setIcon(renderIconAsIcon(QString::fromUtf8(def.icon), themeIconColor(), 18));
+        themedButtons_.push_back({b, QString::fromUtf8(def.icon), 18});
         b->setAutoRaise(true);
         b->setToolTip(label + QStringLiteral("  (coming soon)"));
         // Icon-only buttons carry no text, so assistive technology has nothing to
@@ -1636,8 +1637,19 @@ void MainWindow::buildStatusBar() {
     });
 }
 
+void MainWindow::retintIcons() {
+    const QColor tint = themeIconColor();
+    for (const ThemedIcon& t : themedIcons_) {
+        if (t.action != nullptr) t.action->setIcon(renderIconAsIcon(t.name, tint, t.size));
+    }
+    for (const ThemedButton& t : themedButtons_) {
+        if (t.button != nullptr) t.button->setIcon(renderIconAsIcon(t.name, tint, t.size));
+    }
+}
+
 void MainWindow::setTheme(ThemeId id) {
     applyTheme(*qApp, id);
+    retintIcons();  // the glyphs are tinted at render time, so they need rebuilding
     if (canvas_ != nullptr) canvas_->update();  // repaint the themed pasteboard
     QSettings().setValue(QStringLiteral("theme"), static_cast<int>(id));
 }

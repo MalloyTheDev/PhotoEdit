@@ -9,6 +9,7 @@
 #include <QString>
 
 #include <memory>
+#include <vector>
 
 class QAction;
 class QCloseEvent;
@@ -68,6 +69,8 @@ private:
     // Canvas dimensions and the zoom readout in the options bar. Driven by the
     // document swap and by CanvasView::zoomChanged.
     void refreshZoomStrip();
+    // Bundled glyphs are tinted when rendered, so a theme change has to rebuild them.
+    void retintIcons();
     void clearCursorPos();  // blanks the position readout when the cursor is off-canvas
 
     // Which contextual control group the options bar shows for the active tool.
@@ -111,6 +114,21 @@ private:
     QLabel* zoomLabel_ = nullptr;        // status bar: zoom percentage
     QLabel* canvasSizeLabel_ = nullptr;  // options bar: canvas dimensions
     QLabel* zoomValueLabel_ = nullptr;   // options bar: zoom percentage
+
+    // Icon-bearing widgets and the glyph each one shows, so retintIcons() can rebuild
+    // them when the theme changes.
+    struct ThemedIcon {
+        QAction* action;
+        QString name;
+        int size;
+    };
+    struct ThemedButton {
+        QToolButton* button;
+        QString name;
+        int size;
+    };
+    std::vector<ThemedIcon> themedIcons_;
+    std::vector<ThemedButton> themedButtons_;
 
     QMenu* windowMenu_ = nullptr;         // View-style panel toggles, filled after docks exist
     QToolBar* optionsBar_ = nullptr;      // contextual tool options (top)

@@ -9,11 +9,14 @@
 #include "pe_test.hpp"
 
 #include <QAction>
+#include <QColor>
 #include <QDockWidget>
+#include <QImage>
 #include <QLabel>
 #include <QList>
 #include <QMenu>
 #include <QMenuBar>
+#include <QSize>
 #include <QString>
 #include <QToolBar>
 #include <QToolButton>
@@ -313,4 +316,71 @@ PE_TEST(mainwindow_document_strip_reports_real_size_mode_and_depth) {
         PE_CHECK(size->text().contains(QStringLiteral("800")));
         PE_CHECK(size->text().contains(QStringLiteral("600")));
     }
+}
+
+PE_TEST(mainwindow_switching_theme_retints_the_tool_icons) {
+    // The glyphs are tinted at render time, so a theme change has to rebuild them.
+    // themeIconColor() following the theme is not enough on its own: the already
+    // built QIcons would keep the old tint unless setTheme rebuilds them.
+    pe::app::MainWindow w;
+    QToolBar* strip = w.findChild<QToolBar*>(QStringLiteral("ToolStrip"));
+    PE_CHECK(strip != nullptr);
+    if (strip == nullptr) return;
+
+    QAction* tool = nullptr;
+    for (QAction* a : strip->actions()) {
+        if (!a->isSeparator() && a->isCheckable() && !a->icon().isNull()) {
+            tool = a;
+            break;
+        }
+    }
+    PE_CHECK(tool != nullptr);
+    if (tool == nullptr) return;
+
+    // Brightest pixel of the rendered glyph, which is the tinted stroke.
+    auto strokeOf = [](const QAction* a) {
+        const QImage img = a->icon().pixmap(QSize(22, 22)).toImage();
+        QColor best;
+        int bestAlpha = 0;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const QColor c = img.pixelColor(x, y);
+                if (c.alpha() > bestAlpha) {
+                    bestAlpha = c.alpha();
+                    best = c;
+                }
+            }
+        }
+        return best;
+    };
+
+    QMenu* view = topLevelMenu(w, QStringLiteral("View"));
+    PE_CHECK(view != nullptr);
+    if (view == nullptr) return;
+    QMenu* themeMenu = nullptr;
+    for (QAction* a : view->actions()) {
+        if (a->menu() != nullptr &&
+            plain(a->text()).compare(QStringLiteral("Theme"), Qt::CaseInsensitive) == 0) {
+            themeMenu = a->menu();
+        }
+    }
+    PE_CHECK(themeMenu != nullptr);
+    if (themeMenu == nullptr) return;
+
+    QAction* nocturne = nullptr;
+    QAction* graphite = nullptr;
+    for (QAction* a : themeMenu->actions()) {
+        if (plain(a->text()) == QStringLiteral("Nocturne")) nocturne = a;
+        if (plain(a->text()) == QStringLiteral("Graphite")) graphite = a;
+    }
+    PE_CHECK(nocturne != nullptr && graphite != nullptr);
+    if (nocturne == nullptr || graphite == nullptr) return;
+
+    nocturne->trigger();
+    const QColor before = strokeOf(tool);
+    graphite->trigger();
+    const QColor after = strokeOf(tool);
+    PE_CHECK(before != after);  // the icon actually followed the theme
+
+    nocturne->trigger();  // leave the default active for the rest of the suite
 }

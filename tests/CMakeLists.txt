@@ -67,6 +67,7 @@ if(PHOTOEDIT_BUILD_APP)
         app/test_mainwindow.cpp
         app/test_document_guard.cpp
         app/test_pixelformatnames.cpp
+        app/test_iconutil.cpp
     )
 
     target_link_libraries(pe_app_tests PRIVATE PhotoEdit::App)
