@@ -7,11 +7,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <ios>
 #include <optional>
 #include <string>
+#include <system_error>
 
 namespace pe {
 
@@ -172,6 +175,23 @@ std::unique_ptr<Document> loadDocument(const std::string& path) {
     return importDocument(bytes, fmt);
 }
 
+namespace {
+
+// A temp path beside the destination. Same directory on purpose: a temp in the
+// system temp area could sit on a different volume, where the rename is neither
+// atomic nor guaranteed to succeed. The suffix is unique enough that a leftover
+// temp or a concurrent save does not collide; a collision would only cause a clean
+// save failure, never a corrupted destination.
+std::filesystem::path tempSiblingPath(const std::filesystem::path& dst) {
+    static unsigned long long seq = 0;
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    std::filesystem::path tmp = dst;
+    tmp += ".pe-save-" + std::to_string(stamp) + "-" + std::to_string(seq++) + ".tmp";
+    return tmp;
+}
+
+}  // namespace
+
 bool saveDocument(const Document& doc, const std::string& path) {
     return saveDocument(doc, path, ExportOptions{});
 }
@@ -183,11 +203,44 @@ bool saveDocument(const Document& doc, const std::string& path, const ExportOpti
     const std::vector<std::byte> bytes = exportDocument(doc, fmt, opts);
     if (bytes.empty()) return false;
 
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file) return false;
-    file.write(reinterpret_cast<const char*>(bytes.data()),
-               static_cast<std::streamsize>(bytes.size()));
-    return file.good();
+    // Crash-safe write, as docs/systems/20-file-io.md requires: the destination is
+    // never opened for writing. Everything goes to a sibling temp file which only
+    // replaces the original once it is completely written, so a failure at any point
+    // below (disk full, an IO error, the process dying) leaves the user's existing
+    // file exactly as it was. Previously this opened the destination with
+    // std::ios::trunc, so any of those destroyed a file the user had already saved.
+    //
+    // Scope of the guarantee: this protects against write errors and process death.
+    // It does not by itself guarantee durability across a power loss, which would
+    // additionally require flushing the temp file's contents to the storage device
+    // before the rename; std::ofstream exposes no portable way to do that.
+    const std::filesystem::path dst(path);
+    const std::filesystem::path tmp = tempSiblingPath(dst);
+
+    {
+        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+        if (!file) return false;  // could not create the temp; original untouched
+        file.write(reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+        file.close();  // flushes; some errors only surface here
+        if (!file) {
+            std::error_code rm;
+            std::filesystem::remove(tmp, rm);
+            return false;
+        }
+    }
+
+    // Atomic replace. On failure (for example another process holding the
+    // destination open) the original survives and the temp is cleaned up, so the
+    // save reports failure rather than leaving a corrupted file behind.
+    std::error_code ec;
+    std::filesystem::rename(tmp, dst, ec);
+    if (ec) {
+        std::error_code rm;
+        std::filesystem::remove(tmp, rm);
+        return false;
+    }
+    return true;
 }
 
 }  // namespace pe

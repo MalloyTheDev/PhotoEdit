@@ -5,6 +5,9 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -144,3 +147,152 @@ PE_TEST(documentio_export_jpeg_quality_option) {
     PE_CHECK_EQ(deflt.size(), opt90.size());
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// Crash-safe saving. docs/systems/20-file-io.md requires that a save "write to a
+// temp file and atomically rename; never truncate the user's existing file on a
+// failed save", and lists "simulated write failures leave the prior file intact"
+// as a test. saveDocument previously opened the destination with std::ios::trunc,
+// so any failure mid-write destroyed a file the user had already saved.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A private directory per test, so a stray-temp scan cannot see another test's files.
+std::filesystem::path makeScratchDir(const char* tag) {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                      ("pe_savesafe_" + std::string(tag) + "_" +
+                                       std::to_string(reinterpret_cast<std::uintptr_t>(tag)));
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
+std::size_t countLeftoverTemps(const std::filesystem::path& dir) {
+    std::size_t n = 0;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (e.path().filename().string().find(".pe-save-") != std::string::npos) ++n;
+    }
+    return n;
+}
+
+std::string readAll(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+std::unique_ptr<Document> smallDoc() {
+    auto doc = Document::createBlank(Size{8, 8});
+    auto* pl = dynamic_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    if (pl != nullptr) pl->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{1, 2, 3, 255});
+    return doc;
+}
+
+}  // namespace
+
+PE_TEST(documentio_save_replaces_existing_file_and_leaves_no_temp) {
+    const std::filesystem::path dir = makeScratchDir("ok");
+    const std::filesystem::path dst = dir / "target.pedoc";
+    {
+        std::ofstream seed(dst, std::ios::binary | std::ios::trunc);
+        seed << "PREVIOUS CONTENT";
+    }
+
+    PE_CHECK(saveDocument(*smallDoc(), dst.string()));
+    PE_CHECK(readAll(dst) != "PREVIOUS CONTENT");  // actually replaced
+    PE_CHECK(loadDocument(dst.string()) != nullptr);
+    PE_CHECK_EQ(countLeftoverTemps(dir), static_cast<std::size_t>(0));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+PE_TEST(documentio_failed_save_leaves_the_existing_file_intact) {
+    // .psd is import-only, so exportDocument yields nothing and the save fails. The
+    // file already at that path must survive untouched.
+    const std::filesystem::path dir = makeScratchDir("encodefail");
+    const std::filesystem::path dst = dir / "target.psd";
+    {
+        std::ofstream seed(dst, std::ios::binary | std::ios::trunc);
+        seed << "IRREPLACEABLE";
+    }
+
+    PE_CHECK(!saveDocument(*smallDoc(), dst.string()));
+    PE_CHECK_EQ(readAll(dst), std::string("IRREPLACEABLE"));
+    PE_CHECK_EQ(countLeftoverTemps(dir), static_cast<std::size_t>(0));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+PE_TEST(documentio_save_that_cannot_replace_the_destination_preserves_it) {
+    // A directory sitting at the destination path makes the final rename fail, which
+    // exercises the failure AFTER the temp has been fully written. The destination
+    // and its contents must survive, and the temp must not be left behind.
+    const std::filesystem::path dir = makeScratchDir("renamefail");
+    const std::filesystem::path dst = dir / "target.pedoc";  // created as a DIRECTORY
+    std::error_code ec;
+    std::filesystem::create_directories(dst, ec);
+    {
+        std::ofstream inside(dst / "keepme.txt", std::ios::binary | std::ios::trunc);
+        inside << "STILL HERE";
+    }
+
+    PE_CHECK(!saveDocument(*smallDoc(), dst.string()));
+    PE_CHECK(std::filesystem::is_directory(dst));
+    PE_CHECK_EQ(readAll(dst / "keepme.txt"), std::string("STILL HERE"));
+    PE_CHECK_EQ(countLeftoverTemps(dir), static_cast<std::size_t>(0));
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+PE_TEST(documentio_save_into_a_missing_directory_fails_cleanly) {
+    // The temp cannot even be created. Nothing should be produced anywhere.
+    const std::filesystem::path dir = makeScratchDir("nodir");
+    const std::filesystem::path dst = dir / "no_such_subdir" / "target.pedoc";
+
+    PE_CHECK(!saveDocument(*smallDoc(), dst.string()));
+    PE_CHECK(!std::filesystem::exists(dst));
+    PE_CHECK_EQ(countLeftoverTemps(dir), static_cast<std::size_t>(0));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+PE_TEST(documentio_save_replaces_the_destination_rather_than_writing_into_it) {
+    // The requirement is a temp file plus an atomic rename, NOT a write into the
+    // existing file. A hard link makes the difference observable: after a rename the
+    // link still names the original file object, so it keeps the old bytes. Had the
+    // save truncated and rewritten the destination in place, the link would show the
+    // new bytes, because it would be the very same file.
+    //
+    // This is the case that distinguishes the two implementations. The other
+    // crash-safety tests here pin the contract but pass either way, because every
+    // failure they can portably trigger happens before a truncating implementation
+    // would have opened the destination.
+    const std::filesystem::path dir = makeScratchDir("identity");
+    const std::filesystem::path dst = dir / "target.pedoc";
+    const std::filesystem::path link = dir / "hardlink.bin";
+    {
+        std::ofstream seed(dst, std::ios::binary | std::ios::trunc);
+        seed << "PREVIOUS CONTENT";
+    }
+
+    std::error_code ec;
+    std::filesystem::create_hard_link(dst, link, ec);
+    if (ec) {
+        // Some filesystems have no hard links; nothing to assert there.
+        std::printf("    (skipped: hard links unsupported here: %s)\n", ec.message().c_str());
+        std::filesystem::remove_all(dir, ec);
+        return;
+    }
+
+    PE_CHECK(saveDocument(*smallDoc(), dst.string()));
+    PE_CHECK(readAll(dst) != "PREVIOUS CONTENT");                 // destination updated
+    PE_CHECK_EQ(readAll(link), std::string("PREVIOUS CONTENT"));  // original object untouched
+    PE_CHECK_EQ(countLeftoverTemps(dir), static_cast<std::size_t>(0));
+
+    std::filesystem::remove_all(dir, ec);
+}
