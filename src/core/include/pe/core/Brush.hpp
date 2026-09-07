@@ -263,6 +263,16 @@ public:
                                                            const BrushSettings& settings,
                                                            int offsetX, int offsetY,
                                                            const Selection* selection = nullptr);
+// Incremental Blur and Sharpen. Same contract as the others. They convolve, so a tile is
+// re-derived from a halo of pre-stroke pixels drawn from its neighbours; the result is
+// byte-identical to blurStroke/sharpenStroke.
+[[nodiscard]] std::unique_ptr<LiveStroke> beginBlurStroke(Document& doc, LayerId layerId,
+                                                          const BrushSettings& settings,
+                                                          const Selection* selection = nullptr);
+[[nodiscard]] std::unique_ptr<LiveStroke> beginSharpenStroke(Document& doc, LayerId layerId,
+                                                             const BrushSettings& settings,
+                                                             const Selection* selection = nullptr);
+
 // Incremental mask painting. Same contract as the others, but it edits the active layer's
 // MASK and commits a MaskPaintCommand. Returns nullptr if the layer has no mask.
 // `targetGray` is the user-facing value (0 hides, 1 reveals), as for maskPaintStroke.

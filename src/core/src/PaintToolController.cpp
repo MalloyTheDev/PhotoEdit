@@ -98,8 +98,17 @@ std::unique_ptr<LiveStroke> PaintToolController::createLive(Document& doc) {
         }
         case Mode::MaskPaint:
             return beginMaskPaintStroke(doc, layer_, brush_, maskGrayFromColor(color_), selection_);
+        case Mode::Blur:
+            return beginBlurStroke(doc, layer_, brush_, selection_);
+        case Mode::Sharpen:
+            return beginSharpenStroke(doc, layer_, brush_, selection_);
         default:
-            return nullptr;  // Blur/Sharpen/Heal (region bake) still use the batched path
+            // Heal alone still rebuilds from scratch. Its Gauss-Seidel fill is a boundary
+            // value problem over the whole hole, so a tile-local re-bake cannot reproduce
+            // it: a new dab turns previously-known boundary pixels into unknowns and
+            // changes the solution at pixels painted a hundred samples earlier. Bounding
+            // Heal means redefining the operation, which is tracked separately.
+            return nullptr;
     }
 }
 

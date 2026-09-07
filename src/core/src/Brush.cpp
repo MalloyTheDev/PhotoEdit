@@ -911,6 +911,195 @@ private:
     bool atBudget_ = false;
 };
 
+// Incremental Blur and Sharpen, the region-bake counterpart of LiveStrokeImpl.
+//
+// These convolve, so a pixel's result depends on the ORIGINAL pixels within one kernel
+// radius of it. That neighbourhood crosses tile boundaries, which is the whole reason this
+// needs its own class: a tile is re-derived from a halo of pre-stroke pixels drawn from its
+// neighbours, not from the tile alone.
+//
+// It is byte-identical to the batched path rather than merely close, and only because the
+// batched path was fixed first. While the convolution replicated at the edge of the
+// stroke's coverage box, a pixel's value depended on how long the stroke had become, and
+// nothing tile-local could reproduce that. With the bake running over the coverage box
+// grown by the kernel reach, no blended pixel sees a replicated edge on either path, both
+// sum the same values in the same order, and the results agree bit for bit.
+// Outside the template: one enum shared by every pixel depth, so the dispatch below can
+// pass the same value to each instantiation.
+enum class RegionKind : std::uint8_t { Blur, Sharpen };
+
+template <class Pixel>
+class LiveRegionStroke final : public LiveStroke {
+public:
+    LiveRegionStroke(LayerId layer, TileStoreT<Pixel>& store, const BrushSettings& brush,
+                     RegionKind kind, const Selection* selection)
+        : layer_(layer),
+          store_(store),
+          kind_(kind),
+          opacity_(clamp01(brush.opacity)),
+          selection_(selection),
+          gate_(selection != nullptr && selection->active()),
+          reach_(kind == RegionKind::Blur ? kernelReach(kBlurSigma) : kernelReach(kSharpenRadius)),
+          name_(kind == RegionKind::Blur ? "Blur Brush" : "Sharpen Brush"),
+          stamper_(brush) {}
+
+    Rect extend(std::span<const StrokePoint> points) override {
+        std::set<CoverageKey> touched;
+        stamper_.stampNew(points, cov_, touched);
+        return flushTiles(touched);
+    }
+
+    std::unique_ptr<Command> finish() override {
+        std::vector<typename PaintCommand::DeltaT<Pixel>> deltas;
+        Rect dirty{};
+        for (const CoverageKey& key : changed_) {
+            const TileCoord coord{key.first, key.second};
+            deltas.push_back(
+                typename PaintCommand::DeltaT<Pixel>{coord, s0_[key], store_.sharedTile(coord)});
+            dirty = dirty.united(tileBounds(coord));
+        }
+        if (deltas.empty()) return nullptr;
+        return std::make_unique<PaintCommand>(layer_, dirty, std::move(deltas), name_);
+    }
+
+    void cancel() override {
+        for (auto& [key, snap] : s0_) store_.setTile(TileCoord{key.first, key.second}, snap);
+        s0_.clear();
+        cov_.clear();
+        changed_.clear();
+    }
+
+private:
+    // Capture a tile's pre-stroke content the first time the stroke reaches it. The store
+    // still holds S0 then, because flushTiles only writes a tile after snapshotting it.
+    void ensureS0(const CoverageKey& key) {
+        if (s0_.find(key) == s0_.end()) {
+            s0_.emplace(key, store_.sharedTile(TileCoord{key.first, key.second}));
+        }
+    }
+
+    // The pre-stroke pixel at a document coordinate. A snapshotted tile has been written, so
+    // its S0 comes from the snapshot; an untouched tile still holds S0 in the live store.
+    // This is what lets a tile's halo reach into neighbours the stroke has already changed.
+    [[nodiscard]] Rgbaf sampleS0(int x, int y) const {
+        const CoverageKey key{floorDiv(x, kTileSize), floorDiv(y, kTileSize)};
+        const auto it = s0_.find(key);
+        if (it == s0_.end()) return toFloat(store_.pixel(x, y));
+        if (!it->second) return Rgbaf{};  // the tile was absent before the stroke
+        return toFloat(it->second->px[static_cast<std::size_t>(tileLocalOffset(y)) * kTileSize +
+                                      static_cast<std::size_t>(tileLocalOffset(x))]);
+    }
+
+    // The convolved tile, computed once. It is a pure function of the PRE-STROKE pixels in
+    // the tile and its halo, and those never change during a stroke, so the result can be
+    // reused every time the tile's coverage grows. A stroke crossing a tile re-derives it
+    // roughly once per sample (about 21 times for a 256 px tile at a 12 px step), and
+    // without this each of those repeats the convolution.
+    //
+    // Bounded to a few tiles: a stroke advances, so the working set is small, and a whole
+    // convolved tile is 1 MB. Eviction is arbitrary because with a progressing stroke any
+    // resident entry that is not the current tile is unlikely to be wanted again.
+    const std::vector<Rgbaf>& cachedConvolution(const CoverageKey& key,
+                                                const std::vector<Rgbaf>& src,
+                                                std::vector<Rgbaf>& scratch, int side) {
+        const auto hit = convCache_.find(key);
+        if (hit != convCache_.end()) return hit->second;
+
+        if (kind_ == RegionKind::Blur) {
+            gaussianBlur(src, scratch, side, side, kBlurSigma);
+        } else {
+            unsharpMask(src, scratch, side, side, kSharpenRadius, kSharpenAmount,
+                        kSharpenThreshold);
+        }
+        std::vector<Rgbaf> centre(static_cast<std::size_t>(kTilePixels));
+        for (int ly = 0; ly < kTileSize; ++ly) {
+            for (int lx = 0; lx < kTileSize; ++lx) {
+                centre[static_cast<std::size_t>(ly) * kTileSize + static_cast<std::size_t>(lx)] =
+                    scratch[static_cast<std::size_t>(ly + reach_) * static_cast<std::size_t>(side) +
+                            static_cast<std::size_t>(lx + reach_)];
+            }
+        }
+        constexpr std::size_t kMaxCachedTiles = 4;
+        if (convCache_.size() >= kMaxCachedTiles) convCache_.erase(convCache_.begin());
+        return convCache_.emplace(key, std::move(centre)).first->second;
+    }
+
+    // Re-derive every tile whose coverage changed this call. The convolution runs over the
+    // tile grown by the kernel reach, exactly as the batched bake runs over the coverage box
+    // grown by the same amount, so no blended pixel is affected by the replicated edge.
+    Rect flushTiles(const std::set<CoverageKey>& touched) {
+        Rect dirty{};
+        const int side = kTileSize + 2 * reach_;
+        const auto n = static_cast<std::size_t>(side) * static_cast<std::size_t>(side);
+        std::vector<Rgbaf> src(n);
+        std::vector<Rgbaf> conv(n);
+
+        for (const CoverageKey& key : touched) {
+            ensureS0(key);  // snapshot S0 before we overwrite the tile
+            const TileCoord coord{key.first, key.second};
+            const int baseX = coord.col * kTileSize;
+            const int baseY = coord.row * kTileSize;
+            const int originX = baseX - reach_;
+            const int originY = baseY - reach_;
+
+            for (int y = 0; y < side; ++y) {
+                for (int x = 0; x < side; ++x) {
+                    src[static_cast<std::size_t>(y) * static_cast<std::size_t>(side) +
+                        static_cast<std::size_t>(x)] = sampleS0(originX + x, originY + y);
+                }
+            }
+            const std::vector<Rgbaf>& filtered = cachedConvolution(key, src, conv, side);
+
+            const std::vector<float>& cover = cov_.at(key);
+            const Selection::GrayTile* selTile = gate_ ? selection_->findTile(coord) : nullptr;
+            auto out = std::make_shared<TileDataT<Pixel>>();
+            if (s0_[key]) *out = *s0_[key];  // start from the pre-stroke snapshot
+            bool changed = false;
+            for (std::size_t idx = 0; idx < static_cast<std::size_t>(kTilePixels); ++idx) {
+                float c = std::min(cover[idx], opacity_);
+                if (gate_) {
+                    c *= selTile != nullptr ? static_cast<float>((*selTile)[idx]) / 255.0f : 0.0f;
+                }
+                if (c <= 0.0f) continue;
+                const int lx = static_cast<int>(idx % static_cast<std::size_t>(kTileSize));
+                const int ly = static_cast<int>(idx / static_cast<std::size_t>(kTileSize));
+                const Rgbaf o =
+                    src[static_cast<std::size_t>(ly + reach_) * static_cast<std::size_t>(side) +
+                        static_cast<std::size_t>(lx + reach_)];
+                const Rgbaf f = filtered[idx];
+                const Rgbaf blended{o.r + (f.r - o.r) * c, o.g + (f.g - o.g) * c,
+                                    o.b + (f.b - o.b) * c, o.a + (f.a - o.a) * c};
+                const Pixel np = fromFloat<Pixel>(blended);
+                if (!pixelEqual(np, out->px[idx])) {
+                    out->px[idx] = np;
+                    changed = true;
+                }
+            }
+            if (changed) {
+                store_.setTile(coord, out);
+                changed_.insert(key);
+                dirty = dirty.united(tileBounds(coord));
+            }
+        }
+        return dirty;
+    }
+
+    LayerId layer_;
+    TileStoreT<Pixel>& store_;
+    RegionKind kind_;
+    float opacity_;
+    const Selection* selection_;
+    bool gate_;
+    int reach_;
+    std::string name_;
+    StrokeStamper stamper_;
+
+    CoverageMap cov_;
+    std::map<CoverageKey, std::shared_ptr<TileDataT<Pixel>>> s0_;  // pre-stroke snapshot per tile
+    std::set<CoverageKey> changed_;  // tiles whose pixels actually changed (the committed deltas)
+    std::map<CoverageKey, std::vector<Rgbaf>> convCache_;  // see cachedConvolution()
+};
+
 }  // namespace
 
 std::unique_ptr<PaintCommand> blurStroke(Document& doc, LayerId layerId, const BrushSettings& in,
@@ -1387,7 +1576,39 @@ std::unique_ptr<LiveStroke> beginLive(Document& doc, LayerId layerId, const Brus
                 layerId, pl->tiles(), settings, color, op, std::move(name), offX, offY, selection);
     }
 }
+
+std::unique_ptr<LiveStroke> beginRegion(Document& doc, LayerId layerId,
+                                        const BrushSettings& settings, RegionKind kind,
+                                        const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    auto* pl = static_cast<PixelLayer*>(layer);
+    switch (pl->depth()) {
+        case BitDepth::U16:
+            return std::make_unique<LiveRegionStroke<Rgba16>>(layerId, pl->tiles16(), settings,
+                                                              kind, selection);
+        case BitDepth::F32:
+            return std::make_unique<LiveRegionStroke<Rgbaf>>(layerId, pl->tilesF(), settings, kind,
+                                                             selection);
+        case BitDepth::U8:
+        default:
+            return std::make_unique<LiveRegionStroke<Rgba8>>(layerId, pl->tiles(), settings, kind,
+                                                             selection);
+    }
+}
 }  // namespace
+
+std::unique_ptr<LiveStroke> beginBlurStroke(Document& doc, LayerId layerId,
+                                            const BrushSettings& settings,
+                                            const Selection* selection) {
+    return beginRegion(doc, layerId, settings, RegionKind::Blur, selection);
+}
+
+std::unique_ptr<LiveStroke> beginSharpenStroke(Document& doc, LayerId layerId,
+                                               const BrushSettings& settings,
+                                               const Selection* selection) {
+    return beginRegion(doc, layerId, settings, RegionKind::Sharpen, selection);
+}
 
 std::unique_ptr<LiveStroke> beginPaintStroke(Document& doc, LayerId layerId,
                                              const BrushSettings& settings, Rgbaf color,
