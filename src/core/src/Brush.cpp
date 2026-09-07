@@ -371,6 +371,20 @@ constexpr float kSharpenRadius = 1.5f;
 constexpr float kSharpenAmount = 1.0f;
 constexpr float kSharpenThreshold = 0.0f;
 
+// The reach of the kernel each region-bake brush uses, in pixels. Both build their kernel
+// from a sigma via ceil(3 * sigma) (unsharpMask forwards its radius to the same builder),
+// so this mirrors that one derivation.
+constexpr int kernelReach(float sigma) {
+    return static_cast<int>(3.0f * sigma) +
+           (3.0f * sigma > static_cast<float>(static_cast<int>(3.0f * sigma)) ? 1 : 0);
+}
+
+// Grow a rect by `r` on every side, which is what makes a convolution over it independent
+// of where the rest of the stroke went. See the comment in blurStroke.
+Rect inflated(Rect r, int by) {
+    return Rect{r.x - by, r.y - by, r.width + 2 * by, r.height + 2 * by};
+}
+
 // Pixel-tight bounding box (document space) of all nonzero coverage; empty if the stroke is empty.
 Rect coverageBounds(const CoverageMap& cov) {
     Rect bb{};
@@ -913,11 +927,22 @@ std::unique_ptr<PaintCommand> blurStroke(Document& doc, LayerId layerId, const B
 
     // Blend each pixel toward its gaussian-blurred value by the brush coverage (capped at the
     // stroke opacity). The store is at its pre-stroke (S0) state during the bake, so the blur is
-    // computed from the original pixels — no feedback across rebuilds of a live preview.
-    const int left = bb.left();
-    const int top = bb.top();
+    // computed from the original pixels: no feedback across rebuilds of a live preview.
+    //
+    // The bake runs over the coverage box GROWN BY THE KERNEL REACH. The convolution replicates
+    // at the edge of whatever rectangle it is given, and that rectangle used to be the coverage
+    // box itself, which grows as the stroke continues. So a pixel within one kernel radius of
+    // that edge was convolved against replicated values, and its result changed depending on
+    // where else the stroke went: a far excursion that never came near it moved it by as much as
+    // 110/255. Inflating by exactly the reach puts the replicated edge a full kernel away from
+    // every pixel that is actually blended, so no blended pixel can see it and each one depends
+    // only on the original pixels within one radius of itself. Coverage is zero in the added
+    // margin, so nothing there is written.
+    const Rect work = inflated(bb, kernelReach(kBlurSigma));
+    const int left = work.left();
+    const int top = work.top();
     return bakePixelEditRegion(
-        doc, layerId, "Blur Brush", bb,
+        doc, layerId, "Blur Brush", work,
         [&cov, opacity, left, top](std::span<Rgbaf> img, int w, int h) {
             std::vector<Rgbaf> blurred(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
             gaussianBlur(img, blurred, w, h, kBlurSigma);
@@ -954,11 +979,15 @@ std::unique_ptr<PaintCommand> sharpenStroke(Document& doc, LayerId layerId, cons
     // Mirror of blurStroke: blend each pixel toward its unsharp-masked value by the brush coverage
     // (capped at the stroke opacity). The store is at its pre-stroke (S0) state during the bake, so
     // the sharpened result is computed from the original pixels — no feedback across rebuilds of a
-    // live preview.
-    const int left = bb.left();
-    const int top = bb.top();
+    // live preview. Inflated by the kernel reach for the same reason blurStroke is: the
+    // convolution replicates at the edge of the rectangle it is handed, so a rectangle that
+    // grows with the stroke made every pixel near its edge depend on where the rest of the
+    // stroke went.
+    const Rect work = inflated(bb, kernelReach(kSharpenRadius));
+    const int left = work.left();
+    const int top = work.top();
     return bakePixelEditRegion(
-        doc, layerId, "Sharpen Brush", bb,
+        doc, layerId, "Sharpen Brush", work,
         [&cov, opacity, left, top](std::span<Rgbaf> img, int w, int h) {
             std::vector<Rgbaf> sharpened(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
             unsharpMask(img, sharpened, w, h, kSharpenRadius, kSharpenAmount, kSharpenThreshold);

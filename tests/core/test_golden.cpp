@@ -275,3 +275,66 @@ PE_TEST(golden_blend_modes_over_a_gradient) {
     PE_CHECK(pe_golden::checkGolden("blend_overlay", out, pe_golden::kExact));
 #endif
 }
+
+PE_TEST(golden_blur_brush) {
+    // The Blur BRUSH, distinct from the whole-layer Gaussian filter above: it convolves
+    // over the stroke's region and blends by coverage. Its output is now well defined
+    // (independent of where else the stroke went), so it can have a reference at all.
+    LayerId id = kNoLayer;
+    auto doc = docWithTestImage(id);
+    const double before = horizontalContrast(flatten(*doc));
+
+    BrushSettings b;
+    b.diameter = 21.0f;
+    b.hardness = 0.7f;
+    b.opacity = 1.0f;
+    b.flow = 1.0f;
+    b.spacing = 0.25f;
+    std::vector<StrokePoint> pts;
+    for (int i = 0; i <= 14; ++i) {
+        const auto t = static_cast<float>(i);
+        pts.push_back(
+            StrokePoint{Vec2{14.0f + t * 7.0f, 30.0f + 10.0f * std::sin(t * 0.5f)}, 1.0f});
+    }
+    auto cmd = blurStroke(*doc, id, b, pts, nullptr);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    const PixelBuffer out = flatten(*doc);
+
+    PE_CHECK(horizontalContrast(out) < before);                           // it softened something
+    PE_CHECK_EQ(out.at(kW - 2, kH - 2), testImage().at(kW - 2, kH - 2));  // and only locally
+#ifdef PHOTOEDIT_HAVE_PNG
+    PE_CHECK(pe_golden::checkGolden("blur_brush", out, pe_golden::kKernelRewrite));
+#endif
+}
+
+PE_TEST(golden_sharpen_brush) {
+    LayerId id = kNoLayer;
+    auto doc = docWithTestImage(id);
+    const double before = horizontalContrast(flatten(*doc));
+
+    BrushSettings b;
+    b.diameter = 21.0f;
+    b.hardness = 0.7f;
+    b.opacity = 1.0f;
+    b.flow = 1.0f;
+    b.spacing = 0.25f;
+    std::vector<StrokePoint> pts;
+    for (int i = 0; i <= 14; ++i) {
+        const auto t = static_cast<float>(i);
+        // Placed across the checkerboard and the hard edge, like the blur case: a stroke
+        // through smooth gradient would make a reference that barely shows the operation.
+        pts.push_back(
+            StrokePoint{Vec2{14.0f + t * 7.0f, 30.0f + 10.0f * std::sin(t * 0.5f)}, 1.0f});
+    }
+    auto cmd = sharpenStroke(*doc, id, b, pts, nullptr);
+    PE_CHECK(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+    const PixelBuffer out = flatten(*doc);
+
+    PE_CHECK(horizontalContrast(out) > before);
+    PE_CHECK_EQ(out.at(kW - 2, kH - 2), testImage().at(kW - 2, kH - 2));
+#ifdef PHOTOEDIT_HAVE_PNG
+    PE_CHECK(pe_golden::checkGolden("sharpen_brush", out, pe_golden::kKernelRewrite));
+#endif
+}
