@@ -851,8 +851,12 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         // tiles, so a click reuses them instead of flattening the whole canvas again.
         pe::Selection sel;
         bool overBudget = false;
+        // LiveDocument, not Snapshot: the wand deliberately samples the renderer's tile
+        // cache, which the paint path has already warmed. A snapshot would arrive with a
+        // cold renderer and pay back the full composite this change removed.
         const TaskResult task = runDocumentTask(
-            this, this, QStringLiteral("Magic Wand"), [this, seed, &sel, &overBudget] {
+            this, this, QStringLiteral("Magic Wand"), TaskAccess::LiveDocument,
+            [this, seed, &sel, &overBudget] {
                 const pe::PixelBuffer buf = renderer_->renderRegion(doc_->canvasBounds());
                 if (buf.isEmpty()) {
                     overBudget = true;

@@ -71,6 +71,20 @@ void GroupLayer::renderInto(TileCoord coord, std::span<Rgbaf> dst) const {
     compositeStack(children_, coord, dst, 0);
 }
 
+void GroupLayer::adoptChildIdentitiesFrom(const Layer& src) noexcept {
+    if (src.kind() != LayerKind::Group) return;  // not the layer this was cloned from
+    const auto& srcGroup = static_cast<const GroupLayer&>(src);
+    // Only pair up as far as both sides have children. A mismatch means the caller did
+    // not pass the source of this clone, and adopting ids across a different shape would
+    // hand out duplicate identities, which is worse than leaving the fresh ones alone.
+    if (srcGroup.children_.size() != children_.size()) return;
+    for (std::size_t i = 0; i < children_.size(); ++i) {
+        if (children_[i] != nullptr && srcGroup.children_[i] != nullptr) {
+            children_[i]->adoptIdentitiesFrom(*srcGroup.children_[i]);
+        }
+    }
+}
+
 std::unique_ptr<Layer> GroupLayer::clone() const {
     auto copy = std::make_unique<GroupLayer>(name());
     copyPropsTo(*copy);

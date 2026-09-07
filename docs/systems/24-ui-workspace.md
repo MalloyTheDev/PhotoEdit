@@ -97,10 +97,22 @@ reapplies it.
 - Long operations (Save, Save As, Export, Open, Magic Wand) run through
   `pe::app::runDocumentTask`: the work goes to a worker thread while the UI thread
   keeps pumping events behind an indeterminate busy dialog, so the window never stops
-  responding. For the duration, user input is swallowed and the canvas is frozen to
-  its last frame, because the engine is single threaded and a repaint compositing
-  from the UI thread would race the worker rather than merely show stale pixels. The
-  dialog appears only after a short delay, so a fast save shows nothing at all.
+  responding. The dialog appears only after a short delay, so a fast save shows
+  nothing at all.
+- What the UI thread gives up depends on what the worker owns, stated per call site
+  as a `TaskAccess`:
+  - **Save and Export** serialize an immutable `Document::snapshot()`, so nothing
+    needs protecting: the canvas keeps compositing and the user keeps painting for
+    the whole write. The file holds the document as it was when the save was asked
+    for; strokes made during it stay unsaved, and the title still says so.
+  - **The Magic Wand** reads the live document, because it deliberately samples the
+    renderer's already-warm tile cache. Input is blocked and the canvas is frozen to
+    its last frame for the duration.
+  - **Open** builds a separate document, so the canvas keeps painting, but input is
+    blocked because the document on screen is about to be replaced.
+- In every mode the File operations are disabled and the window refuses to close
+  while a task runs. A second save, or a New/Open, would replace the document the
+  running task still has to finish against.
 - The busy dialog has no Cancel button. The codecs are not interruptible yet, and a
   button that cannot stop the work would be worse than none.
 

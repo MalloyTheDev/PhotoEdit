@@ -70,16 +70,23 @@ lane), and code review.
 - Any cross-thread sharing must have an explicit, documented synchronization
   story. Prefer message/task passing over shared locks.
 - **The engine is single threaded for READS as well as writes.** `TileStoreT`
-  caches its content bounds lazily and `CanvasRenderer` owns a mutable LRU, so two
-  threads merely *reading* the same document race. Copy-on-write forking keys off
-  `use_count()`, which is not a safe fork test once a second thread holds a
-  reference either (see the snapshot-handle work).
-- Consequently, moving work off the GUI thread means taking the GUI thread OFF the
-  document, not merely adding a worker. `pe::app::runDocumentTask` is the one place
-  that does it: it blocks input so no handler can be entered, and freezes the canvas
-  so `paintEvent` stops compositing. Anything that starts a worker without both is a
-  data race, however short the operation looks. A new background operation goes
-  through that helper rather than growing its own.
+  caches its content bounds lazily, `CanvasRenderer` owns a mutable LRU and one
+  shared scratch buffer, and `Document::notify` dispatches observers on the calling
+  thread, so two threads merely *reading* the same document race.
+- **A second thread sees document state through `Document::snapshot()` and nothing
+  else.** It shares tile buffers copy-on-write and costs pointer copies, not pixels
+  (0.06 ms on a 24 MP document). Take it on the owning thread; never from a worker.
+- **The copy-on-write fork trigger is a shared flag, not `use_count()`.** A refcount
+  answers "how many owners exist at this instant", which another thread can
+  invalidate between the test and the write. `TileStoreT::Entry::shared` is set when
+  a buffer escapes, by the thread that owns the store, before any worker exists. If
+  you add a way for a `shared_ptr<TileData>` to leave a store, it must set that flag.
+- Moving work off the GUI thread means deciding what the GUI thread may still touch,
+  not merely adding a worker. `pe::app::runDocumentTask` is the one place that does
+  it, and its `TaskAccess` argument is the decision: `Snapshot` leaves the canvas and
+  input fully live, `LiveDocument` blocks input and freezes the canvas,
+  `Detached` blocks input but keeps painting. A new background operation goes through
+  that helper rather than growing its own policy.
 - A blocked window is a correctness problem, not a polish problem. Seconds of
   synchronous work on the GUI thread reads to the user as a crash, and on Windows the
   OS escalates it to the not-responding state; force-quitting there loses the

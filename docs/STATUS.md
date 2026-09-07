@@ -17,14 +17,17 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **588 engine cases + 62 shell cases, 0 failed**. The engine tests
+Test suite: **596 engine cases + 67 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
 substitution, the icon-resource linkage, the menu surface (no top-level menu may be
 empty; one Window toggle per dock), the keyboard-shortcut set including collision
 detection, the unsaved-changes guard, and that long operations (save, export, the Magic
-Wand) run off the GUI thread with input blocked and the canvas frozen for the duration.
+Wand) run off the GUI thread. Save and Export serialize an immutable `Document::snapshot()`,
+so the canvas stays live and painting continues through the write; the engine tests pin the
+copy-on-write barrier that makes that safe, including a worker reading a snapshot while the
+document is painted underneath it.
 
 ## Milestones
 

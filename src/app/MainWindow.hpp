@@ -1,5 +1,6 @@
 #pragma once
 
+#include "BusyTask.hpp"  // pe::app::TaskAccess / TaskResult
 #include "Theme.hpp"
 
 #include "pe/core/Document.hpp"  // pe::DocumentObserver (base class)
@@ -144,6 +145,11 @@ public:
     void shrinkSelection(int px);
     void featherSelection(float radius);
 
+    // True while a background document task (a save, an export, an open) is running. The
+    // File operations are disabled for the duration; a snapshot task deliberately leaves
+    // everything else, including painting, available.
+    [[nodiscard]] bool documentTaskInFlight() const noexcept { return documentTaskInFlight_; }
+
     // The open document, or null. Read-only borrow: MainWindow owns it.
     [[nodiscard]] pe::Document* document() const noexcept { return doc_.get(); }
     [[nodiscard]] CanvasView* canvas() const noexcept { return canvas_; }
@@ -161,6 +167,13 @@ private:
     void refreshTitle();
     // Refuse `operation` and return false, so a guard reads as one expression:
     //     if (!requireActiveLayer(...)) return;
+    // Run `work` as a background document task with the File operations disabled for its
+    // duration. Every long operation in this window goes through here rather than calling
+    // runDocumentTask directly, so the re-entrancy guard cannot be forgotten at one call
+    // site. `access` states what the work may reach; see BusyTask.hpp.
+    [[nodiscard]] TaskResult runGuardedTask(const QString& title, TaskAccess access,
+                                            const std::function<void()>& work);
+
     [[nodiscard]] bool refuseIf(bool condition, const char* operation, pe::RefusalCode code,
                                 const char* action, const QString& explanation);
     [[nodiscard]] QString describeState() const;  // the context field: what was true
@@ -200,6 +213,14 @@ private:
     std::vector<pe::Refusal> refusals_;  // see refusals()
     std::vector<QMenu*> docMenus_;
     std::vector<QAction*> docActions_;
+    // Every File-menu action, including the ones that work with no document open. They are
+    // disabled for the duration of a background document task: a second save, or a New /
+    // Open / Exit that replaces or destroys the document, would leave the in-flight task's
+    // completion path (markSavedAt, currentPath_, the status message) pointing at a
+    // document that no longer exists. A snapshot save deliberately leaves the CANVAS live,
+    // so this is the guard that replaces blanket input blocking.
+    std::vector<QAction*> fileActions_;
+    bool documentTaskInFlight_ = false;
     QAction* undoAct_ = nullptr;
     QAction* redoAct_ = nullptr;
 

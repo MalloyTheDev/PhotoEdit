@@ -144,10 +144,12 @@ namespace {
 
 void MainWindow::buildMenuBar() {
     auto* fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
-    fileMenu->addAction(QStringLiteral("&New"), standardOr(QKeySequence::New, "Ctrl+N"), this,
-                        &MainWindow::newDocument);
-    fileMenu->addAction(QStringLiteral("&Open..."), standardOr(QKeySequence::Open, "Ctrl+O"), this,
-                        &MainWindow::openDocument);
+    fileActions_.push_back(fileMenu->addAction(QStringLiteral("&New"),
+                                               standardOr(QKeySequence::New, "Ctrl+N"), this,
+                                               &MainWindow::newDocument));
+    fileActions_.push_back(fileMenu->addAction(QStringLiteral("&Open..."),
+                                               standardOr(QKeySequence::Open, "Ctrl+O"), this,
+                                               &MainWindow::openDocument));
     fileMenu->addSeparator();
     docActions_.push_back(fileMenu->addAction(QStringLiteral("&Save"),
                                               standardOr(QKeySequence::Save, "Ctrl+S"), this,
@@ -159,13 +161,14 @@ void MainWindow::buildMenuBar() {
     docActions_.push_back(fileMenu->addAction(QStringLiteral("E&xport As..."),
                                               QKeySequence(QStringLiteral("Ctrl+Shift+E")), this,
                                               &MainWindow::exportDocumentAs));
+    fileActions_.insert(fileActions_.end(), docActions_.end() - 3, docActions_.end());
     fileMenu->addSeparator();
     // Explicit Ctrl+Q rather than QKeySequence::Quit: on Windows that standard key
     // resolves to the unusable literal "Exit" rather than a chord.
     // Routed through close() so closeEvent can guard unsaved work; connecting
     // QApplication::quit directly bypassed the guard entirely.
-    fileMenu->addAction(QStringLiteral("E&xit"), QKeySequence(QStringLiteral("Ctrl+Q")), this,
-                        &MainWindow::close);
+    fileActions_.push_back(fileMenu->addAction(
+        QStringLiteral("E&xit"), QKeySequence(QStringLiteral("Ctrl+Q")), this, &MainWindow::close));
 
     auto* editMenu = menuBar()->addMenu(QStringLiteral("&Edit"));
     undoAct_ = editMenu->addAction(QStringLiteral("&Undo"), this, &MainWindow::undo);
@@ -679,6 +682,27 @@ void MainWindow::reportRefusal(const pe::Refusal& r) {
     statusBar()->showMessage(QString::fromStdString(r.explanation), 6000);
 }
 
+TaskResult MainWindow::runGuardedTask(const QString& title, TaskAccess access,
+                                      const std::function<void()>& work) {
+    // Re-entrant task starts are what this guards, and the File actions are the only way to
+    // reach one. They come back however the task ends, including by exception.
+    struct InFlight {
+        MainWindow* window;
+        explicit InFlight(MainWindow* w) : window(w) {
+            window->documentTaskInFlight_ = true;
+            window->updateActionStates();
+        }
+        ~InFlight() {
+            window->documentTaskInFlight_ = false;
+            window->updateActionStates();
+        }
+        InFlight(const InFlight&) = delete;
+        InFlight& operator=(const InFlight&) = delete;
+    } inFlight(this);
+
+    return runDocumentTask(this, canvas_, title, access, work);
+}
+
 bool MainWindow::refuseIf(bool condition, const char* operation, pe::RefusalCode code,
                           const char* action, const QString& explanation) {
     if (!condition) return false;
@@ -712,11 +736,20 @@ QString MainWindow::describeState() const {
 
 void MainWindow::updateActionStates() {
     const bool hasDoc = doc_ != nullptr;
+    // A snapshot save leaves the canvas live on purpose, so the user keeps painting. What
+    // must NOT happen meanwhile is another file operation: the running one finishes by
+    // touching this document's history and path, and New/Open/Exit would have replaced or
+    // destroyed it. Disabling the actions (rather than the menu) also disables their
+    // shortcuts, which is what a keyboard user would otherwise reach them by.
+    const bool idle = !documentTaskInFlight_;
     for (QMenu* m : docMenus_) {
         if (m != nullptr) m->setEnabled(hasDoc);
     }
+    for (QAction* a : fileActions_) {
+        if (a != nullptr) a->setEnabled(idle);
+    }
     for (QAction* a : docActions_) {
-        if (a != nullptr) a->setEnabled(hasDoc);
+        if (a != nullptr) a->setEnabled(hasDoc && idle);
     }
     // Undo and Redo track the history rather than merely the document, so they grey
     // out at the ends of the stack instead of silently doing nothing.
@@ -1117,11 +1150,11 @@ void MainWindow::openDocument() {
     pe::LoadError loadErr = pe::LoadError::None;
     std::unique_ptr<pe::Document> doc;
     // Off the GUI thread: decoding a 24 MP file takes about 600 ms, and a 512 MB one takes
-    // far longer. The canvas is deliberately NOT frozen here, unlike a save: loading builds
-    // a separate document and never touches the one on screen, so the paint path can keep
-    // compositing the current document while the worker decodes the new one.
-    const TaskResult task = runBusyTask(
-        this, QStringLiteral("Opening %1").arg(QFileInfo(path).fileName()),
+    // far longer. Detached rather than Snapshot: loading builds a separate document and
+    // never touches the one on screen, so the canvas keeps compositing, but input stays
+    // blocked because the document the user would be editing is about to be replaced.
+    const TaskResult task = runGuardedTask(
+        QStringLiteral("Opening %1").arg(QFileInfo(path).fileName()), TaskAccess::Detached,
         [&doc, &path, &loadErr] { doc = pe::loadDocument(path.toStdString(), &loadErr); });
     if (task.threw) {
         QMessageBox::warning(
@@ -1228,17 +1261,26 @@ bool MainWindow::saveDocumentAs() {
 
 bool MainWindow::writeTo(const QString& path) {
     if (doc_ == nullptr) return false;
+    // Serialize an immutable SNAPSHOT rather than the live document. The snapshot shares
+    // tile buffers copy-on-write, so it costs pointer copies rather than the document's
+    // pixels, and the live document forks a tile before its next write. That is what lets
+    // the canvas stay live through a save that used to take 3.3 seconds with the window
+    // unable to repaint: the user keeps painting, and the file holds the document as it
+    // was at the moment they asked for it.
+    const std::unique_ptr<const pe::Document> shot = doc_->snapshot();
+    if (shot == nullptr) return false;
+    // The stack depth the file will represent. Strokes made DURING the save move the live
+    // stack past it, and marking the later depth saved would claim those strokes are on
+    // disk, so the window would never offer to save them.
+    const std::size_t savedDepth = doc_->history().undoDepth();
+
     pe::SaveError saveErr = pe::SaveError::None;
     bool wrote = false;
-    // Off the GUI thread: saving a 24 MP document took 3.3 seconds as PNG and 1.2 as
-    // .pedoc, every millisecond of it with the window unable to repaint, which Windows
-    // escalates to the not-responding state. A user cannot tell that from a crash, and
-    // force-quitting during a write is how a document gets lost.
     const TaskResult task =
-        runDocumentTask(this, canvas_, QStringLiteral("Saving %1").arg(QFileInfo(path).fileName()),
-                        [this, &path, &saveErr, &wrote] {
-                            wrote = pe::saveDocument(*doc_, path.toStdString(), &saveErr);
-                        });
+        runGuardedTask(QStringLiteral("Saving %1").arg(QFileInfo(path).fileName()),
+                       TaskAccess::Snapshot, [&shot, &path, &saveErr, &wrote] {
+                           wrote = pe::saveDocument(*shot, path.toStdString(), &saveErr);
+                       });
     if (task.threw) {
         QMessageBox::warning(
             this, QStringLiteral("Save failed"),
@@ -1250,9 +1292,10 @@ bool MainWindow::writeTo(const QString& path) {
                              saveFailureReason(doc_.get(), path, saveErr));
         return false;
     }
-    // Tell history the on-disk state now matches; this clears the dirty flag
-    // so isDirty()/title indicators and undo-to-saved work correctly.
-    doc_->history().markSaved();
+    // Tell history WHICH state is now on disk: the one the snapshot captured, not wherever
+    // the stack has reached. If the user painted while the worker wrote, the document is
+    // still dirty and markSavedAt says so.
+    doc_->history().markSavedAt(savedDepth);
     currentPath_ = path;
     refreshTitle();
     statusBar()->showMessage(QStringLiteral("Saved %1").arg(path), 3000);
@@ -1677,15 +1720,18 @@ void MainWindow::exportDocumentAs() {
         path += QStringLiteral(".%1").arg(ext);
     }
 
-    // Off the GUI thread, for the same reason as Save: an export flattens and re-encodes
-    // the whole canvas, and that is seconds of work on any document worth exporting.
+    // From a snapshot, for the same reason as Save: an export flattens and re-encodes the
+    // whole canvas, which is seconds of work on any document worth exporting, and the
+    // compositor it goes through reads only layer state the snapshot owns.
+    const std::unique_ptr<const pe::Document> shot = doc_->snapshot();
+    if (shot == nullptr) return;
     bool wrote = false;
     const pe::ExportOptions opts = dlg.options();
-    const TaskResult task = runDocumentTask(
-        this, canvas_, QStringLiteral("Exporting %1").arg(QFileInfo(path).fileName()),
-        [this, &path, &opts, &wrote] {
-            wrote = pe::saveDocument(*doc_, path.toStdString(), opts);
-        });
+    const TaskResult task =
+        runGuardedTask(QStringLiteral("Exporting %1").arg(QFileInfo(path).fileName()),
+                       TaskAccess::Snapshot, [&shot, &path, &opts, &wrote] {
+                           wrote = pe::saveDocument(*shot, path.toStdString(), opts);
+                       });
     if (task.threw) {
         QMessageBox::warning(
             this, QStringLiteral("Export failed"),
@@ -1781,6 +1827,15 @@ bool MainWindow::confirmDiscard() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* e) {
+    // A background task holds a snapshot, and the nested event loop it is running inside
+    // sits on this window's stack. Closing now would destroy both. Refuse rather than
+    // defer: the task finishes in seconds and the user can close then. BusyTask's input
+    // filter refuses the event before it reaches here, so this is the second line of
+    // defence, and the one a reader looking for the rule will find.
+    if (documentTaskInFlight_) {
+        e->ignore();
+        return;
+    }
     if (confirmDiscard()) {
         e->accept();
     } else {

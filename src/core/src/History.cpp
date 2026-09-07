@@ -127,6 +127,19 @@ void History::markSaved() noexcept {
     doc_->setDirty(false);
 }
 
+void History::markSavedAt(std::size_t depth) noexcept {
+    if (depth > done_.size()) {
+        // The point that was written is no longer on the stack, so the document can never
+        // be returned to it. Same sentinel push() uses when the saved step is trimmed.
+        savedDepth_ = -1;
+    } else {
+        savedDepth_ = static_cast<std::ptrdiff_t>(depth);
+    }
+    // Through updateDirty, not setDirty(false): the stack may well have moved past this
+    // depth while the save was running, and then the document is still dirty.
+    updateDirty();
+}
+
 bool History::isAtSavedState() const noexcept {
     return savedDepth_ == static_cast<std::ptrdiff_t>(done_.size());
 }

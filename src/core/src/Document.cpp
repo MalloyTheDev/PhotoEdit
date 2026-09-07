@@ -36,6 +36,24 @@ std::unique_ptr<Document> Document::createBlank(Size canvasSize, ColorMode mode,
     return doc;
 }
 
+std::unique_ptr<const Document> Document::snapshot() const {
+    // The private ctor rather than createBlank: createBlank seeds a base layer, and a
+    // snapshot's stack must be exactly this document's.
+    std::unique_ptr<Document> snap(
+        new Document(canvasSize_, colorMode_, bitDepth_, resolutionPpi_));
+    snap->profile_ = profile_;
+    for (const auto& child : root_.children()) {
+        if (child == nullptr) continue;
+        snap->root_.addChild(child->clone());  // tiles shared COW; masks deep-copied
+    }
+    // One walk over the finished tree: clone() hands out fresh ids, and a snapshot has to
+    // answer to the ones its caller already holds. Recurses, so nested groups come too.
+    snap->root_.adoptIdentitiesFrom(root_);
+    snap->activeLayer_ = activeLayer_;  // resolvable, because the ids came across
+    snap->dirty_ = false;               // a snapshot is not an editing session
+    return snap;
+}
+
 const Layer* Document::findLayer(LayerId id) const noexcept {
     if (id == kNoLayer) return nullptr;
     return root_.findDescendant(id);

@@ -105,9 +105,24 @@ public:
     // Deep copy with a fresh id (for DuplicateLayer). Each kind clones itself.
     [[nodiscard]] virtual std::unique_ptr<Layer> clone() const = 0;
 
+    // Give this layer and its whole subtree the identities of `src`, which must be the
+    // layer this one was cloned from (same shape, same order).
+    //
+    // clone() deliberately assigns FRESH ids, because a duplicated layer is a new layer
+    // the user can select independently. A snapshot is the exact opposite: it has to
+    // answer findLayer() and activeLayer() with the ids of the document it was taken
+    // from, or every id a caller already holds resolves to nothing in it, starting with
+    // the active-layer marker the .pedoc writer records. Document::snapshot() is the
+    // only caller; ordinary layer operations must not adopt another layer's identity.
+    void adoptIdentitiesFrom(const Layer& src) noexcept;
+
 protected:
     // Copy universal properties into a freshly-constructed clone.
     void copyPropsTo(Layer& dst) const;
+
+    // The kind-specific half of adoptIdentitiesFrom: a container recurses into whatever
+    // it holds. Default is a leaf, which has nothing below it.
+    virtual void adoptChildIdentitiesFrom(const Layer& /*src*/) noexcept {}
 
 private:
     LayerId id_;

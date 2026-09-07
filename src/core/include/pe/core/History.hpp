@@ -79,6 +79,19 @@ public:
 
     // Saved-state tracking: call after a successful save.
     void markSaved() noexcept;
+
+    // Mark a PARTICULAR depth as the one on disk, rather than wherever the stack is now.
+    //
+    // A save serializes a snapshot taken at the moment the user asked for it, and the
+    // user keeps painting while the worker writes. Calling markSaved() when the worker
+    // finishes would then claim the strokes made DURING the save are on disk, and the
+    // window would stop offering to save them: silent data loss, in the one place the
+    // whole feature exists to protect. So the caller records undoDepth() when it takes
+    // the snapshot and passes it here.
+    //
+    // A depth beyond the current stack (history was trimmed, or the branch was
+    // discarded) is unreachable and marked as such, which leaves the document dirty.
+    void markSavedAt(std::size_t depth) noexcept;
     [[nodiscard]] bool isAtSavedState() const noexcept;
 
 private:

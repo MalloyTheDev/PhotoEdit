@@ -19,15 +19,18 @@ namespace pe::app {
 
 namespace {
 
-// Swallows every event that could reach a handler which reads the document, for as long as
-// a worker owns it. This is the guard that matters: window modality only blocks input to
-// OTHER windows and can be bypassed by a shortcut or a posted event, whereas an application
-// event filter sees everything QCoreApplication::notify dispatches.
+// Swallows the events that could reach a handler which touches what the worker owns.
+//
+// An application event filter rather than window modality: modality only blocks input to
+// OTHER windows and can be bypassed by a shortcut or a posted event, whereas this sees
+// everything QCoreApplication::notify dispatches.
 //
 // The blocked list is explicit rather than a whitelist of what to allow, because getting
 // that inverted would stop the window repainting, which is the freeze this exists to fix.
 class InputBlocker final : public QObject {
 public:
+    explicit InputBlocker(bool blockUserInput) : blockUserInput_(blockUserInput) {}
+
     bool eventFilter(QObject* obj, QEvent* e) override {
         switch (e->type()) {
             case QEvent::MouseButtonPress:
@@ -50,30 +53,42 @@ public:
             case QEvent::DragMove:
             case QEvent::DragLeave:
             case QEvent::Drop:
-                return true;
+                // Let through for a snapshot task: the whole point of taking a snapshot is
+                // that the user carries on working while the worker writes.
+                return blockUserInput_;
             case QEvent::Close:
-                // Closing the window would destroy the document out from under the worker.
-                // Refusing the close is the only safe answer; the user can close once the
-                // save finishes, which is a second or two away.
+                // Blocked in every mode. Closing would destroy the document, and the
+                // nested event loop, out from under the worker.
+                //
+                // ignore() and not merely "return true": a QCloseEvent is accepted by
+                // default, so swallowing it in a filter leaves QWidget::close() looking at
+                // an accepted event and hiding the window anyway. Marking it ignored is
+                // what actually refuses the close.
+                e->ignore();
                 return true;
             default:
                 return QObject::eventFilter(obj, e);
         }
     }
+
+private:
+    bool blockUserInput_;
 };
 
-// Installs the input block and the wait cursor, and takes them away again whatever happens.
-// Not merely tidiness: an exception on the way to starting the worker would otherwise leave
-// the application swallowing every click and key for the rest of the session, which is a
-// harder lock than the freeze this code exists to remove.
+// Installs the input block and (when input is blocked) the wait cursor, and takes them
+// away again whatever happens. Not merely tidiness: an exception on the way to starting
+// the worker would otherwise leave the application swallowing every click and key for the
+// rest of the session, which is a harder lock than the freeze this code exists to remove.
 class BlockScope {
 public:
-    BlockScope() : app_(QCoreApplication::instance()) {
+    explicit BlockScope(bool blockUserInput)
+        : app_(QCoreApplication::instance()), blocker_(blockUserInput), cursor_(blockUserInput) {
         if (app_ != nullptr) app_->installEventFilter(&blocker_);
-        QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+        // No wait cursor for a snapshot task: the pointer is still a live brush.
+        if (cursor_) QGuiApplication::setOverrideCursor(Qt::WaitCursor);
     }
     ~BlockScope() {
-        QGuiApplication::restoreOverrideCursor();
+        if (cursor_) QGuiApplication::restoreOverrideCursor();
         if (app_ != nullptr) app_->removeEventFilter(&blocker_);
     }
     BlockScope(const BlockScope&) = delete;
@@ -82,15 +97,36 @@ public:
 private:
     QCoreApplication* app_;
     InputBlocker blocker_;
+    bool cursor_;
+};
+
+// Freeze the canvas for the duration, and thaw it whatever happens in between: leaving it
+// frozen would present a still image of a document that is once again being edited.
+class FreezeScope {
+public:
+    explicit FreezeScope(CanvasView* canvas) : canvas_(canvas) {
+        if (canvas_ != nullptr) canvas_->setFrozen(true);
+    }
+    ~FreezeScope() {
+        if (canvas_ != nullptr) canvas_->setFrozen(false);
+    }
+    FreezeScope(const FreezeScope&) = delete;
+    FreezeScope& operator=(const FreezeScope&) = delete;
+
+private:
+    CanvasView* canvas_;
 };
 
 }  // namespace
 
-TaskResult runBusyTask(QWidget* parent, const QString& title, const std::function<void()>& work) {
+TaskResult runDocumentTask(QWidget* parent, CanvasView* canvas, const QString& title,
+                           TaskAccess access, const std::function<void()>& work) {
     TaskResult result;
     if (!work) return result;  // nothing to run; not an error, and not a "ran" either
 
-    const BlockScope block;
+    const bool snapshotTask = access == TaskAccess::Snapshot;
+    const BlockScope block(!snapshotTask);
+    const FreezeScope freeze(access == TaskAccess::LiveDocument ? canvas : nullptr);
 
     // Indeterminate on purpose: the codecs report no progress, so a percentage would be
     // invented, and an invented one that sticks at 90% is exactly what makes a user
@@ -98,15 +134,19 @@ TaskResult runBusyTask(QWidget* parent, const QString& title, const std::functio
     QProgressDialog dialog(title, QString(), 0, 0, parent);
     dialog.setWindowTitle(title);
     dialog.setCancelButton(nullptr);  // no cancel: the codecs are not interruptible yet
-    dialog.setWindowModality(Qt::ApplicationModal);
+    // Modal only when the work needs the GUI thread to keep its hands off the document. A
+    // snapshot task must not take the keyboard away from a canvas the user is painting on,
+    // so its dialog neither blocks input nor steals focus when it appears.
+    dialog.setWindowModality(snapshotTask ? Qt::NonModal : Qt::ApplicationModal);
+    if (snapshotTask) dialog.setAttribute(Qt::WA_ShowWithoutActivating);
     dialog.setMinimumDuration(0);  // shown by the timer below, not by QProgressDialog itself
     dialog.setAutoClose(false);
     dialog.setAutoReset(false);
     dialog.reset();  // clears the internal show timer armed by the constructor
 
     QEventLoop loop;
-    // Only surface the dialog if the work is actually slow. Input is already blocked either
-    // way, so a fast save simply completes without a window appearing at all.
+    // Only surface the dialog if the work is actually slow, so a fast save completes
+    // without a window appearing at all.
     QTimer::singleShot(kBusyDialogDelayMs, &dialog, [&dialog] { dialog.show(); });
 
     std::thread worker([&result, &work, &loop] {
@@ -130,25 +170,6 @@ TaskResult runBusyTask(QWidget* parent, const QString& title, const std::functio
 
     dialog.hide();
     return result;
-}
-
-TaskResult runDocumentTask(QWidget* parent, CanvasView* canvas, const QString& title,
-                           const std::function<void()>& work) {
-    // Freeze first and thaw last, whatever happens in between: leaving the canvas frozen
-    // would present a still image of a document that is once again being edited.
-    struct FreezeGuard {
-        CanvasView* canvas;
-        explicit FreezeGuard(CanvasView* c) : canvas(c) {
-            if (canvas != nullptr) canvas->setFrozen(true);
-        }
-        ~FreezeGuard() {
-            if (canvas != nullptr) canvas->setFrozen(false);
-        }
-        FreezeGuard(const FreezeGuard&) = delete;
-        FreezeGuard& operator=(const FreezeGuard&) = delete;
-    } guard(canvas);
-
-    return runBusyTask(parent, title, work);
 }
 
 }  // namespace pe::app

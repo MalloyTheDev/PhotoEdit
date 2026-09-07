@@ -104,6 +104,41 @@ full-resolution pass on the pool; replace the proxy when ready.
   (interactive > background).
 - Scratch I/O is asynchronous and compressed to bound disk bandwidth.
 
+### Threading model as implemented
+
+One thread owns a `Document`: the thread that created it and mutates it, which in the
+application is the GUI thread. That ownership is the whole model, and it covers READS as
+well as writes. `TileStoreT` caches its content bounds lazily behind `mutable`,
+`CanvasRenderer` owns a mutable LRU and a single shared per-tile scratch buffer, and
+`Document::notify` dispatches observer callbacks synchronously on the calling thread. Two
+threads reading one document race on all three.
+
+The one supported way for a second thread to see document state is
+`Document::snapshot()`. It returns a `unique_ptr<const Document>` holding its own layer
+tree whose tile buffers are shared copy-on-write with the live document, and whose
+identities match it. Nothing else references that object, so a worker may read it freely
+while the owning thread keeps editing.
+
+What makes that safe is the write barrier, not a reference count. `TileStoreT` marks a
+tile shared when its buffer escapes (handed out by `sharedTile`, copied by a snapshot or
+a layer clone, installed by `setTile`), and forks a marked tile before mutating it in
+place. `use_count()` is not used to decide, deliberately: it answers "how many owners
+exist at this instant", which another thread can invalidate between the test and the
+write. The shared flag is set by the owning thread before the worker exists and is
+monotone within a buffer's life, so a stale flag costs one unnecessary fork and can never
+cost correctness.
+
+Rules that follow, and that a new background operation has to satisfy:
+
+- Take the snapshot on the owning thread. Never from a worker.
+- A worker reads only its snapshot. A worker that needs the renderer, the selection or
+  history is not snapshot-capable today: those are not captured, and `CanvasRenderer` in
+  particular is single-threaded per-instance.
+- The GUI side of this lives in `pe::app::runDocumentTask`, whose `TaskAccess` states
+  which of the three shapes an operation is: `Snapshot` (worker owns a copy, the user
+  keeps painting), `LiveDocument` (worker touches the real document, so input is blocked
+  and the canvas frozen) or `Detached` (a new document is being built).
+
 ## Edge cases & failure modes
 
 - Scratch disk full → surface a clear error, pause spilling, protect the document.

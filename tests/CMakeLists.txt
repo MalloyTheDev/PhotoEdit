@@ -12,6 +12,7 @@ add_executable(pe_core_tests
     core/test_layer.cpp
     core/test_compositor.cpp
     core/test_document.cpp
+    core/test_snapshot.cpp
     core/test_history.cpp
     core/test_viewtransform.cpp
     core/test_canvasrenderer.cpp
@@ -51,7 +52,11 @@ add_executable(pe_core_tests
     core/test_documentio.cpp
 )
 
-target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)
+# The snapshot/copy-on-write isolation tests run a real worker thread against a live
+# document, which is the only way to prove the fork barrier actually holds. std::thread
+# needs an explicit pthread link on Linux; on Windows it is built in.
+find_package(Threads REQUIRED)
+target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core Threads::Threads)
 target_include_directories(pe_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # Golden references live in the SOURCE tree, not the build tree: they are committed
 # fixtures, and PE_GOLDEN_UPDATE rewrites them in place so a regeneration shows up as a

@@ -80,6 +80,37 @@ public:
     // a marquee tool gesture) so observers are notified for marching ants etc.
     void touchSelection();
 
+    // --- snapshots ---
+
+    // An immutable, point-in-time copy of this document, for a worker thread.
+    //
+    // WHAT IS CAPTURED: canvas size, color mode, bit depth, resolution, color profile,
+    // the whole layer tree with each layer's properties, mask and pixels, and which
+    // layer is active. Layer ids are preserved, so an id taken from this document
+    // resolves in the snapshot to the same layer. That is exactly the set a save or an
+    // export reads.
+    //
+    // WHAT IS NOT: history, the selection, observers, and the dirty flag. Nothing that
+    // consumes a snapshot reads them, and Selection stores its mask tiles BY VALUE, so
+    // copying one is a real cost (up to about 268 MB at the tile cap) rather than a
+    // pointer bump. A snapshot's selection is therefore inactive, not a copy of this
+    // one; do not add a consumer that reads it without capturing it here first.
+    //
+    // WHAT IS SHARED: the pixel tile buffers, which are reference-counted and
+    // copy-on-write. Taking a snapshot marks every tile it captures shared, and the
+    // live document forks a tile before its next in-place write, so the snapshot's
+    // bytes can never change under a reader. Cost is therefore O(tile count) pointer
+    // copies plus the layer metadata, NOT O(pixels): a 24 MP document snapshots in
+    // about a millisecond. Layer MASKS are the exception and are deep-copied, because
+    // MaskBuffer stores its tiles by value.
+    //
+    // THREADING: the snapshot is a separate object graph that nothing else references,
+    // so a worker may read it freely while this document keeps being edited on the
+    // owning thread. The one rule is that the snapshot must be created on, and the live
+    // document must keep being mutated from, the same thread: the fork flag is set by
+    // that thread before the worker exists. Do not create a snapshot on a worker.
+    [[nodiscard]] std::unique_ptr<const Document> snapshot() const;
+
     // --- compositing convenience (headless preview / tests) ---
     [[nodiscard]] PixelBuffer compositeImage() const;
 
@@ -92,6 +123,8 @@ public:
 
     // --- mutation entry point & observers ---
     [[nodiscard]] History& history() noexcept { return history_; }
+    // Read-only view, for a const document (a snapshot is const by construction).
+    [[nodiscard]] const History& history() const noexcept { return history_; }
     void addObserver(DocumentObserver*);
     void removeObserver(DocumentObserver*);
 

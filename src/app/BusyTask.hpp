@@ -2,6 +2,7 @@
 
 #include <QString>
 
+#include <cstdint>
 #include <functional>
 
 class QWidget;
@@ -15,7 +16,31 @@ class CanvasView;
 // it the user needs to be told that something is happening.
 inline constexpr int kBusyDialogDelayMs = 250;
 
-// What became of a task run through runBusyTask/runDocumentTask.
+// What a background task is allowed to reach, which decides what the GUI thread has to stop
+// doing while it runs. The caller states this rather than assembling a policy, because the
+// two halves (blocking input, freezing the canvas) are only correct together and only for
+// the right kind of work.
+enum class TaskAccess : std::uint8_t {
+    // The work owns an immutable pe::Document snapshot and touches nothing else. Tile
+    // buffers are shared copy-on-write and the live document forks before writing them, so
+    // there is nothing to protect: the canvas keeps compositing and the user keeps
+    // painting. This is what Save and Export use.
+    Snapshot,
+
+    // The work reads or writes the LIVE document. The engine is single threaded for reads
+    // as well as writes (tile stores cache their bounds lazily, the renderer owns a mutable
+    // LRU), so the GUI thread must not touch it at all: input is blocked and the canvas is
+    // frozen to its last frame. This is what the Magic Wand uses, because it deliberately
+    // samples the renderer's warm tile cache rather than a snapshot's cold one.
+    LiveDocument,
+
+    // The work touches no document the GUI can reach (opening a file builds a new one).
+    // The canvas keeps painting the current document, but input is blocked, because that
+    // document is about to be replaced and edits made in the meantime would be discarded.
+    Detached,
+};
+
+// What became of a task run through runDocumentTask.
 struct TaskResult {
     bool ran = false;    // the work function was entered and returned normally
     bool threw = false;  // it left by exception, which the worker caught rather than
@@ -28,27 +53,20 @@ struct TaskResult {
 // work has finished; the caller's control flow is unchanged, which is why the existing
 // synchronous error handling around each operation still applies.
 //
-// THREADING CONTRACT. The engine is single threaded, and not only for writes: tile stores
-// and the renderer keep mutable caches that a second reader would race. So while `work`
-// runs, the GUI thread must not touch the document at all. Two things enforce that:
+// THREADING CONTRACT. What the GUI thread gives up for the duration is `access`, above.
+// Whatever is blocked, these always are:
 //
-//   1. Every user input event is swallowed for the duration (mouse, keyboard, tablet,
-//      touch, wheel, drag/drop, context menu, and window close), so no handler that reads
-//      the document can be entered. Paint, resize, timer and deferred-delete events are
-//      deliberately let through: the entire point is that the window keeps drawing itself.
-//   2. The caller stops the paint path from reading the document. runDocumentTask does
-//      this by freezing the canvas; see CanvasView::setFrozen.
+//   - Window close. Closing would destroy the document, and in the Snapshot case the
+//     nested event loop, out from under the worker. The close is refused, not deferred;
+//     the user can close once the task finishes. This is the shutdown contract: a worker
+//     is always joined before the call that started it returns, so nothing the worker
+//     holds can outlive the GUI objects it was launched from.
+//   - Paint, resize and timer events are never blocked, in any mode. Keeping the window
+//     drawing itself is the entire point.
 //
-// Anything `work` touches must therefore be reachable only from `work`. Do not use this to
-// run something that signals back into the widgets while it runs.
-[[nodiscard]] TaskResult runBusyTask(QWidget* parent, const QString& title,
-                                     const std::function<void()>& work);
-
-// runBusyTask with the canvas frozen for the duration, which is what a task reading or
-// writing the SHOWN document needs. Pass `canvas` as null only when the work provably does
-// not touch the document the canvas is displaying (opening a file builds a separate
-// document, so the canvas can keep painting the current one).
+// `work` must not signal back into the widgets while it runs; the GUI thread is inside a
+// nested event loop and a blocking call back into it would deadlock.
 [[nodiscard]] TaskResult runDocumentTask(QWidget* parent, CanvasView* canvas, const QString& title,
-                                         const std::function<void()>& work);
+                                         TaskAccess access, const std::function<void()>& work);
 
 }  // namespace pe::app

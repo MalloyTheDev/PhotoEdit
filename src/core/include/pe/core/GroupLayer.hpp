@@ -42,6 +42,11 @@ public:
     void renderInto(TileCoord coord, std::span<Rgbaf> dst) const override;
     [[nodiscard]] std::unique_ptr<Layer> clone() const override;
 
+protected:
+    // Recurse into the children, pairing them up by position: a clone has the same shape
+    // and order as its source, so index i on each side is the same layer.
+    void adoptChildIdentitiesFrom(const Layer& src) noexcept override;
+
 private:
     std::vector<std::unique_ptr<Layer>> children_;
     bool isolated_ = true;

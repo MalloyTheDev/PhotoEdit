@@ -53,7 +53,13 @@ void Layer::copyPropsTo(Layer& dst) const {
     dst.blendMode_ = blendMode_;
     dst.clipped_ = clipped_;
     dst.mask_ = mask_ ? std::make_unique<Mask>(*mask_) : nullptr;  // deep-copy the mask
-    // id_ is intentionally NOT copied: a clone gets a fresh identity.
+    // id_ is intentionally NOT copied: a clone gets a fresh identity. See
+    // adoptIdentitiesFrom for the one case that wants the opposite.
+}
+
+void Layer::adoptIdentitiesFrom(const Layer& src) noexcept {
+    id_ = src.id_;
+    adoptChildIdentitiesFrom(src);
 }
 
 }  // namespace pe
