@@ -42,6 +42,12 @@ inline constexpr std::int64_t kMaxNativeContentBytes = 4'000'000'000;  // ~3.7 G
 // is asserted on directly. Atomic because a save runs on a worker thread.
 [[nodiscard]] std::uint64_t contentBoundsScanCount() noexcept;
 
+// Diagnostics: how many coordinate-to-tile resolutions the pixel and mask GATHER has
+// performed since the process started. The gather emits one sample per pixel of the
+// content rect either way; what must not scale with the pixel count is this. Same purpose
+// and same idiom as contentBoundsScanCount.
+[[nodiscard]] std::uint64_t gatherTileLookupCount() noexcept;
+
 [[nodiscard]] std::vector<std::byte> serializeDocument(const Document& doc);
 [[nodiscard]] std::unique_ptr<Document> deserializeDocument(
     std::span<const std::byte> data, std::int64_t maxTotalContentBytes = kMaxNativeContentBytes);

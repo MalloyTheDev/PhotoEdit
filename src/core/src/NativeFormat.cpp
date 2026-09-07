@@ -10,6 +10,7 @@
 #include "pe/core/SolidColorLayer.hpp"
 #include "pe/core/TextLayer.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -536,6 +537,7 @@ bool readBlock(Reader& r, std::size_t expectedSize, std::vector<std::byte>& out,
 // a map lookup per pixel, which is exactly what #150 removed from the other hot paths.
 // See contentBoundsScanCount in the header.
 std::atomic<std::uint64_t> g_boundsScans{0};
+std::atomic<std::uint64_t> g_gatherLookups{0};
 
 template <class Pixel>
 Rect tightContentBounds(const TileStoreT<Pixel>& store) {
@@ -689,11 +691,40 @@ void writePixelBlock(Writer& w, const TileStoreT<Pixel>& store, Rect b) {
     std::vector<std::byte> raw;
     raw.reserve(static_cast<std::size_t>(b.width) * static_cast<std::size_t>(b.height) *
                 sizeof(Pixel));
+    // Scanline-major, exactly as the format requires, but the tile is resolved once per
+    // RUN rather than once per pixel. store.pixel(x, y) is a floorDiv pair plus a map
+    // lookup, and the old loop paid it 24 million times per 24 MP layer; a run never
+    // crosses a tile boundary, so one lookup covers up to kTileSize samples.
+    //
+    // This is the same correction #150 made to the compositor and the brush, and the one
+    // tightContentBounds already applies a few lines above: its comment says as much.
+    //
+    // The emission is deliberately unchanged: the same Pixel value, the same bytes, in the
+    // same order. Only the coordinate-to-tile resolution moves.
+    const Pixel absent{};  // an absent tile reads as transparent, exactly as pixel() returns
+    // The tile columns the rect spans, computed once. Iterating over THIS range rather than
+    // advancing x by a computed run end is deliberate: it makes the loop terminate by
+    // construction. With `x = runEnd` the advance depended on runEnd > x, so an off-by-one
+    // in that expression livelocked the writer instead of producing wrong pixels, which is
+    // both a worse failure and one no test can distinguish from a slow save.
+    const int colBegin = floorDiv(b.x, kTileSize);
+    const int colEnd = floorDiv(b.x + b.width - 1, kTileSize) + 1;
     for (int y = b.y; y < b.y + b.height; ++y) {
-        for (int x = b.x; x < b.x + b.width; ++x) {
-            const Pixel px = store.pixel(x, y);
-            const auto* pb = reinterpret_cast<const std::byte*>(&px);
-            raw.insert(raw.end(), pb, pb + sizeof(px));
+        const int row = floorDiv(y, kTileSize);
+        const int ly = tileLocalOffset(y);
+        for (int col = colBegin; col < colEnd; ++col) {
+            // The run is this tile's span clipped to the rect, so it lies wholly inside one
+            // tile and the local x advances by one per sample with no re-derivation.
+            const int runBegin = std::max(b.x, col * kTileSize);
+            const int runEnd = std::min(b.x + b.width, (col + 1) * kTileSize);
+            g_gatherLookups.fetch_add(1, std::memory_order_relaxed);
+            const TileDataT<Pixel>* tile = store.find(TileCoord{col, row});
+            int lx = tileLocalOffset(runBegin);
+            for (int i = runBegin; i < runEnd; ++i, ++lx) {
+                const Pixel px = tile != nullptr ? tile->at(lx, ly) : absent;
+                const auto* pb = reinterpret_cast<const std::byte*>(&px);
+                raw.insert(raw.end(), pb, pb + sizeof(px));
+            }
         }
     }
     writeBlock(w, raw);
@@ -817,9 +848,28 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
         w.i32(mb.height);
         std::vector<std::byte> mraw;
         mraw.reserve(static_cast<std::size_t>(mb.width) * static_cast<std::size_t>(mb.height));
+        // Same run-based traversal as writePixelBlock, for the same reason: value() is a
+        // map lookup per pixel. An absent mask tile reads as kOpaque (fully revealing),
+        // which is what value() returns for one, so the semantics are unchanged.
+        const MaskBuffer& mbuf = mask->buffer();
+        const int mcolBegin = floorDiv(mb.x, kTileSize);
+        const int mcolEnd = floorDiv(mb.x + mb.width - 1, kTileSize) + 1;
         for (int y = mb.y; y < mb.y + mb.height; ++y) {
-            for (int x = mb.x; x < mb.x + mb.width; ++x) {
-                mraw.push_back(static_cast<std::byte>(mask->buffer().value(x, y)));
+            const int row = floorDiv(y, kTileSize);
+            const int ly = tileLocalOffset(y);
+            for (int col = mcolBegin; col < mcolEnd; ++col) {
+                const int runBegin = std::max(mb.x, col * kTileSize);
+                const int runEnd = std::min(mb.x + mb.width, (col + 1) * kTileSize);
+                g_gatherLookups.fetch_add(1, std::memory_order_relaxed);
+                const MaskBuffer::GrayTile* mtile = mbuf.findTile(TileCoord{col, row});
+                int lx = tileLocalOffset(runBegin);
+                for (int i = runBegin; i < runEnd; ++i, ++lx) {
+                    const std::uint8_t v = mtile != nullptr
+                                               ? (*mtile)[static_cast<std::size_t>(ly) * kTileSize +
+                                                          static_cast<std::size_t>(lx)]
+                                               : MaskBuffer::kOpaque;
+                    mraw.push_back(static_cast<std::byte>(v));
+                }
             }
         }
         writeBlock(w, mraw);
@@ -1154,6 +1204,10 @@ bool hasOffCanvasContent(const Document& doc, const PreparedTree& prepared) {
 
 std::uint64_t contentBoundsScanCount() noexcept {
     return g_boundsScans.load(std::memory_order_relaxed);
+}
+
+std::uint64_t gatherTileLookupCount() noexcept {
+    return g_gatherLookups.load(std::memory_order_relaxed);
 }
 
 std::vector<std::byte> serializeDocument(const Document& doc) {

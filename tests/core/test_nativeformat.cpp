@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <vector>
 
@@ -905,5 +906,216 @@ PE_TEST(native_format_emits_the_same_rect_the_version_decision_used) {
         if (rl == nullptr) continue;
         PE_CHECK(rl->tiles().pixel(offCanvas ? -1 : 0, 0) == Rgba8{1, 2, 3, 255});
         PE_CHECK(serializeDocument(*back) == blob);
+    }
+}
+
+namespace {
+
+// The oracle for the gather cases below: TileStoreT::pixel, which is the per-pixel access
+// path the writer used to use and no longer does. Comparing the round-tripped document
+// against it checks the new run-based traversal against the old semantics directly,
+// including for absent tiles and negative coordinates.
+bool roundTripMatchesPerPixelOracle(const Document& doc, Rect probe) {
+    const std::vector<std::byte> blob = serializeDocument(doc);
+    const auto back = deserializeDocument(blob);
+    if (back == nullptr) return false;
+    const auto* src = dynamic_cast<const PixelLayer*>(doc.topLevelLayers()[0].get());
+    const auto* dst = dynamic_cast<const PixelLayer*>(back->topLevelLayers()[0].get());
+    if (src == nullptr || dst == nullptr) return false;
+    for (int y = probe.top(); y < probe.bottom(); ++y) {
+        for (int x = probe.left(); x < probe.right(); ++x) {
+            if (!(dst->tiles().pixel(x, y) == src->tiles().pixel(x, y))) return false;
+        }
+    }
+    return true;
+}
+
+// How many tile columns a horizontal span crosses, which is how many lookups one output
+// row costs under the run-based gather.
+int tileColumnsSpanned(int x, int width) {
+    if (width <= 0) return 0;
+    return floorDiv(x + width - 1, kTileSize) - floorDiv(x, kTileSize) + 1;
+}
+
+}  // namespace
+
+PE_TEST(native_format_gathers_pixels_per_tile_run_not_per_pixel) {
+    // #176. The writer used to read every pixel through store.pixel(x, y), a floorDiv pair
+    // plus a map lookup, so a 24 MP layer cost 24 million lookups. A run never crosses a
+    // tile boundary, so one lookup covers up to kTileSize samples.
+    //
+    // Asserted as a count, and as a SCALING property: the exact figure follows from the
+    // geometry of the rect, so a regression to per-pixel access cannot pass by coincidence.
+    struct Case {
+        Rect content;
+        const char* what;
+    };
+    const Case cases[] = {
+        {Rect{0, 0, 4 * kTileSize, 3 * kTileSize}, "tile-aligned, several tiles each way"},
+        {Rect{7, 9, 2 * kTileSize + 40, kTileSize + 5}, "starts and ends mid-tile"},
+        {Rect{0, 0, 1, 1}, "one pixel"},
+        {Rect{kTileSize - 1, 0, 2, 40}, "two pixels straddling a tile boundary"},
+        {Rect{-kTileSize - 3, -kTileSize - 3, 2 * kTileSize, 40}, "negative origin"},
+    };
+    for (const Case& c : cases) {
+        auto doc = Document::createBlank(Size{4 * kTileSize, 3 * kTileSize});
+        auto* base = asPixel(*doc, 0);
+        base->tiles().fillRect(c.content, Rgba8{11, 22, 33, 255});
+
+        const std::uint64_t before = gatherTileLookupCount();
+        (void)serializeDocument(*doc);
+        const std::uint64_t lookups = gatherTileLookupCount() - before;
+
+        // The content rect the writer emits is the tight bounds of what was painted, which
+        // for a solid fill is exactly the rect above.
+        const auto expected =
+            static_cast<std::uint64_t>(c.content.height) *
+            static_cast<std::uint64_t>(tileColumnsSpanned(c.content.x, c.content.width));
+        PE_CHECK_EQ(lookups, expected);
+        const auto pixels = static_cast<std::uint64_t>(c.content.width) *
+                            static_cast<std::uint64_t>(c.content.height);
+        if (c.content.width >= kTileSize) PE_CHECK(lookups * 8 <= pixels);
+        // And where a run has room to amortize, it really is far below one per pixel, which
+        // is the property that matters. A rect narrower than a tile can legitimately cost
+        // one lookup per pixel (a 2-pixel-wide span across a boundary is two runs of one),
+        // so the ratio is only meaningful once the rect is at least a tile wide.
+    }
+}
+
+PE_TEST(native_format_gather_is_exact_at_tile_boundaries) {
+    // The traversal splits every output row at tile edges, which is where an off-by-one
+    // lives. Each case compares the round trip against TileStoreT::pixel, the per-pixel
+    // path the writer abandoned, so the old semantics are the oracle rather than a
+    // hand-written expectation.
+    constexpr int T = kTileSize;
+    const Rect fills[] = {
+        {T - 1, T - 1, 1, 1},            // the last pixel of a tile
+        {T, T, 1, 1},                    // the first pixel of the next
+        {T + 1, T + 1, 1, 1},            // one past that
+        {T - 1, 0, 2, 1},                // two pixels across the boundary
+        {T - 1, 0, 2, T + 2},            // and down across a row boundary too
+        {0, 0, T, T},                    // exactly one whole tile
+        {0, 0, T + 1, T + 1},            // one pixel into the next tile each way
+        {5, 5, 1, 3 * T},                // one pixel wide, three tiles tall
+        {5, 5, 3 * T, 1},                // one pixel tall, three tiles wide
+        {-1, -1, 2, 2},                  // straddling the origin: a negative tile coordinate
+        {-T, -T, 1, 1},                  // the first pixel of the tile at (-1,-1)
+        {-T - 1, -T - 1, 1, 1},          // the last pixel of the tile at (-2,-2)
+        {-T - 1, -T - 1, T + 2, T + 2},  // spanning three tiles from a negative origin
+    };
+    for (const Rect fill : fills) {
+        auto doc = Document::createBlank(Size{4 * T, 4 * T});
+        auto* base = asPixel(*doc, 0);
+        base->tiles().fillRect(fill, Rgba8{200, 100, 50, 255});
+        // Probe a generous margin around the fill, so a run that emitted one pixel too many
+        // or too few shows up as a changed neighbour rather than being missed.
+        const Rect probe{fill.x - 2, fill.y - 2, fill.width + 4, fill.height + 4};
+        PE_CHECK(roundTripMatchesPerPixelOracle(*doc, probe));
+    }
+}
+
+PE_TEST(native_format_gather_keeps_absent_tiles_transparent) {
+    // A missing tile is image semantics, not an absence of data: pixel() returns a
+    // transparent sample for one, and the gather must emit exactly that. A content rect
+    // spanning a hole is the case, because the rect is the union of the painted tiles and
+    // the gap between them is never allocated.
+    constexpr int T = kTileSize;
+    auto doc = Document::createBlank(Size{6 * T, 2 * T});
+    auto* base = asPixel(*doc, 0);
+    base->tiles().fillRect(Rect{0, 0, T, T}, Rgba8{10, 20, 30, 255});
+    base->tiles().fillRect(Rect{4 * T, 0, T, T}, Rgba8{40, 50, 60, 255});  // three tiles of gap
+    PE_CHECK_EQ(base->tiles().tileCount(), static_cast<std::size_t>(2));
+
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+    const auto back = deserializeDocument(blob);
+    PE_REQUIRE(back != nullptr);
+    const auto* dst = dynamic_cast<const PixelLayer*>(back->topLevelLayers()[0].get());
+    PE_REQUIRE(dst != nullptr);
+
+    // The hole round-trips as transparent, and creates no tiles on either side.
+    PE_CHECK(dst->tiles().pixel(2 * T + 5, 5) == Rgba8{});
+    PE_CHECK(dst->tiles().pixel(0, 0) == Rgba8{10, 20, 30, 255});
+    PE_CHECK(dst->tiles().pixel(4 * T, 0) == Rgba8{40, 50, 60, 255});
+    PE_CHECK(roundTripMatchesPerPixelOracle(*doc, Rect{-4, -4, 6 * T + 8, 2 * T + 8}));
+    // Serialization is a read: it must not have materialized the gap in the source either.
+    PE_CHECK_EQ(base->tiles().tileCount(), static_cast<std::size_t>(2));
+}
+
+PE_TEST(native_format_gather_is_exact_for_every_pixel_depth) {
+    // The gather is a template, so a mistake can be made once per instantiation. Each depth
+    // is checked against its own store's per-pixel accessor across a tile boundary.
+    constexpr int T = kTileSize;
+    {
+        auto doc = Document::createBlank(Size{2 * T, T}, ColorMode::RGB, BitDepth::U16, 72);
+        auto* base = asPixel(*doc, 0);
+        base->tiles16().fillRect(Rect{T - 3, 4, 6, 6}, Rgba16{4000, 5000, 6000, 65535});
+        const auto back = deserializeDocument(serializeDocument(*doc));
+        PE_REQUIRE(back != nullptr);
+        const auto* dst = dynamic_cast<const PixelLayer*>(back->topLevelLayers()[0].get());
+        PE_REQUIRE(dst != nullptr);
+        for (int y = 0; y < 16; ++y) {
+            for (int x = T - 6; x < T + 6; ++x) {
+                PE_CHECK(dst->tiles16().pixel(x, y) == base->tiles16().pixel(x, y));
+            }
+        }
+    }
+    {
+        auto doc = Document::createBlank(Size{2 * T, T}, ColorMode::RGB, BitDepth::F32, 72);
+        auto* base = asPixel(*doc, 0);
+        base->tilesF().fillRect(Rect{T - 3, 4, 6, 6}, Rgbaf{0.25f, 0.5f, 0.75f, 1.0f});
+        const auto back = deserializeDocument(serializeDocument(*doc));
+        PE_REQUIRE(back != nullptr);
+        const auto* dst = dynamic_cast<const PixelLayer*>(back->topLevelLayers()[0].get());
+        PE_REQUIRE(dst != nullptr);
+        for (int y = 0; y < 16; ++y) {
+            for (int x = T - 6; x < T + 6; ++x) {
+                const Rgbaf a = dst->tilesF().pixel(x, y);
+                const Rgbaf e = base->tilesF().pixel(x, y);
+                PE_CHECK(a.r == e.r && a.g == e.g && a.b == e.b && a.a == e.a);
+            }
+        }
+    }
+}
+
+PE_TEST(native_format_mask_gather_is_exact_across_tiles_and_holes) {
+    // The mask block had the same per-pixel lookup and got the same treatment. An absent
+    // mask tile reads as kOpaque, not as zero, so treating a hole as "no data" would
+    // silently invert the meaning of the gap.
+    constexpr int T = kTileSize;
+    auto doc = Document::createBlank(Size{4 * T, 2 * T});
+    auto* base = asPixel(*doc, 0);
+    base->tiles().fillRect(Rect{0, 0, 4 * T, 2 * T}, Rgba8{9, 9, 9, 255});
+    auto m = std::make_unique<Mask>();
+    m->buffer().fillRect(Rect{T - 2, T - 2, 4, 4}, MaskBuffer::kClear);  // straddles a corner
+    m->buffer().fillRect(Rect{3 * T, 5, 10, 10}, MaskBuffer::kClear);    // with a gap between
+    base->setMask(std::move(m));
+
+    const auto back = deserializeDocument(serializeDocument(*doc));
+    PE_REQUIRE(back != nullptr);
+    const Layer* rl = back->topLevelLayers()[0].get();
+    PE_REQUIRE(rl != nullptr);
+    PE_REQUIRE(rl->mask() != nullptr);
+    // Counted rather than one assertion per pixel: a broken gather differs at tens of
+    // thousands of coordinates, and 64,788 identical failure lines bury every other result
+    // in the run. The first mismatch is reported with its coordinate, which is the part
+    // that actually helps.
+    int mismatches = 0;
+    int firstX = 0;
+    int firstY = 0;
+    for (int y = -2; y < 2 * T + 2; ++y) {
+        for (int x = -2; x < 4 * T + 2; ++x) {
+            if (rl->mask()->buffer().value(x, y) != base->mask()->buffer().value(x, y)) {
+                if (mismatches == 0) {
+                    firstX = x;
+                    firstY = y;
+                }
+                ++mismatches;
+            }
+        }
+    }
+    PE_CHECK_EQ(mismatches, 0);
+    if (mismatches != 0) {
+        std::printf("    first mask mismatch at (%d,%d), %d in total\n", firstX, firstY,
+                    mismatches);
     }
 }
