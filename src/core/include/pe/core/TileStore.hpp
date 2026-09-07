@@ -40,6 +40,23 @@ struct TileDataT {
 // Sparse, copy-on-write tiled pixel storage for a layer, parameterized on the pixel
 // type. Absent tiles read as transparent, so an empty or mostly-empty layer costs
 // almost nothing. See docs/systems/03-layer-system.md and ADR-0003.
+//
+// THE ESCAPE SURFACE. Copy-on-write here forks on Entry::shared, a flag this class sets
+// when a buffer leaves its exclusive control, rather than on a reference count. That is
+// sound only while the flag is set by EVERY way out, so the ways out are enumerated:
+//
+//   sharedTile()        hands out a shared_ptr           marks
+//   copy constructor    duplicates every entry           marks, both sides
+//   copy assignment     the same                         marks, both sides
+//   setTile()           installs a caller's pointer      marks
+//   find()              hands out a raw const Tile*      see the lifetime rule below
+//   forEachTile()       hands out a const Tile& per call callback-scoped
+//
+// Adding a member that returns, stores or aliases a tile buffer means adding it to that
+// list, marking the entry, and adding a row to tests/core/test_cowescapes.cpp, which
+// checks every producer against every in-place write. A path that hands a buffer out
+// without marking is exactly as wrong as the racy `use_count() > 1` test this replaced,
+// and it fails silently.
 template <class Pixel>
 class TileStoreT {
 public:
@@ -96,6 +113,12 @@ public:
     }
 
     // The tile at this coord, or nullptr if absent (== transparent).
+    //
+    // LIFETIME: the result points into a reference-counted buffer this store may replace.
+    // Do not cache it across any mutation of this store: a write forks the tile and an
+    // erase drops it, and the pointer then refers to a buffer that is only still alive if
+    // something else owns it. Read it and finish with it, or hold sharedTile() instead.
+    // Every caller today confines it to one loop body; that is a rule, not an accident.
     [[nodiscard]] const Tile* find(TileCoord c) const noexcept {
         auto it = tiles_.find(keyOf(c));
         return it == tiles_.end() ? nullptr : it->second.data.get();

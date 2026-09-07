@@ -13,6 +13,7 @@ add_executable(pe_core_tests
     core/test_compositor.cpp
     core/test_document.cpp
     core/test_snapshot.cpp
+    core/test_cowescapes.cpp
     core/test_history.cpp
     core/test_viewtransform.cpp
     core/test_canvasrenderer.cpp

@@ -128,6 +128,31 @@ write. The shared flag is set by the owning thread before the worker exists and 
 monotone within a buffer's life, so a stale flag costs one unnecessary fork and can never
 cost correctness.
 
+### The snapshot contract
+
+What `Document::snapshot()` covers is a contract, not an implementation detail, because a
+consumer that assumes more gets silence rather than a failure:
+
+| state | in a snapshot | why |
+|---|---|---|
+| canvas size, color mode, bit depth, resolution, profile | copied | serialized |
+| layer tree, properties, blend/opacity/locks/clipped | copied | serialized |
+| layer ids | preserved | an id a caller holds must resolve, starting with the active-layer marker |
+| pixel tiles | shared copy-on-write | the whole point; pointer copies, not pixels |
+| layer masks | deep-copied | `MaskBuffer` stores its tiles by value |
+| history | excluded | not serialized |
+| selection | excluded | not serialized, and `Selection` stores mask tiles by value (up to ~268 MB) |
+| observers, dirty flag | excluded | session state |
+| `CanvasRenderer` | excluded | single-threaded per instance; see the note above |
+
+The split is safe only while the excluded half is state persistence never reads.
+`tests/core/test_snapshot.cpp` enforces exactly that: it serializes a document exercising
+every feature the `.pedoc` writer emits, serializes its snapshot, and requires the two byte
+streams to be identical. Add a field to `Document` or `Layer`, persist it, and forget
+`snapshot()`, and that test goes red. It is a whole-file comparison rather than a property
+list on purpose, because a list has to be kept in step by hand, which is the failure it
+exists to prevent.
+
 Rules that follow, and that a new background operation has to satisfy:
 
 - Take the snapshot on the owning thread. Never from a worker.

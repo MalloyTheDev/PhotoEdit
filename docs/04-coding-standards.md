@@ -79,8 +79,17 @@ lane), and code review.
 - **The copy-on-write fork trigger is a shared flag, not `use_count()`.** A refcount
   answers "how many owners exist at this instant", which another thread can
   invalidate between the test and the write. `TileStoreT::Entry::shared` is set when
-  a buffer escapes, by the thread that owns the store, before any worker exists. If
-  you add a way for a `shared_ptr<TileData>` to leave a store, it must set that flag.
+  a buffer escapes, by the thread that owns the store, before any worker exists.
+- **A flag-based barrier is only as complete as its escape list.** `TileStoreT`
+  enumerates every way a tile buffer can leave it, in the class comment, and
+  `tests/core/test_cowescapes.cpp` checks each one against each in-place write. Adding
+  a member that returns, stores or aliases a tile buffer means marking the entry,
+  extending that list, and adding a row to that test. A path that hands a buffer out
+  without marking fails silently and is exactly as wrong as the refcount test it
+  replaced.
+- **A raw pointer into a refcounted buffer is a lifetime escape even when it is
+  const.** `TileStoreT::find` hands one out; it must not be cached across a mutation
+  of the same store, because a write forks the tile and an erase drops it.
 - Moving work off the GUI thread means deciding what the GUI thread may still touch,
   not merely adding a worker. `pe::app::runDocumentTask` is the one place that does
   it, and its `TaskAccess` argument is the decision: `Snapshot` leaves the canvas and
@@ -91,6 +100,23 @@ lane), and code review.
   synchronous work on the GUI thread reads to the user as a crash, and on Windows the
   OS escalates it to the not-responding state; force-quitting there loses the
   document. Anything that can take longer than a frame belongs on a worker.
+
+## Testing against a framework
+
+- **Test the externally observable framework result, not that our interception ran.**
+  A handler that fires, a filter that returns true, a flag that gets set: none of those
+  prove the framework did what the abstraction says. Assert the state the framework
+  itself ends up in.
+- The rule exists because of a concrete defect. Swallowing `QEvent::Close` in an
+  application event filter was assumed to refuse a window close. It does not: a
+  `QCloseEvent` is accepted by default, so `QWidget::close()` saw an accepted event and
+  hid the window regardless. The test that only checked "our filter saw the event"
+  passed for a year of nothing working. The test that checks `close()` returned false
+  and the window is still visible caught it immediately.
+- Applies equally to Qt event delivery, focus and modality, painting, and anything else
+  where the framework has semantics of its own. When unsure what those semantics are,
+  read the documentation rather than the abstraction: the `qt-docs` tooling exists for
+  exactly this.
 
 ## Comments
 

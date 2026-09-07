@@ -9,6 +9,8 @@
 // the question the barrier asks and is not stable under a second thread. These tests
 // therefore compare pixels, and check aliasing by tile address rather than by use_count.
 
+#include "pe/core/Adjustment.hpp"
+#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Brush.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
@@ -17,6 +19,8 @@
 #include "pe/core/Mask.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
+#include "pe/core/SolidColorLayer.hpp"
+#include "pe/core/TextLayer.hpp"
 #include "pe/core/TileStore.hpp"
 #include "pe_test.hpp"
 
@@ -49,12 +53,26 @@ std::unique_ptr<Document> tiledDoc(int cols, int rows) {
     return doc;
 }
 
-const TileStore& storeOf(const Document& doc, LayerId id) {
-    return static_cast<const PixelLayer*>(doc.findLayer(id))->tiles();
+// Pointers, not references. A snapshot that failed to preserve layer identity answers
+// findLayer() with nullptr, and a helper that dereferenced it would abort the whole binary
+// instead of failing one case: every test after it would then be skipped silently, which
+// is how a mutant hides a real regression. Callers null-check and bail.
+const TileStore* storeOf(const Document& doc, LayerId id) {
+    const auto* pl = dynamic_cast<const PixelLayer*>(doc.findLayer(id));
+    return pl != nullptr ? &pl->tiles() : nullptr;
 }
 
-TileStore& mutableStoreOf(Document& doc, LayerId id) {
-    return static_cast<PixelLayer*>(doc.findLayer(id))->tiles();
+TileStore* mutableStoreOf(Document& doc, LayerId id) {
+    auto* pl = dynamic_cast<PixelLayer*>(doc.findLayer(id));
+    return pl != nullptr ? &pl->tiles() : nullptr;
+}
+
+// Resolve both sides once, reporting rather than crashing when either is missing.
+bool resolve(const Document& a, const Document& b, LayerId id, const TileStore*& outA,
+             const TileStore*& outB) {
+    outA = storeOf(a, id);
+    outB = storeOf(b, id);
+    return outA != nullptr && outB != nullptr;
 }
 
 }  // namespace
@@ -69,8 +87,12 @@ PE_TEST(snapshot_shares_tile_buffers_rather_than_copying_pixels) {
     PE_CHECK(snap != nullptr);
     if (snap == nullptr) return;
 
-    const TileStore& live = storeOf(*doc, id);
-    const TileStore& shot = storeOf(*snap, id);
+    const TileStore* livePtr = nullptr;
+    const TileStore* shotPtr = nullptr;
+    PE_CHECK(resolve(*doc, *snap, id, livePtr, shotPtr));
+    if (livePtr == nullptr || shotPtr == nullptr) return;
+    const TileStore& live = *livePtr;
+    const TileStore& shot = *shotPtr;
     PE_CHECK_EQ(shot.tileCount(), live.tileCount());
     PE_CHECK_EQ(live.tileCount(), static_cast<std::size_t>(12));
 
@@ -100,8 +122,12 @@ PE_TEST(a_live_edit_forks_only_the_tiles_it_touches_and_leaves_the_snapshot_alon
 
     const TileCoord touched{1, 1};
     const TileCoord untouched{3, 2};
-    const TileStore::Tile* snapTouchedBefore = storeOf(*snap, id).find(touched);
-    const TileStore::Tile* liveTouchedBefore = storeOf(*doc, id).find(touched);
+    const TileStore* liveBefore = nullptr;
+    const TileStore* shotBefore = nullptr;
+    PE_CHECK(resolve(*doc, *snap, id, liveBefore, shotBefore));
+    if (liveBefore == nullptr || shotBefore == nullptr) return;
+    const TileStore::Tile* snapTouchedBefore = shotBefore->find(touched);
+    const TileStore::Tile* liveTouchedBefore = liveBefore->find(touched);
     PE_CHECK(snapTouchedBefore != nullptr && snapTouchedBefore == liveTouchedBefore);
     if (snapTouchedBefore == nullptr) return;
 
@@ -117,8 +143,8 @@ PE_TEST(a_live_edit_forks_only_the_tiles_it_touches_and_leaves_the_snapshot_alon
     if (cmd == nullptr) return;
     doc->history().push(std::move(cmd));
 
-    const TileStore& live = storeOf(*doc, id);
-    const TileStore& shot = storeOf(*snap, id);
+    const TileStore& live = *liveBefore;
+    const TileStore& shot = *shotBefore;
 
     // 1. The live tile really changed.
     PE_CHECK(live.find(touched) != nullptr);
@@ -142,8 +168,11 @@ PE_TEST(a_live_edit_forks_only_the_tiles_it_touches_and_leaves_the_snapshot_alon
     // and that is the one the fork exists for.
     const TileStore::Tile* snapUntouchedBefore = shot.find(untouched);
     const Rgba8 untouchedOriginal = snapUntouchedBefore->at(9, 9);
-    mutableStoreOf(*doc, id).setPixel(untouched.col * kTileSize + 9, untouched.row * kTileSize + 9,
-                                      Rgba8{1, 2, 3, 255});
+    TileStore* liveMut = mutableStoreOf(*doc, id);
+    PE_CHECK(liveMut != nullptr);
+    if (liveMut == nullptr) return;
+    liveMut->setPixel(untouched.col * kTileSize + 9, untouched.row * kTileSize + 9,
+                      Rgba8{1, 2, 3, 255});
     PE_CHECK(live.find(untouched)->at(9, 9) == Rgba8{1, 2, 3, 255});  // the write landed
     PE_CHECK(shot.find(untouched) == snapUntouchedBefore);            // same buffer
     PE_CHECK(shot.find(untouched)->at(9, 9) == untouchedOriginal);    // untouched bytes
@@ -156,7 +185,10 @@ PE_TEST(writing_a_uniquely_owned_tile_does_not_clone_it) {
     // correctness one.
     auto doc = tiledDoc(2, 2);
     const LayerId id = doc->activeLayer();
-    TileStore& live = mutableStoreOf(*doc, id);
+    TileStore* livePtr = mutableStoreOf(*doc, id);
+    PE_CHECK(livePtr != nullptr);
+    if (livePtr == nullptr) return;
+    TileStore& live = *livePtr;
     PE_CHECK_EQ(live.sharedTileCount(), static_cast<std::size_t>(0));
 
     const TileStore::Tile* before = live.find(TileCoord{0, 0});
@@ -178,7 +210,10 @@ PE_TEST(handing_a_tile_out_marks_it_shared_so_the_next_write_forks) {
     // stroke would undo to the wrong pixels.
     auto doc = tiledDoc(2, 2);
     const LayerId id = doc->activeLayer();
-    TileStore& live = mutableStoreOf(*doc, id);
+    TileStore* livePtr = mutableStoreOf(*doc, id);
+    PE_CHECK(livePtr != nullptr);
+    if (livePtr == nullptr) return;
+    TileStore& live = *livePtr;
 
     const std::shared_ptr<TileStore::Tile> delta = live.sharedTile(TileCoord{0, 0});
     PE_CHECK(delta != nullptr);
@@ -284,8 +319,12 @@ PE_TEST(a_worker_reading_a_snapshot_is_isolated_from_concurrent_live_painting) {
     std::atomic<int> mismatches{0};
     std::atomic<long long> reads{0};
 
+    const TileStore* shotPtr = storeOf(*snap, id);
+    PE_CHECK(shotPtr != nullptr);
+    if (shotPtr == nullptr) return;
+
     std::thread worker([&] {
-        const TileStore& shot = storeOf(*snap, id);
+        const TileStore& shot = *shotPtr;
         workerReady.store(true, std::memory_order_release);
         while (!writerDone.load(std::memory_order_acquire)) {
             for (int row = 0; row < kRows; ++row) {
@@ -316,7 +355,9 @@ PE_TEST(a_worker_reading_a_snapshot_is_isolated_from_concurrent_live_painting) {
     // first round.
     for (int round = 0; round < 40; ++round) {
         const auto churn = doc->snapshot();
-        TileStore& live = mutableStoreOf(*doc, id);
+        TileStore* livePtr = mutableStoreOf(*doc, id);
+        if (livePtr == nullptr) break;
+        TileStore& live = *livePtr;
         for (int row = 0; row < kRows; ++row) {
             for (int col = 0; col < kCols; ++col) {
                 for (int k = 0; k < kTileSize; k += kWriteStride) {
@@ -333,10 +374,12 @@ PE_TEST(a_worker_reading_a_snapshot_is_isolated_from_concurrent_live_painting) {
     PE_CHECK(reads.load() > 0);  // the worker really ran against a live writer
 
     // And the live document really did change out from under it.
-    const TileStore& live = storeOf(*doc, id);
-    PE_CHECK(live.find(TileCoord{0, 0})->at(kWriteStride, kWriteStride) == Rgba8{39, 1, 2, 255});
-    PE_CHECK(storeOf(*snap, id).find(TileCoord{0, 0})->at(kWriteStride, kWriteStride) ==
-             colorFor(0, 0));
+    const TileStore* liveEnd = storeOf(*doc, id);
+    PE_CHECK(liveEnd != nullptr);
+    if (liveEnd == nullptr) return;
+    PE_CHECK(liveEnd->find(TileCoord{0, 0})->at(kWriteStride, kWriteStride) ==
+             Rgba8{39, 1, 2, 255});
+    PE_CHECK(shotPtr->find(TileCoord{0, 0})->at(kWriteStride, kWriteStride) == colorFor(0, 0));
 }
 
 PE_TEST(serializing_a_snapshot_gives_the_same_bytes_however_much_the_document_changes) {
@@ -358,7 +401,10 @@ PE_TEST(serializing_a_snapshot_gives_the_same_bytes_however_much_the_document_ch
     auto cmd = bucketFill(*doc, id, 300, 300, Rgbaf{0.0f, 1.0f, 0.0f, 1.0f}, 0, nullptr);
     PE_CHECK(cmd != nullptr);
     if (cmd != nullptr) doc->history().push(std::move(cmd));
-    mutableStoreOf(*doc, id).setPixel(7, 7, Rgba8{255, 255, 255, 255});
+    TileStore* liveMut = mutableStoreOf(*doc, id);
+    PE_CHECK(liveMut != nullptr);
+    if (liveMut == nullptr) return;
+    liveMut->setPixel(7, 7, Rgba8{255, 255, 255, 255});
     auto extra = std::make_unique<PixelLayer>("Added during the save", BitDepth::U8);
     extra->tiles().fillRect(Rect{0, 0, 64, 64}, Rgba8{1, 2, 3, 255});
     doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(extra));
@@ -368,4 +414,184 @@ PE_TEST(serializing_a_snapshot_gives_the_same_bytes_however_much_the_document_ch
 
     const std::vector<std::byte> liveNow = exportDocument(*doc, ImageFormat::Native);
     PE_CHECK(!(liveNow == beforeEdits));  // and the live document did
+}
+
+namespace {
+
+// A document exercising every kind of state the .pedoc writer emits: a nested group, an
+// adjustment layer, a solid fill, a text layer, masks with their own flags, per-layer
+// properties, off-canvas content, a non-default resolution and an active layer inside a
+// nested group. Built at `depth`, because the format keys pixel serialization off the
+// DOCUMENT depth and writeLayer documents the precondition that every PixelLayer matches
+// it; the caller runs this at all three depths rather than mixing them in one document.
+//
+// The point is coverage of the SERIALIZED surface. Anything the writer reads should be
+// reachable from here, so the round-trip test below fails the day a field is added to
+// Document or Layer, persisted, and left out of snapshot().
+std::unique_ptr<Document> everyFeatureDoc(BitDepth depth, bool offCanvasSolidFill = true) {
+    auto doc =
+        Document::createBlank(Size{3 * kTileSize, 2 * kTileSize}, ColorMode::RGB, depth, 300);
+    if (doc == nullptr) return nullptr;
+
+    // Paint into whichever store matches the document depth.
+    const auto paint = [depth](PixelLayer& pl, Rect r, int seed) {
+        switch (depth) {
+            case BitDepth::U16:
+                pl.tiles16().fillRect(
+                    r, Rgba16{static_cast<std::uint16_t>(1000 + seed), 2000, 3000, 65535});
+                break;
+            case BitDepth::F32:
+                pl.tilesF().fillRect(
+                    r, Rgbaf{0.1f + static_cast<float>(seed) / 100.0f, 0.2f, 0.3f, 1.0f});
+                break;
+            case BitDepth::U8:
+            default:
+                pl.tiles().fillRect(r, Rgba8{static_cast<std::uint8_t>(10 + seed), 20, 30, 255});
+                break;
+        }
+    };
+
+    auto* base = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    base->setName("Base");
+    base->setOpacity(0.8f);
+    base->setFillOpacity(0.6f);
+    base->setBlendMode(BlendMode::Multiply);
+    base->setClipped(true);
+    base->setVisible(false);
+    paint(*base, Rect{0, 0, 2 * kTileSize, kTileSize}, 0);
+    // Off-canvas, which selects the newer format version, so the version choice is covered.
+    paint(*base, Rect{-40, -30, 20, 20}, 5);
+    {
+        auto mask = std::make_unique<Mask>();
+        mask->setEnabled(false);
+        mask->setInverted(true);
+        mask->setDensity(0.42f);
+        mask->buffer().fillRect(Rect{5, 5, kTileSize + 20, 40}, MaskBuffer::kClear);
+        base->setMask(std::move(mask));
+    }
+    LayerLocks locks;
+    locks.transparency = true;
+    locks.position = true;
+    base->setLocks(locks);
+
+    auto sibling = std::make_unique<PixelLayer>("Sibling", depth);
+    paint(*sibling, Rect{10, 10, kTileSize, 30}, 9);
+
+    auto group = std::make_unique<GroupLayer>("Set");
+    group->setIsolated(false);
+    group->setOpacity(0.55f);
+    group->addChild(std::move(sibling));
+    auto nested = std::make_unique<GroupLayer>("Nested");
+    auto inner = std::make_unique<PixelLayer>("Inner", depth);
+    paint(*inner, Rect{kTileSize, kTileSize, 50, 50}, 17);
+    const LayerId innerId = inner->id();
+    nested->addChild(std::move(inner));
+    group->addChild(std::move(nested));
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+
+    doc->cmdInsertTopLevel(doc->topLevelCount(),
+                           std::make_unique<AdjustmentLayer>(
+                               std::make_unique<BrightnessContrast>(0.25f, -0.1f), "Adj"));
+    // A solid fill, off the canvas edge by default because that is a state the writer
+    // deliberately emits (hasOffCanvasContent bumps the format version for it).
+    doc->cmdInsertTopLevel(
+        doc->topLevelCount(),
+        std::make_unique<SolidColorLayer>(
+            Rgba8{200, 30, 40, 128},
+            offCanvasSolidFill ? Rect{-10, -10, 80, 80} : Rect{10, 10, 80, 80}, "Fill"));
+
+    PixelBuffer raster(24, 12, Rgba8{255, 255, 255, 200});
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<TextLayer>(
+                                                     TextModel{"hello", "Arial", 32, true, false,
+                                                               Rgba8{5, 6, 7, 255}, Point{12, 34}},
+                                                     std::move(raster), Point{12, 34}, "Text"));
+
+    doc->setActiveLayer(innerId);  // active layer is inside a nested group
+    return doc;
+}
+
+}  // namespace
+
+PE_TEST(a_snapshot_serializes_byte_identically_to_the_document_it_came_from) {
+    // The snapshot CONTRACT, enforced rather than described.
+    //
+    // snapshot() copies a chosen subset of Document: pixels shared copy-on-write, masks
+    // deep-copied, and history/selection/observers deliberately excluded. That split is
+    // safe only while the excluded half is state the persistence layer never reads. The
+    // moment someone adds a field to Document or Layer, persists it, and does not extend
+    // snapshot(), this goes red, because the two byte streams stop matching.
+    //
+    // It is deliberately a whole-file comparison rather than a list of properties: a list
+    // would have to be kept in step by hand, which is the failure it exists to prevent.
+    for (const BitDepth depth : {BitDepth::U8, BitDepth::U16, BitDepth::F32}) {
+        const auto doc = everyFeatureDoc(depth);
+        PE_CHECK(doc != nullptr);
+        if (doc == nullptr) continue;
+        const auto snap = doc->snapshot();
+        PE_CHECK(snap != nullptr);
+        if (snap == nullptr) continue;
+
+        const std::vector<std::byte> fromLive = exportDocument(*doc, ImageFormat::Native);
+        const std::vector<std::byte> fromSnapshot = exportDocument(*snap, ImageFormat::Native);
+        PE_CHECK(!fromLive.empty());
+        PE_CHECK_EQ(fromSnapshot.size(), fromLive.size());
+        PE_CHECK(fromSnapshot == fromLive);
+
+        // And it really is a document worth comparing: several layers, nesting, and the
+        // newer format version that off-canvas content selects.
+        PE_CHECK(doc->topLevelCount() >= 4);
+        PE_CHECK(fromLive.size() > 1000);
+
+        // The round trip also has to survive reloading, or "identical bytes" could mean the
+        // writer dropped the same thing twice.
+        //
+        // Reloaded from a document whose solid fill sits ON the canvas. The off-canvas one
+        // above writes a record the reader rejects, which loses the whole file: that is
+        // #173, a defect this test found rather than a property of snapshots. Switch this
+        // back to `fromSnapshot` when #173 is fixed.
+        const auto onCanvas = everyFeatureDoc(depth, false);
+        PE_CHECK(onCanvas != nullptr);
+        if (onCanvas == nullptr) continue;
+        const auto onCanvasSnap = onCanvas->snapshot();
+        PE_CHECK(onCanvasSnap != nullptr);
+        if (onCanvasSnap == nullptr) continue;
+        const std::vector<std::byte> reloadable =
+            exportDocument(*onCanvasSnap, ImageFormat::Native);
+        PE_CHECK(reloadable == exportDocument(*onCanvas, ImageFormat::Native));
+        const auto reloaded = importDocument(reloadable, ImageFormat::Native);
+        PE_CHECK(reloaded != nullptr);
+        if (reloaded == nullptr) continue;
+        PE_CHECK_EQ(reloaded->topLevelCount(), onCanvas->topLevelCount());
+        PE_CHECK_EQ(reloaded->resolutionPpi(), onCanvas->resolutionPpi());
+        const std::vector<std::byte> again = exportDocument(*reloaded, ImageFormat::Native);
+        PE_CHECK(again == reloadable);
+    }
+}
+
+PE_TEST(the_state_a_snapshot_deliberately_drops_is_the_state_persistence_ignores) {
+    // The other half of the contract, stated as a test so the exclusions are a decision
+    // rather than an oversight. History, the selection and the dirty flag are excluded
+    // because nothing serialized reads them; if that ever stops being true, the case above
+    // catches it, and this one records WHY they were left out.
+    const auto doc = everyFeatureDoc(BitDepth::U8);
+    PE_CHECK(doc != nullptr);
+    if (doc == nullptr) return;
+
+    const std::vector<std::byte> clean = exportDocument(*doc, ImageFormat::Native);
+
+    // Give the document a history, a selection and a dirty flag, without touching pixels.
+    Selection sel;
+    sel.selectRect(Rect{0, 0, kTileSize, kTileSize});
+    doc->editableSelection() = std::move(sel);
+    doc->touchSelection();
+    PE_CHECK(doc->selection().active());
+
+    const std::vector<std::byte> withSessionState = exportDocument(*doc, ImageFormat::Native);
+    PE_CHECK(withSessionState == clean);  // none of it reaches the file
+
+    const auto snap = doc->snapshot();
+    PE_CHECK(snap != nullptr);
+    if (snap == nullptr) return;
+    PE_CHECK(!snap->selection().active());  // and so the snapshot need not carry it
+    PE_CHECK(exportDocument(*snap, ImageFormat::Native) == clean);
 }
