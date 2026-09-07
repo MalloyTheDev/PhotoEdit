@@ -222,9 +222,10 @@ private:
 // byte-exact PaintCommand the batched call would (the layer already holds the final pixels, so
 // pushing it to History re-applies a no-op and undo restores the snapshots); cancel() reverts.
 //
-// Created at stroke start; the factory returns nullptr if `layerId` is not a pixel layer. The
-// caller must finish() or cancel() before destroying the document. Stabilization is NOT handled
-// here — use the batched paintStroke/... path when BrushSettings::stabilize > 0.
+// Created at stroke start; the factory returns nullptr if the target is unsuitable. The caller
+// must finish() or cancel() before destroying the document. Stabilization IS handled here: the
+// smoother is a one-sided exponential filter, so the incremental stamper reproduces it by
+// carrying one running position.
 class LiveStroke {
 public:
     virtual ~LiveStroke();
@@ -232,10 +233,17 @@ public:
     // LiveStroke stamps only the dabs beyond what it has already placed). Returns the region
     // dirtied this call.
     [[nodiscard]] virtual Rect extend(std::span<const StrokePoint> points) = 0;
-    // Commit: the byte-exact PaintCommand for the whole stroke (nullptr if nothing was painted).
-    [[nodiscard]] virtual std::unique_ptr<PaintCommand> finish() = 0;
+    // Commit: the byte-exact command for the whole stroke (nullptr if nothing was painted).
+    // Returns Command rather than PaintCommand because a mask stroke commits a
+    // MaskPaintCommand: it edits a MaskBuffer, not a layer's tile store.
+    [[nodiscard]] virtual std::unique_ptr<Command> finish() = 0;
     // Abort: restore every touched tile to its pre-stroke snapshot. Commits nothing.
     virtual void cancel() = 0;
+    // True once the stroke has grown past a bound its commit format cannot represent, and
+    // has stopped accepting samples. What it painted so far still commits. Only the mask
+    // stroke has such a bound (its command stores a dense array over the stroke's bounding
+    // box); the tile-delta strokes are bounded by their tile count and never freeze.
+    [[nodiscard]] virtual bool atBudget() const { return false; }
 };
 
 [[nodiscard]] std::unique_ptr<LiveStroke> beginPaintStroke(Document& doc, LayerId layerId,
@@ -255,5 +263,11 @@ public:
                                                            const BrushSettings& settings,
                                                            int offsetX, int offsetY,
                                                            const Selection* selection = nullptr);
+// Incremental mask painting. Same contract as the others, but it edits the active layer's
+// MASK and commits a MaskPaintCommand. Returns nullptr if the layer has no mask.
+// `targetGray` is the user-facing value (0 hides, 1 reveals), as for maskPaintStroke.
+[[nodiscard]] std::unique_ptr<LiveStroke> beginMaskPaintStroke(
+    Document& doc, LayerId layerId, const BrushSettings& settings, float targetGray,
+    const Selection* selection = nullptr);
 
 }  // namespace pe

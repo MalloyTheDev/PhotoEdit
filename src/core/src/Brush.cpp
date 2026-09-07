@@ -38,6 +38,11 @@ enum class PaintOp { Paint, Erase, Dodge, Burn, Clone };
 // (a photographic dodge/burn "exposure" feel) rather than slamming pixels to white/black.
 constexpr float kToneExposure = 0.3f;
 
+// Bounds the dense before/after snapshot a MaskPaintCommand carries: the stroke's bounding
+// box can be large for a long diagonal even though its coverage is sparse. Shared by the
+// batched and incremental mask paths so they refuse at the same point.
+constexpr std::int64_t kMaxMaskBrushPixels = 16'000'000;
+
 using CoverageKey = std::pair<int, int>;  // {tileCol, tileRow}
 using CoverageMap = std::map<CoverageKey, std::vector<float>>;
 
@@ -435,30 +440,16 @@ RasterTileCursor<std::vector<float>> coverageCursor(const CoverageMap& cov) {
         0.0f);
 }
 
-// Incremental live stroke for the per-pixel ops (see LiveStroke in Brush.hpp). Holds the
-// accumulated coverage and a pre-stroke snapshot of every touched tile; extend() stamps only the
-// new dabs and re-composites only the tiles a new dab hit, each from its snapshot with the full
-// coverage — so the result is byte-identical to the batched flushStroke, just linear over the
-// stroke. Stabilization is NOT supported here (callers use the batched path when
-// BrushSettings::stabilize > 0).
-template <class Pixel>
-class LiveStrokeImpl final : public LiveStroke {
+// The dab-placement half of a live stroke: turns incoming path samples into dabs on a
+// CoverageMap, carrying the stepping state across calls so the sequence matches
+// buildCoverage's exactly. Shared by the pixel and mask live strokes, because duplicating
+// it is how the two would silently drift (the stabilization carry below is precisely the
+// kind of state that would).
+class StrokeStamper {
 public:
-    LiveStrokeImpl(LayerId layer, TileStoreT<Pixel>& store, const BrushSettings& brush, Rgbaf color,
-                   PaintOp op, std::string name, int cloneOffX, int cloneOffY,
-                   const Selection* selection)
-        : layer_(layer),
-          store_(store),
-          color_(color),
-          blendMode_(brush.blendMode),
-          op_(op),
-          name_(std::move(name)),
-          cloneOffX_(cloneOffX),
-          cloneOffY_(cloneOffY),
-          selection_(selection),
-          hardness_(clamp01(brush.hardness)),
+    explicit StrokeStamper(const BrushSettings& brush)
+        : hardness_(clamp01(brush.hardness)),
           flow_(clamp01(brush.flow)),
-          opacity_(clamp01(brush.opacity)),
           pressureSize_(brush.pressureControlsSize) {
         const float d = std::isfinite(brush.diameter) ? brush.diameter : 20.0f;
         diameter_ = std::clamp(d, 0.1f, kMaxBrushDiameter);
@@ -468,52 +459,17 @@ public:
         stabAlpha_ = brush.stabilize > 0.0f ? std::min(brush.stabilize, 0.95f) : 0.0f;
     }
 
-    Rect extend(std::span<const StrokePoint> points) override {
-        std::set<CoverageKey> touched;
-        stampNew(points, touched);
-        return flushTiles(touched);
-    }
+    // The largest radius a dab can have, for callers that need a conservative footprint
+    // before the dabs are placed.
+    [[nodiscard]] float maxRadius() const { return std::max(0.5f, diameter_ * 0.5f); }
 
-    std::unique_ptr<PaintCommand> finish() override {
-        std::vector<typename PaintCommand::DeltaT<Pixel>> deltas;
-        Rect dirty{};
-        for (const CoverageKey& key : changed_) {
-            const TileCoord coord{key.first, key.second};
-            deltas.push_back(
-                typename PaintCommand::DeltaT<Pixel>{coord, s0_[key], store_.sharedTile(coord)});
-            dirty = dirty.united(tileBounds(coord));
-        }
-        if (deltas.empty()) return nullptr;
-        return std::make_unique<PaintCommand>(layer_, dirty, std::move(deltas), name_);
-    }
-
-    void cancel() override {
-        for (auto& [key, snap] : s0_) store_.setTile(TileCoord{key.first, key.second}, snap);
-        s0_.clear();
-        cov_.clear();
-        changed_.clear();
-    }
-
-private:
-    // Capture the tile's pre-stroke content the first time the stroke touches it (the store still
-    // holds S0 then, since flushTiles only writes tiles AFTER snapshotting). The shared_ptr is COW:
-    // a later setTile() replaces the pointer, so the snapshot keeps pointing at the original
-    // pixels.
-    void ensureS0(const CoverageKey& key) {
-        if (s0_.find(key) == s0_.end()) {
-            s0_.emplace(key, store_.sharedTile(TileCoord{key.first, key.second}));
-        }
-    }
-
-    // Place the dabs for the path samples not yet consumed, mirroring buildCoverage's stepping
-    // (carrying prevPos_/distSinceLast_ across calls) so the same dab sequence — hence the same
-    // accumulated coverage — is produced as the batched path.
-    void stampNew(std::span<const StrokePoint> points, std::set<CoverageKey>& touched) {
+    void stampNew(std::span<const StrokePoint> points, CoverageMap& cov,
+                  std::set<CoverageKey>& touched) {
         const auto dab = [&](Vec2 p, float pressure) {
             if (dabCount_ >= kMaxDabsPerStroke) return;
             ++dabCount_;
             const float diam = pressureSize_ ? diameter_ * clamp01(pressure) : diameter_;
-            stampDab(cov_, p, std::max(0.5f, diam * 0.5f), hardness_, flow_, &touched);
+            stampDab(cov, p, std::max(0.5f, diam * 0.5f), hardness_, flow_, &touched);
         };
         // Stabilization is an exponential smoother over the path. It is CAUSAL: the
         // smoothed sample i depends only on samples 0..i through the running `last`, so
@@ -558,6 +514,92 @@ private:
             prevPressure_ = bpr;
         }
         consumed_ = points.size();
+    }
+
+private:
+    float hardness_;
+    float flow_;
+    bool pressureSize_;
+    float diameter_ = 20.0f;
+    float step_ = 1.0f;
+    std::size_t consumed_ = 0;  // input points already stamped
+    bool started_ = false;
+    Vec2 prevPos_{};
+    float prevPressure_ = 1.0f;
+    float distSinceLast_ = 0.0f;
+    int64_t dabCount_ = 0;
+    float stabAlpha_ = 0.0f;  // 0 disables smoothing
+    Vec2 stabLast_{};         // running smoothed position, carried across extend() calls
+};
+
+// Incremental live stroke for the per-pixel ops (see LiveStroke in Brush.hpp). Holds the
+// accumulated coverage and a pre-stroke snapshot of every touched tile; extend() stamps only the
+// new dabs and re-composites only the tiles a new dab hit, each from its snapshot with the full
+// coverage — so the result is byte-identical to the batched flushStroke, just linear over the
+// stroke. Stabilization is NOT supported here (callers use the batched path when
+// BrushSettings::stabilize > 0).
+template <class Pixel>
+class LiveStrokeImpl final : public LiveStroke {
+public:
+    LiveStrokeImpl(LayerId layer, TileStoreT<Pixel>& store, const BrushSettings& brush, Rgbaf color,
+                   PaintOp op, std::string name, int cloneOffX, int cloneOffY,
+                   const Selection* selection)
+        : layer_(layer),
+          store_(store),
+          color_(color),
+          blendMode_(brush.blendMode),
+          op_(op),
+          name_(std::move(name)),
+          cloneOffX_(cloneOffX),
+          cloneOffY_(cloneOffY),
+          selection_(selection),
+          hardness_(clamp01(brush.hardness)),
+          flow_(clamp01(brush.flow)),
+          opacity_(clamp01(brush.opacity)),
+          stamper_(brush) {}
+
+    Rect extend(std::span<const StrokePoint> points) override {
+        std::set<CoverageKey> touched;
+        stampNew(points, touched);
+        return flushTiles(touched);
+    }
+
+    std::unique_ptr<Command> finish() override {
+        std::vector<typename PaintCommand::DeltaT<Pixel>> deltas;
+        Rect dirty{};
+        for (const CoverageKey& key : changed_) {
+            const TileCoord coord{key.first, key.second};
+            deltas.push_back(
+                typename PaintCommand::DeltaT<Pixel>{coord, s0_[key], store_.sharedTile(coord)});
+            dirty = dirty.united(tileBounds(coord));
+        }
+        if (deltas.empty()) return nullptr;
+        return std::make_unique<PaintCommand>(layer_, dirty, std::move(deltas), name_);
+    }
+
+    void cancel() override {
+        for (auto& [key, snap] : s0_) store_.setTile(TileCoord{key.first, key.second}, snap);
+        s0_.clear();
+        cov_.clear();
+        changed_.clear();
+    }
+
+private:
+    // Capture the tile's pre-stroke content the first time the stroke touches it (the store still
+    // holds S0 then, since flushTiles only writes tiles AFTER snapshotting). The shared_ptr is COW:
+    // a later setTile() replaces the pointer, so the snapshot keeps pointing at the original
+    // pixels.
+    void ensureS0(const CoverageKey& key) {
+        if (s0_.find(key) == s0_.end()) {
+            s0_.emplace(key, store_.sharedTile(TileCoord{key.first, key.second}));
+        }
+    }
+
+    // Place the dabs for the path samples not yet consumed, mirroring buildCoverage's stepping
+    // (carrying prevPos_/distSinceLast_ across calls) so the same dab sequence — hence the same
+    // accumulated coverage — is produced as the batched path.
+    void stampNew(std::span<const StrokePoint> points, std::set<CoverageKey>& touched) {
+        stamper_.stampNew(points, cov_, touched);
     }
 
     // Re-composite each tile whose coverage changed this extend, from its pre-stroke snapshot with
@@ -657,21 +699,202 @@ private:
     float hardness_;
     float flow_;
     float opacity_;
-    bool pressureSize_;
-    float diameter_ = 20.0f;
-    float step_ = 1.0f;
+    StrokeStamper stamper_;
 
     CoverageMap cov_;                                              // accumulated coverage
     std::map<CoverageKey, std::shared_ptr<TileDataT<Pixel>>> s0_;  // pre-stroke snapshot per tile
     std::set<CoverageKey> changed_;  // tiles whose pixels actually changed (the committed deltas)
-    std::size_t consumed_ = 0;       // input points already stamped
-    bool started_ = false;
-    Vec2 prevPos_{};
-    float prevPressure_ = 1.0f;
-    float distSinceLast_ = 0.0f;
-    int64_t dabCount_ = 0;
-    float stabAlpha_ = 0.0f;  // 0 disables smoothing; see stampNew
-    Vec2 stabLast_{};         // running smoothed position, carried across extend() calls
+};
+
+// Incremental mask painting, the counterpart of LiveStrokeImpl for a MaskBuffer.
+//
+// The invariant that makes this exact is the one the per-pixel ops already rely on:
+// coverage accumulates as 1 - prod(1 - c_i), which is order-independent and monotone, and
+// the output byte is a pure function of the PRE-STROKE byte and that pixel's accumulated
+// coverage. So re-deriving a tile from its snapshot with the current coverage is
+// idempotent, and a later dab that raises coverage simply re-derives it again.
+//
+// The batched maskPaintStroke re-rasterized the whole stroke on every input sample and then
+// walked a dense array over the whole cumulative bounding box, which is why its per-sample
+// cost grew with stroke length.
+class LiveMaskStroke final : public LiveStroke {
+public:
+    LiveMaskStroke(LayerId layer, MaskBuffer& buf, const BrushSettings& brush, float target,
+                   const Selection* selection)
+        : layer_(layer),
+          buf_(buf),
+          target_(target),
+          opacity_(clamp01(brush.opacity)),
+          selection_(selection),
+          gate_(selection != nullptr && selection->active()),
+          stamper_(brush) {}
+
+    Rect extend(std::span<const StrokePoint> points) override {
+        if (atBudget_) return Rect{};
+        // The command stores a dense array over the stroke's bounding box, so the box has a
+        // hard limit. Check BEFORE stamping: once a dab is on the mask it cannot be taken
+        // back, and committing nothing afterwards would be exactly the data loss #163
+        // fixed on the batched path. Points are inflated by the largest dab radius, which
+        // over-estimates the real coverage bounds, so the freeze is conservative.
+        const Rect prospective = boundsWith(points);
+        if (!prospective.isEmpty() && area(prospective) > kMaxMaskBrushPixels) {
+            atBudget_ = true;
+            return Rect{};
+        }
+        reach_ = prospective;
+
+        std::set<CoverageKey> touched;
+        stamper_.stampNew(points, cov_, touched);
+        return flushTiles(touched);
+    }
+
+    std::unique_ptr<Command> finish() override {
+        // The exact bounds of the accumulated coverage, which is what the batched path
+        // committed. Scanned once here rather than once per sample.
+        const Rect bb = coverageBounds(cov_);
+        if (bb.isEmpty()) return nullptr;
+        const std::int64_t n = area(bb);
+        if (n > kMaxMaskBrushPixels) return nullptr;  // unreachable: extend() freezes first
+
+        const int w = bb.width;
+        const int left = bb.left();
+        const int top = bb.top();
+        std::vector<std::uint8_t> before(static_cast<std::size_t>(n));
+        std::vector<std::uint8_t> after(static_cast<std::size_t>(n));
+        bool changed = false;
+        RasterTileCursor<MaskBuffer::GrayTile> now([this](TileCoord c) { return buf_.findTile(c); },
+                                                   MaskBuffer::kOpaque);
+        for (int y = 0; y < bb.height; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                      static_cast<std::size_t>(x);
+                before[i] = snapshotByte(left + x, top + y);
+                after[i] = now.at(left + x, top + y);
+                if (after[i] != before[i]) changed = true;
+            }
+        }
+        if (!changed) return nullptr;  // stroke missed the mask entirely
+        return std::make_unique<MaskPaintCommand>(layer_, bb, std::move(before), std::move(after));
+    }
+
+    void cancel() override {
+        for (const auto& [key, tile] : s0_) {
+            buf_.setTile(TileCoord{key.first, key.second}, tile);
+        }
+        // Writing kOpaque cannot erase a tile setValue created, so drop any the stroke
+        // allocated that the restore left fully revealing. Mirrors MaskPaintCommand::apply.
+        if (!s0_.empty()) buf_.compact(snapshotBounds());
+        s0_.clear();
+        cov_.clear();
+    }
+
+    [[nodiscard]] bool atBudget() const override { return atBudget_; }
+
+private:
+    static std::int64_t area(Rect r) {
+        return static_cast<std::int64_t>(r.width) * static_cast<std::int64_t>(r.height);
+    }
+
+    // The stroke's reach so far, unioned with a conservative footprint for the samples not
+    // yet stamped. Used only for the budget check, never for the committed region.
+    [[nodiscard]] Rect boundsWith(std::span<const StrokePoint> points) const {
+        Rect out = reach_;
+        const float r = stamper_.maxRadius() + 1.0f;
+        for (const StrokePoint& p : points) {
+            if (!std::isfinite(p.pos.x) || !std::isfinite(p.pos.y)) continue;
+            if (std::fabs(p.pos.x) > kCoordBound || std::fabs(p.pos.y) > kCoordBound) continue;
+            const int x0 = static_cast<int>(std::floor(p.pos.x - r));
+            const int y0 = static_cast<int>(std::floor(p.pos.y - r));
+            const int x1 = static_cast<int>(std::ceil(p.pos.x + r));
+            const int y1 = static_cast<int>(std::ceil(p.pos.y + r));
+            out = out.united(Rect{x0, y0, x1 - x0 + 1, y1 - y0 + 1});
+        }
+        return out;
+    }
+
+    [[nodiscard]] Rect snapshotBounds() const {
+        Rect out{};
+        for (const auto& [key, tile] : s0_) {
+            out = out.united(tileBounds(TileCoord{key.first, key.second}));
+        }
+        return out;
+    }
+
+    // The pre-stroke mask byte. Snapshotted tiles hold it; anything the stroke never touched
+    // still holds it in the live buffer.
+    [[nodiscard]] std::uint8_t snapshotByte(int x, int y) const {
+        const CoverageKey key{floorDiv(x, kTileSize), floorDiv(y, kTileSize)};
+        const auto it = s0_.find(key);
+        if (it == s0_.end()) return buf_.value(x, y);
+        return it->second[static_cast<std::size_t>(tileLocalOffset(y)) * kTileSize +
+                          static_cast<std::size_t>(tileLocalOffset(x))];
+    }
+
+    // Capture a tile's pre-stroke bytes the first time the stroke reaches it. An absent tile
+    // reads as kOpaque, so a filled snapshot is the same thing and reconstructs identically.
+    void ensureS0(const CoverageKey& key) {
+        if (s0_.find(key) != s0_.end()) return;
+        MaskBuffer::GrayTile snap;
+        const MaskBuffer::GrayTile* live = buf_.findTile(TileCoord{key.first, key.second});
+        if (live != nullptr) {
+            snap = *live;
+        } else {
+            snap.fill(MaskBuffer::kOpaque);
+        }
+        s0_.emplace(key, snap);
+    }
+
+    // Re-derive every tile whose coverage changed this call, from its snapshot with the FULL
+    // accumulated coverage. Same arithmetic as maskPaintStroke, pixel for pixel.
+    Rect flushTiles(const std::set<CoverageKey>& touched) {
+        Rect dirty{};
+        for (const CoverageKey& key : touched) {
+            ensureS0(key);
+            const TileCoord coord{key.first, key.second};
+            const std::vector<float>& cover = cov_.at(key);
+            const MaskBuffer::GrayTile& snap = s0_.at(key);
+            const Selection::GrayTile* selTile = gate_ ? selection_->findTile(coord) : nullptr;
+            // Derive the whole tile into a local, then write it in one call. Going through
+            // setValue would resolve the tile once per pixel, which is precisely the
+            // per-pixel map lookup removed from the rest of the engine.
+            MaskBuffer::GrayTile out = snap;
+            bool changed = false;
+            for (std::size_t idx = 0; idx < static_cast<std::size_t>(kTilePixels); ++idx) {
+                const std::uint8_t b = snap[idx];
+                float c = std::min(cover[idx], opacity_);
+                if (gate_) {
+                    c *= selTile != nullptr ? static_cast<float>((*selTile)[idx]) / 255.0f : 0.0f;
+                }
+                std::uint8_t a = b;
+                if (c > 0.0f) {
+                    const float nv = static_cast<float>(b) + (target_ - static_cast<float>(b)) * c;
+                    a = static_cast<std::uint8_t>(std::lround(std::clamp(nv, 0.0f, 255.0f)));
+                }
+                out[idx] = a;
+                if (a != b) changed = true;
+            }
+            // Only materialize a tile that actually differs from its snapshot. `changed`
+            // guarantees it is not all-kOpaque when the tile was previously absent, so no
+            // redundant fully-revealing tile is created.
+            if (changed) {
+                buf_.setTile(coord, out);
+                dirty = dirty.united(tileBounds(coord));
+            }
+        }
+        return dirty;
+    }
+
+    LayerId layer_;
+    MaskBuffer& buf_;
+    float target_;
+    float opacity_;
+    const Selection* selection_;
+    bool gate_;
+    StrokeStamper stamper_;
+    CoverageMap cov_;
+    std::map<CoverageKey, MaskBuffer::GrayTile> s0_;  // pre-stroke bytes per touched tile
+    Rect reach_{};                                    // conservative footprint, for the budget
+    bool atBudget_ = false;
 };
 
 }  // namespace
@@ -781,9 +1004,6 @@ std::unique_ptr<MaskPaintCommand> maskPaintStroke(Document& doc, LayerId layerId
     const CoverageMap cov = buildCoverage(in, points);
     const Rect bb = coverageBounds(cov);
     if (bb.isEmpty()) return nullptr;
-    // Bound the dense snapshot allocation (the bbox can be large for a long diagonal stroke even
-    // though coverage is sparse). Over the cap, refuse rather than allocate unboundedly.
-    constexpr std::int64_t kMaxMaskBrushPixels = 16'000'000;
     const std::int64_t area = static_cast<std::int64_t>(bb.width) * bb.height;
     if (area > kMaxMaskBrushPixels) return nullptr;
 
@@ -1144,6 +1364,22 @@ std::unique_ptr<LiveStroke> beginPaintStroke(Document& doc, LayerId layerId,
                                              const BrushSettings& settings, Rgbaf color,
                                              const Selection* selection) {
     return beginLive(doc, layerId, settings, color, PaintOp::Paint, "Brush", 0, 0, selection);
+}
+
+std::unique_ptr<LiveStroke> beginMaskPaintStroke(Document& doc, LayerId layerId,
+                                                 const BrushSettings& settings, float targetGray,
+                                                 const Selection* selection) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr) return nullptr;
+    Mask* mask = layer->mask();
+    if (mask == nullptr) return nullptr;  // no mask to paint
+    // targetGray is the user-facing value (0 hides, 1 reveals). The buffer stores raw
+    // coverage that Mask::evaluate() flips when the mask is inverted, so on an inverted
+    // mask we write the complement. Resolved once here, exactly as maskPaintStroke does.
+    float target = clamp01(targetGray);
+    if (mask->inverted()) target = 1.0f - target;
+    target *= 255.0f;
+    return std::make_unique<LiveMaskStroke>(layerId, mask->buffer(), settings, target, selection);
 }
 
 std::unique_ptr<LiveStroke> beginEraseStroke(Document& doc, LayerId layerId,

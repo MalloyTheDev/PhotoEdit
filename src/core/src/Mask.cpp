@@ -41,6 +41,10 @@ const MaskBuffer::GrayTile* MaskBuffer::findTile(TileCoord c) const noexcept {
     return it == tiles_.end() ? nullptr : &it->second;
 }
 
+void MaskBuffer::setTile(TileCoord c, const GrayTile& bytes) {
+    tiles_[keyOf(c)] = bytes;
+}
+
 uint8_t MaskBuffer::value(int x, int y) const noexcept {
     const TileCoord c{floorDiv(x, kTileSize), floorDiv(y, kTileSize)};
     auto it = tiles_.find(keyOf(c));

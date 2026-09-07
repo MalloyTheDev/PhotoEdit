@@ -465,3 +465,38 @@ PE_TEST(painttool_stroke_past_the_engine_budget_still_commits_what_it_painted) {
     doc->history().undo();
     PE_CHECK_EQ(pl->tiles().pixel(100, 100), (Rgba8{255, 0, 0, 255}));  // undo restores it
 }
+
+PE_TEST(painttool_maskpaint_per_sample_dirty_stays_bounded) {
+    // The acceptance criterion for the incremental mask stroke: per-sample work must not
+    // grow with stroke length. The dirty rect is the proxy, as it is for the pixel ops:
+    // a bounded rect means a bounded number of re-derived tiles. The batched path reported
+    // the whole cumulative footprint every sample, because it really did rewrite all of it.
+    auto doc = Document::createBlank(Size{2048, 2048});
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(Rect{0, 0, 2048, 2048}, Rgba8{80, 80, 80, 255});
+    pl->setMask(std::make_unique<Mask>(Mask::Kind::Layer));
+
+    PaintToolController tool;
+    tool.setMode(PaintToolController::Mode::MaskPaint);
+    tool.setBrush(hardBrush(16.0f));
+    tool.setColor(Rgbaf{0.0f, 0.0f, 0.0f, 1.0f});  // paint the mask toward black
+
+    PE_CHECK(tool.begin(*doc, StrokePoint{Vec2{10.0f, 10.0f}, 1.0f}, nullptr));
+    int widestSample = tool.lastExtendBounds().width;
+    for (int i = 1; i <= 80; ++i) {
+        const float d = 10.0f + static_cast<float>(i) * 24.0f;
+        tool.extend(*doc, StrokePoint{Vec2{d, d}, 1.0f});
+        widestSample = std::max(widestSample, tool.lastExtendBounds().width);
+    }
+
+    const Rect cumulative = tool.strokeDirtyBounds();
+    PE_CHECK(cumulative.width >= 1024);  // the stroke really did cross the canvas
+    // A single sample can only touch the tiles its newest dabs reach, which for a brush
+    // narrower than a tile is at most two across. That ceiling is a constant: it does not
+    // move as the stroke lengthens, which is the whole property.
+    PE_CHECK(widestSample <= 2 * kTileSize);
+    PE_CHECK(widestSample < cumulative.width);
+
+    PE_CHECK(tool.end(*doc));
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+}

@@ -96,8 +96,10 @@ std::unique_ptr<LiveStroke> PaintToolController::createLive(Document& doc) {
             if (!cloneOffset(offX, offY)) return nullptr;  // no source -> nothing to clone
             return beginCloneStroke(doc, layer_, brush_, offX, offY, selection_);
         }
+        case Mode::MaskPaint:
+            return beginMaskPaintStroke(doc, layer_, brush_, maskGrayFromColor(color_), selection_);
         default:
-            return nullptr;  // Blur/Sharpen/Heal (region bake) and MaskPaint use the batched path
+            return nullptr;  // Blur/Sharpen/Heal (region bake) still use the batched path
     }
 }
 

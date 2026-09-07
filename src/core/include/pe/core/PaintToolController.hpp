@@ -83,7 +83,9 @@ public:
     // mode (heal 2M px, blur/sharpen and mask paint 16M) and stopped accepting samples.
     // What was painted up to that point still commits. A view can surface this so a
     // stroke that stops following the cursor is explained rather than looking broken.
-    [[nodiscard]] bool strokeAtBudget() const noexcept { return batchedFrozen_; }
+    [[nodiscard]] bool strokeAtBudget() const noexcept {
+        return batchedFrozen_ || (live_ != nullptr && live_->atBudget());
+    }
 
     // --- interactive stroke lifecycle (document-space, sub-pixel) ---
     // Begin a stroke on the document's active layer, gated by `selection` if it is

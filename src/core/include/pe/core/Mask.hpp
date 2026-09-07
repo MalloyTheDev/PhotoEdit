@@ -34,6 +34,15 @@ public:
     // between one map lookup and 65,536 of them. value() stays the right call for
     // scattered access.
     [[nodiscard]] const GrayTile* findTile(TileCoord c) const noexcept;
+
+    // Replace a whole tile's bytes in one call, creating it if absent. For a writer that
+    // derives an entire tile at once: setValue() resolves the tile per pixel, so writing a
+    // tile through it costs 65,536 map lookups for one tile's worth of data.
+    //
+    // Unlike setValue this always materializes the tile, so only call it with content that
+    // is not entirely kOpaque, or the buffer keeps a redundant fully-revealing tile that
+    // empty()/contentBounds()/serialization would then have to carry.
+    void setTile(TileCoord c, const GrayTile& bytes);
     void setValue(int x, int y, uint8_t v);
     void fillRect(Rect r, uint8_t v);
 
