@@ -2,6 +2,7 @@
 
 #include <QDialog>
 #include <QString>
+#include <QTimer>
 
 #include <functional>
 #include <memory>
@@ -52,6 +53,10 @@ protected:
 
 private:
     void loadGroup(int g);  // reflect values_[g] into the sliders (guarded so it doesn't preview)
+    // Ask for a preview refresh. Throttled the same way EffectDialog is, and for the same
+    // reason: a slider drag would otherwise issue one whole-layer pass and one full
+    // tile-cache invalidation per step, synchronously, on the GUI thread.
+    void schedulePreview();
     void rebuildPreview();  // revert the prior preview, apply a fresh one from values_ + the flag
     void revertPreview();
     void commit();
@@ -72,6 +77,15 @@ private:
     pe::Document* doc_ = nullptr;  // not owned
     std::function<void()> onPreview_;
     std::unique_ptr<pe::Command> preview_;
+
+    QTimer* previewTimer_ = nullptr;  // cooldown between renders; see schedulePreview()
+    bool previewPending_ = false;     // a request arrived during the cooldown
+    int previewRebuilds_ = 0;
+
+public:
+    // Renders actually performed; a test checks this stays far below the number of value
+    // changes, because a broken throttle otherwise looks exactly like a working one.
+    [[nodiscard]] int previewRebuildCount() const noexcept { return previewRebuilds_; }
 };
 
 }  // namespace pe::app

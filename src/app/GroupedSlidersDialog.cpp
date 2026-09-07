@@ -18,6 +18,9 @@
 
 namespace pe::app {
 
+// Same cooldown as EffectDialog: see the comment on its schedulePreview().
+constexpr int kPreviewThrottleMs = 30;
+
 namespace {
 [[nodiscard]] int sliderScale(int decimals) {
     int s = 1;
@@ -78,7 +81,7 @@ GroupedSlidersDialog::GroupedSlidersDialog(QWidget* parent, const QString& title
             }
             if (loading_) return;  // programmatic group load, not a user edit
             values_[static_cast<std::size_t>(curGroup_)][i] = v;
-            rebuildPreview();
+            schedulePreview();
         });
 
         auto* row = new QHBoxLayout();
@@ -93,13 +96,22 @@ GroupedSlidersDialog::GroupedSlidersDialog(QWidget* parent, const QString& title
     if (!checkLabel.isEmpty()) {
         flagChk_ = new QCheckBox(checkLabel, this);
         flagChk_->setChecked(checkInitial);
-        connect(flagChk_, &QCheckBox::toggled, this, [this](bool) { rebuildPreview(); });
+        connect(flagChk_, &QCheckBox::toggled, this, [this](bool) { schedulePreview(); });
         root->addWidget(flagChk_);
     }
 
     // Switching the group only changes which slice the sliders show; the model is unchanged, so no
     // preview rebuild is needed — just reload the sliders.
     connect(groupCombo_, &QComboBox::currentIndexChanged, this, [this](int g) { loadGroup(g); });
+
+    previewTimer_ = new QTimer(this);
+    previewTimer_->setSingleShot(true);
+    connect(previewTimer_, &QTimer::timeout, this, [this] {
+        if (!previewPending_) return;  // the drag stopped; nothing was collapsed
+        previewPending_ = false;
+        rebuildPreview();
+        previewTimer_->start(kPreviewThrottleMs);
+    });
 
     previewChk_ = new QCheckBox(QStringLiteral("Preview"), this);
     previewChk_->setChecked(true);
@@ -135,6 +147,16 @@ void GroupedSlidersDialog::loadGroup(int g) {
     loading_ = false;
 }
 
+void GroupedSlidersDialog::schedulePreview() {
+    if (doc_ == nullptr || !previewChk_->isChecked()) return;
+    if (previewTimer_->isActive()) {
+        previewPending_ = true;  // collapse into the trailing render
+        return;
+    }
+    rebuildPreview();
+    previewTimer_->start(kPreviewThrottleMs);
+}
+
 void GroupedSlidersDialog::rebuildPreview() {
     if (doc_ == nullptr || !previewChk_->isChecked()) return;
     if (preview_) {
@@ -143,6 +165,7 @@ void GroupedSlidersDialog::rebuildPreview() {
     }
     preview_ = factory_(values_, flagChk_ != nullptr && flagChk_->isChecked());
     if (preview_) preview_->execute(*doc_);
+    ++previewRebuilds_;
     if (onPreview_) onPreview_();
 }
 

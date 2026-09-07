@@ -20,6 +20,10 @@
 
 namespace pe::app {
 
+// Cooldown between preview renders. Long enough that a fast drag collapses many value
+// changes into one render, short enough that the preview still tracks the control.
+constexpr int kPreviewThrottleMs = 30;
+
 namespace {
 // Map a parameter's real value to the integer slider domain (and back), at the parameter's
 // decimal resolution. A 2-decimal param uses steps of 0.01; an integer param steps of 1.
@@ -95,14 +99,14 @@ EffectDialog::EffectDialog(QWidget* parent, const QString& title, std::vector<Pa
             syncing_ = true;
             spin->setValue(static_cast<double>(v) / scale);
             syncing_ = false;
-            rebuildPreview();
+            schedulePreview();
         });
         connect(spin, &QDoubleSpinBox::valueChanged, this, [this, slider, scale](double v) {
             if (syncing_) return;
             syncing_ = true;
             slider->setValue(static_cast<int>(std::lround(v * scale)));
             syncing_ = false;
-            rebuildPreview();
+            schedulePreview();
         });
 
         auto* row = new QHBoxLayout();
@@ -112,6 +116,17 @@ EffectDialog::EffectDialog(QWidget* parent, const QString& title, std::vector<Pa
         controls_.push_back(Control{.kind = Param::Slider, .spin = spin});
     }
     root->addLayout(form);
+
+    // Single-shot: it is restarted explicitly after each render, so it measures the
+    // cooldown rather than a delay before the first one.
+    previewTimer_ = new QTimer(this);
+    previewTimer_->setSingleShot(true);
+    connect(previewTimer_, &QTimer::timeout, this, [this] {
+        if (!previewPending_) return;  // the drag stopped; nothing was collapsed
+        previewPending_ = false;
+        rebuildPreview();
+        previewTimer_->start(kPreviewThrottleMs);  // keep the cooldown running while active
+    });
 
     previewChk_ = new QCheckBox(QStringLiteral("Preview"), this);
     previewChk_->setChecked(true);
@@ -156,6 +171,16 @@ std::vector<double> EffectDialog::values() const {
     return v;
 }
 
+void EffectDialog::schedulePreview() {
+    if (doc_ == nullptr || !previewChk_->isChecked()) return;
+    if (previewTimer_->isActive()) {
+        previewPending_ = true;  // collapse into the trailing render
+        return;
+    }
+    rebuildPreview();
+    previewTimer_->start(kPreviewThrottleMs);
+}
+
 void EffectDialog::rebuildPreview() {
     if (doc_ == nullptr || !previewChk_->isChecked()) return;
     // Revert the prior preview so the new command captures the original (pre-effect) tiles,
@@ -167,6 +192,7 @@ void EffectDialog::rebuildPreview() {
     }
     preview_ = factory_(values());
     if (preview_) preview_->execute(*doc_);
+    ++previewRebuilds_;
     if (onPreview_) onPreview_();
 }
 

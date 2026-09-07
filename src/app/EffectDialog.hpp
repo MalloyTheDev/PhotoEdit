@@ -2,6 +2,7 @@
 
 #include <QDialog>
 #include <QString>
+#include <QTimer>
 
 #include <functional>
 #include <memory>
@@ -65,6 +66,13 @@ protected:
 
 private:
     [[nodiscard]] std::vector<double> values() const;
+    // Ask for a preview refresh. Throttled: the first request renders immediately, further
+    // ones during the cooldown collapse into a single trailing render when it expires.
+    // A slider's step count comes from its decimal count, so Exposure Offset spans 1000
+    // steps and Levels Gamma 989; dragging one end to end used to issue that many whole-
+    // layer passes plus that many full tile-cache invalidations, on the GUI thread, which
+    // is what made the drag itself unresponsive.
+    void schedulePreview();
     void rebuildPreview();  // revert the prior preview, apply a fresh one from current values
     void revertPreview();   // drop the preview, restoring the document
     void commit();          // OK: revert preview, then push it to history as one undo step
@@ -86,6 +94,16 @@ private:
     std::vector<Control> controls_;
     QCheckBox* previewChk_ = nullptr;
     bool syncing_ = false;  // guard: programmatic slider<->spin sync must not re-enter
+
+    QTimer* previewTimer_ = nullptr;  // cooldown between renders; see schedulePreview()
+    bool previewPending_ = false;     // a request arrived during the cooldown
+    int previewRebuilds_ = 0;         // renders actually performed (for tests)
+
+public:
+    // How many previews were actually rendered. A test drives the controls and checks this
+    // stays well below the number of value changes; without it a broken throttle looks
+    // exactly like a working one.
+    [[nodiscard]] int previewRebuildCount() const noexcept { return previewRebuilds_; }
 };
 
 }  // namespace pe::app

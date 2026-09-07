@@ -5,6 +5,11 @@
 // stable across Qt versions and display scaling. The Window and Help menus shipped
 // as empty popups for a long time precisely because nothing checked.
 
+#include <QCoreApplication>
+#include <QEventLoop>
+#include <QSlider>
+#include <QThread>
+#include "EffectDialog.hpp"
 #include "MainWindow.hpp"
 #include "pe_test.hpp"
 
@@ -513,4 +518,48 @@ PE_TEST(mainwindow_save_failure_names_the_flatten_limit) {
     const QString unknown = pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/big.xyz"));
     PE_CHECK(!unknown.contains(QStringLiteral("megapixel")));
     PE_CHECK(unknown != native);
+}
+
+PE_TEST(effectdialog_throttles_the_preview_during_a_drag) {
+    // A slider's step count comes from its decimal count: Exposure Offset spans 1000 steps
+    // and Levels Gamma 989. Every tick used to run a whole-layer pass and discard the
+    // entire tile cache, synchronously, so dragging one end to end issued about a thousand
+    // of each on the GUI thread and the drag itself stopped responding.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_CHECK(doc != nullptr);
+
+    int factoryCalls = 0;
+    std::vector<pe::app::EffectDialog::Param> params{
+        {QStringLiteral("Amount"), -100.0, 100.0, 0.0, 2}};
+    pe::app::EffectDialog dlg(
+        nullptr, QStringLiteral("Test"), params,
+        [&factoryCalls](const std::vector<double>&) -> std::unique_ptr<pe::Command> {
+            ++factoryCalls;
+            return nullptr;  // no command: this test is about how OFTEN, not about what
+        },
+        doc.get(), [] {});
+
+    // The dialog renders once on construction to show the effect at its initial values.
+    const int atStart = dlg.previewRebuildCount();
+
+    // Simulate a fast drag: many value changes with no event-loop turn between them, which
+    // is exactly what a slider drag on a busy GUI thread produces.
+    auto* slider = dlg.findChild<QSlider*>();
+    PE_CHECK(slider != nullptr);
+    const int ticks = 200;
+    for (int i = 0; i < ticks; ++i) slider->setValue(slider->minimum() + i);
+
+    const int rendered = dlg.previewRebuildCount() - atStart;
+    PE_CHECK(rendered >= 1);  // the first change still shows immediately
+    PE_CHECK(rendered <= 4);  // and the rest collapse rather than rendering per tick
+    PE_CHECK(rendered < ticks / 10);
+    PE_CHECK_EQ(factoryCalls, dlg.previewRebuildCount());  // one factory call per render
+
+    // The collapsed changes are not lost: they land on the trailing render once the
+    // cooldown expires.
+    const int beforeTrailing = dlg.previewRebuildCount();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 200);
+    QThread::msleep(60);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 200);
+    PE_CHECK(dlg.previewRebuildCount() > beforeTrailing);
 }
