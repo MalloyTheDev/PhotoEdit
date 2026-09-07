@@ -3,6 +3,7 @@
 #include "pe/core/Command.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -10,6 +11,18 @@
 namespace pe {
 
 class Document;
+
+// Default cap on what the undo and redo stacks may retain, together.
+//
+// The step count alone never bound anything useful. A 300 px brush over a 4000 px drag
+// touches on the order of 57 tiles, about 15 MB a stroke, so the hundred-step default
+// allowed roughly 1.5 GB; and kMaxStrokeTiles permits about 1 GB in a SINGLE step, so a
+// hundred of those is far past any machine. The failure mode was memory exhaustion from
+// ordinary painting.
+//
+// 1 GiB is chosen to be generous enough that a normal session never trims, while keeping
+// history well clear of the loader's own 3.7 GiB content budget, since the two add up.
+inline constexpr std::int64_t kDefaultHistoryBytes = 1LL << 30;
 
 // The undo/redo stack. push() executes a command, notifies observers, marks the
 // document dirty, and discards the redo stack. undo()/redo() walk the stacks.
@@ -50,6 +63,20 @@ public:
     void setLimit(std::size_t n) noexcept { limit_ = n; }
     [[nodiscard]] std::size_t limit() const noexcept { return limit_; }
 
+    // Bound the BYTES retained by the undo and redo stacks together, which is the limit
+    // that actually binds: a step count cannot bound memory when one step can be a
+    // gigabyte. kDefaultHistoryBytes by default; 0 means unlimited, which is a deliberate
+    // choice and never something to drive from untrusted input.
+    //
+    // Trimming drops the oldest undo steps first, then the furthest-away redo steps. One
+    // step is always kept even if it alone exceeds the budget: a stroke the user just made
+    // and cannot undo would be worse than briefly exceeding a soft limit.
+    void setByteBudget(std::int64_t bytes) noexcept;
+    [[nodiscard]] std::int64_t byteBudget() const noexcept { return byteBudget_; }
+
+    // What the two stacks currently retain, by the same approximation the budget uses.
+    [[nodiscard]] std::int64_t retainedBytes() const noexcept { return bytes_; }
+
     // Saved-state tracking: call after a successful save.
     void markSaved() noexcept;
     [[nodiscard]] bool isAtSavedState() const noexcept;
@@ -58,10 +85,17 @@ private:
     void trimToLimit();
     void updateDirty();
 
+    // Sum of retainedBytes() over both stacks, maintained incrementally.
+    void addBytes(const Command& c) noexcept;
+    void dropFrontOfDone() noexcept;
+    void dropFurthestRedo() noexcept;
+
     Document* doc_;
     std::vector<std::unique_ptr<Command>> done_;
     std::vector<std::unique_ptr<Command>> undone_;
     std::size_t limit_ = 100;
+    std::int64_t byteBudget_ = kDefaultHistoryBytes;
+    std::int64_t bytes_ = 0;
     // done_.size() at the last save, or -1 if the saved state was trimmed away
     // (and thus can never be returned to → always dirty).
     std::ptrdiff_t savedDepth_ = 0;

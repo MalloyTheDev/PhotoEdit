@@ -1,7 +1,11 @@
+#include <cstdint>
+#include "pe/core/Brush.hpp"
 #include "pe/core/Commands.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/GroupLayer.hpp"
+#include "pe/core/History.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/Selection.hpp"
 #include "pe/core/SolidColorLayer.hpp"
 #include "pe_test.hpp"
 
@@ -378,4 +382,182 @@ PE_TEST(history_notifies_observers_after_a_throwing_execute) {
     PE_CHECK(obs.count > 0);
     PE_CHECK(obs.saw(DocumentChange::Kind::LayerStructure));
     doc->removeObserver(&obs);
+}
+
+namespace {
+
+// A command that claims a fixed size, so a budget test can be about the TRIMMING rather
+// than about how many tiles a stroke happens to touch.
+class Weighty final : public Command {
+public:
+    Weighty(int* liveCount, std::int64_t bytes) : live_(liveCount), bytes_(bytes) { ++*live_; }
+    ~Weighty() override { --*live_; }
+    [[nodiscard]] std::string name() const override { return "Weighty"; }
+    DocumentChange execute(Document&) override { return DocumentChange{}; }
+    DocumentChange undo(Document&) override { return DocumentChange{}; }
+    [[nodiscard]] std::int64_t retainedBytes() const noexcept override { return bytes_; }
+
+private:
+    int* live_;
+    std::int64_t bytes_;
+};
+
+}  // namespace
+
+PE_TEST(history_trims_on_bytes_not_only_on_step_count) {
+    // The step count never bound anything useful: one stroke can retain tens of megabytes
+    // and a single one can reach about a gigabyte, so a hundred-step limit does not engage
+    // until far past what the machine has.
+    auto doc = Document::createBlank(Size{16, 16});
+    History& h = doc->history();
+    h.setLimit(1000);            // effectively out of the way
+    h.setByteBudget(10 * 1024);  // 10 KiB
+
+    int live = 0;
+    for (int i = 0; i < 8; ++i) {
+        h.push(std::make_unique<Weighty>(&live, 4 * 1024));  // 4 KiB each
+    }
+    // Three at 4 KiB would be 12 KiB, over budget, so only two are kept.
+    PE_CHECK_EQ(h.undoDepth(), static_cast<std::size_t>(2));
+    PE_CHECK(h.retainedBytes() <= 10 * 1024);
+    // And the trimmed commands are really gone, not merely unreachable.
+    PE_CHECK_EQ(live, 2);
+}
+
+PE_TEST(history_keeps_one_step_even_if_it_alone_exceeds_the_budget) {
+    // A stroke the user just made and cannot undo is worse than briefly exceeding a soft
+    // limit, and one command can legitimately be larger than the whole budget.
+    auto doc = Document::createBlank(Size{16, 16});
+    History& h = doc->history();
+    h.setByteBudget(1024);
+
+    int live = 0;
+    h.push(std::make_unique<Weighty>(&live, 64 * 1024));  // 64x the budget
+    PE_CHECK_EQ(h.undoDepth(), static_cast<std::size_t>(1));
+    PE_CHECK(h.canUndo());
+    PE_CHECK(h.retainedBytes() > h.byteBudget());  // deliberately over, and reported as such
+}
+
+PE_TEST(history_byte_budget_accounts_for_the_redo_branch) {
+    // Undone commands are still resident, so they have to count. Otherwise undoing a long
+    // painting session would look like it freed memory while holding all of it.
+    auto doc = Document::createBlank(Size{16, 16});
+    History& h = doc->history();
+    h.setLimit(1000);
+    h.setByteBudget(0);  // unlimited while we set the situation up
+
+    int live = 0;
+    for (int i = 0; i < 4; ++i) h.push(std::make_unique<Weighty>(&live, 4 * 1024));
+    const std::int64_t all = h.retainedBytes();
+    PE_CHECK_EQ(all, 16 * 1024);
+
+    h.undo();
+    h.undo();
+    PE_CHECK_EQ(h.undoDepth(), static_cast<std::size_t>(2));
+    PE_CHECK_EQ(h.redoDepth(), static_cast<std::size_t>(2));
+    PE_CHECK_EQ(h.retainedBytes(), all);  // moving between stacks frees nothing
+
+    // Applying a budget now trims the undo stack first and then the redo branch.
+    h.setByteBudget(4 * 1024);
+    PE_CHECK(h.retainedBytes() <= 4 * 1024);
+    PE_CHECK_EQ(h.undoDepth(), static_cast<std::size_t>(1));
+    PE_CHECK_EQ(h.redoDepth(), static_cast<std::size_t>(0));
+}
+
+PE_TEST(history_push_stops_counting_the_discarded_redo_branch) {
+    // A new edit throws the redo branch away; if its bytes were not subtracted the total
+    // would drift upward forever and trim a healthy history for no reason.
+    auto doc = Document::createBlank(Size{16, 16});
+    History& h = doc->history();
+    h.setByteBudget(0);
+    int live = 0;
+    for (int i = 0; i < 3; ++i) h.push(std::make_unique<Weighty>(&live, 4 * 1024));
+    h.undo();
+    h.undo();
+    PE_CHECK_EQ(h.redoDepth(), static_cast<std::size_t>(2));
+
+    h.push(std::make_unique<Weighty>(&live, 4 * 1024));  // discards the redo branch
+    PE_CHECK_EQ(h.redoDepth(), static_cast<std::size_t>(0));
+    PE_CHECK_EQ(h.undoDepth(), static_cast<std::size_t>(2));
+    PE_CHECK_EQ(h.retainedBytes(), 8 * 1024);  // exactly the two that remain
+    PE_CHECK_EQ(live, 2);
+}
+
+PE_TEST(history_byte_budget_of_zero_is_unlimited) {
+    auto doc = Document::createBlank(Size{16, 16});
+    History& h = doc->history();
+    h.setLimit(0);
+    h.setByteBudget(0);
+    int live = 0;
+    for (int i = 0; i < 50; ++i) h.push(std::make_unique<Weighty>(&live, 1024 * 1024));
+    PE_CHECK_EQ(h.undoDepth(), static_cast<std::size_t>(50));
+    PE_CHECK_EQ(h.retainedBytes(), 50LL * 1024 * 1024);
+}
+
+PE_TEST(history_default_budget_is_documented_and_applied) {
+    auto doc = Document::createBlank(Size{16, 16});
+    PE_CHECK_EQ(doc->history().byteBudget(), kDefaultHistoryBytes);
+    PE_CHECK(kDefaultHistoryBytes > 0);
+}
+
+PE_TEST(paint_and_selection_commands_report_what_they_retain) {
+    // Command::retainedBytes defaults to zero, which is right for a command holding a
+    // handful of scalars and wrong for one holding pixels. The ones that hold real memory
+    // have to say so, or the budget silently bounds nothing.
+    auto doc = Document::createBlank(Size{512, 512});
+    const LayerId id = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(id));
+    pl->tiles().fillRect(Rect{0, 0, 512, 512}, Rgba8{10, 20, 30, 255});
+
+    BrushSettings b;
+    b.diameter = 40.0f;
+    b.hardness = 1.0f;
+    b.opacity = 1.0f;
+    b.flow = 1.0f;
+    b.spacing = 0.25f;
+    const std::vector<StrokePoint> pts{StrokePoint{Vec2{40.0f, 40.0f}, 1.0f},
+                                       StrokePoint{Vec2{400.0f, 400.0f}, 1.0f}};
+    auto paint = paintStroke(*doc, id, b, Rgbaf{1, 0, 0, 1}, pts, nullptr);
+    PE_CHECK(paint != nullptr);
+    // A stroke crossing several tiles retains at least one tile's worth per tile touched.
+    const std::int64_t perTile =
+        static_cast<std::int64_t>(kTilePixels) * static_cast<std::int64_t>(sizeof(Rgba8));
+    PE_CHECK(paint->retainedBytes() >= perTile);
+    PE_CHECK(paint->retainedBytes() % perTile == 0);
+
+    Selection sel;
+    sel.selectRect(Rect{0, 0, 512, 512});
+    auto setSel = std::make_unique<SetSelectionCommand>(std::move(sel));
+    setSel->execute(*doc);  // captures the previous selection too
+    PE_CHECK(setSel->retainedBytes() >= static_cast<std::int64_t>(kTilePixels));
+}
+
+PE_TEST(history_byte_budget_trims_real_paint_commands) {
+    // The end-to-end case the issue is actually about: painting, not synthetic weights.
+    auto doc = Document::createBlank(Size{1024, 1024});
+    const LayerId id = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(id));
+    pl->tiles().fillRect(Rect{0, 0, 1024, 1024}, Rgba8{10, 20, 30, 255});
+    History& h = doc->history();
+    h.setLimit(1000);
+    h.setByteBudget(4 * 1024 * 1024);  // 4 MiB, about 16 tiles at 8-bit
+
+    BrushSettings b;
+    b.diameter = 30.0f;
+    b.hardness = 1.0f;
+    b.opacity = 1.0f;
+    b.flow = 1.0f;
+    b.spacing = 0.25f;
+    for (int i = 0; i < 12; ++i) {
+        const auto y = static_cast<float>(60 + i * 70);
+        const std::vector<StrokePoint> pts{StrokePoint{Vec2{40.0f, y}, 1.0f},
+                                           StrokePoint{Vec2{980.0f, y}, 1.0f}};
+        auto cmd = paintStroke(*doc, id, b, Rgbaf{1, 0, 0, 1}, pts, nullptr);
+        PE_CHECK(cmd != nullptr);
+        h.push(std::move(cmd));
+    }
+    PE_CHECK(h.undoDepth() < static_cast<std::size_t>(12));  // it really trimmed
+    PE_CHECK(h.undoDepth() >= static_cast<std::size_t>(1));
+    PE_CHECK(h.retainedBytes() <= h.byteBudget());
+    PE_CHECK(h.canUndo());  // and the most recent strokes are still undoable
 }

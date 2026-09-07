@@ -1491,6 +1491,20 @@ DocumentChange PaintCommand::apply(Document& doc, bool forward) {
     return DocumentChange{DocumentChange::Kind::Pixels, dirty_, layer_};
 }
 
+std::int64_t PaintCommand::retainedBytes() const noexcept {
+    // Weighted by the element size of whichever store the deltas came from: a float layer
+    // retains four times what an 8-bit one does for the same tile count.
+    const std::int64_t perTile8 =
+        static_cast<std::int64_t>(kTilePixels) * static_cast<std::int64_t>(sizeof(Rgba8));
+    const std::int64_t perTile16 =
+        static_cast<std::int64_t>(kTilePixels) * static_cast<std::int64_t>(sizeof(Rgba16));
+    const std::int64_t perTileF =
+        static_cast<std::int64_t>(kTilePixels) * static_cast<std::int64_t>(sizeof(Rgbaf));
+    return static_cast<std::int64_t>(deltas8_.size()) * perTile8 +
+           static_cast<std::int64_t>(deltas16_.size()) * perTile16 +
+           static_cast<std::int64_t>(deltasF_.size()) * perTileF;
+}
+
 DocumentChange PaintCommand::execute(Document& doc) {
     return apply(doc, /*forward=*/true);
 }

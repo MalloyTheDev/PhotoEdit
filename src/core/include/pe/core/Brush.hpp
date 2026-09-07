@@ -81,6 +81,12 @@ public:
     DocumentChange execute(Document&) override;
     DocumentChange undo(Document&) override;
 
+    // One tile-version per delta, at the store's own element size. Deliberately counts one
+    // and not both of before/after: they are shared copy-on-write with the neighbouring
+    // versions on the stack, so counting both would double most of the stack. See
+    // Command::retainedBytes on why approximate is the right target here.
+    [[nodiscard]] std::int64_t retainedBytes() const noexcept override;
+
     [[nodiscard]] std::size_t touchedTileCount() const noexcept;
 
 private:
@@ -108,6 +114,12 @@ public:
     [[nodiscard]] std::string name() const override { return "Mask Brush"; }
     DocumentChange execute(Document&) override;
     DocumentChange undo(Document&) override;
+
+    // Two dense byte arrays over the stroke's bounding box, owned outright rather than
+    // shared, so this one is exact.
+    [[nodiscard]] std::int64_t retainedBytes() const noexcept override {
+        return static_cast<std::int64_t>(before_.size() + after_.size());
+    }
 
 private:
     DocumentChange apply(Document& doc, const std::vector<std::uint8_t>& values);

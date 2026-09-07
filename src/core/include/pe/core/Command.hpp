@@ -2,6 +2,7 @@
 
 #include "pe/core/DocumentChange.hpp"
 
+#include <cstdint>
 #include <string>
 
 namespace pe {
@@ -43,6 +44,22 @@ public:
     [[nodiscard]] virtual std::string name() const = 0;
     virtual DocumentChange execute(Document&) = 0;
     virtual DocumentChange undo(Document&) = 0;
+
+    // Approximate bytes this command keeps alive while it sits on an undo stack, so
+    // History can bound memory by SIZE and not only by step count. A step count alone is
+    // how a painting session exhausts memory: one 300 px brush stroke over a long drag
+    // retains tens of megabytes, and the default hundred-step limit does not engage until
+    // far past what the machine has.
+    //
+    // Approximate on purpose. Tile deltas share storage copy-on-write with neighbouring
+    // versions, so an exact figure would mean walking the whole stack to find what is
+    // shared. Over-counting is the safe direction: it trims sooner.
+    //
+    // The default of zero is correct for a command whose payload is a handful of scalars
+    // (an opacity, a blend mode, a layer id). Any command that holds pixels, a mask, a
+    // selection, or a detached layer MUST override this, and a test asserts that the ones
+    // known to do so report a non-trivial figure.
+    [[nodiscard]] virtual std::int64_t retainedBytes() const noexcept { return 0; }
 };
 
 }  // namespace pe

@@ -25,6 +25,12 @@ void History::push(std::unique_ptr<Command> cmd) {
         // dropping it left the document permanently un-undoable past this point. See the
         // exception contract on Command::execute.
         done_.push_back(std::move(cmd));
+        addBytes(*done_.back());
+        for (const auto& c : undone_) {  // the redo branch is discarded here too
+            const std::int64_t n = c->retainedBytes();
+            bytes_ -= n > 0 ? n : 0;
+        }
+        if (bytes_ < 0) bytes_ = 0;
         undone_.clear();
         // The document really did change and the extent is unknown, so notify the
         // conservative change: an empty region makes the renderer invalidate everything
@@ -34,6 +40,12 @@ void History::push(std::unique_ptr<Command> cmd) {
         throw;
     }
     done_.push_back(std::move(cmd));
+    addBytes(*done_.back());
+    for (const auto& c : undone_) {  // the redo branch is discarded, so stop counting it
+        const std::int64_t n = c->retainedBytes();
+        bytes_ -= n > 0 ? n : 0;
+    }
+    if (bytes_ < 0) bytes_ = 0;
     undone_.clear();  // a new edit invalidates the redo branch
     trimToLimit();
     doc_->notify(change);
@@ -119,17 +131,51 @@ bool History::isAtSavedState() const noexcept {
     return savedDepth_ == static_cast<std::ptrdiff_t>(done_.size());
 }
 
-void History::trimToLimit() {
-    if (limit_ == 0) return;  // 0 == unlimited
-    while (done_.size() > limit_) {
-        done_.erase(done_.begin());
-        // The saved point shifts down by one; if it falls off the front, the
-        // saved state can never be returned to, so mark it unreachable.
-        if (savedDepth_ >= 0) {
-            --savedDepth_;
-            if (savedDepth_ < 0) savedDepth_ = -1;  // unreachable sentinel
-        }
+void History::addBytes(const Command& c) noexcept {
+    const std::int64_t n = c.retainedBytes();
+    bytes_ += n > 0 ? n : 0;  // a negative figure would corrupt the running total
+}
+
+void History::dropFrontOfDone() noexcept {
+    if (done_.empty()) return;
+    const std::int64_t n = done_.front()->retainedBytes();
+    bytes_ -= n > 0 ? n : 0;
+    if (bytes_ < 0) bytes_ = 0;
+    done_.erase(done_.begin());
+    // The saved point shifts down by one; if it falls off the front, the saved state can
+    // never be returned to, so mark it unreachable.
+    if (savedDepth_ >= 0) {
+        --savedDepth_;
+        if (savedDepth_ < 0) savedDepth_ = -1;  // unreachable sentinel
     }
+}
+
+void History::dropFurthestRedo() noexcept {
+    if (undone_.empty()) return;
+    // undone_.back() is the NEXT command redo() replays, so the front is the furthest
+    // into the discarded future and the least costly to lose.
+    const std::int64_t n = undone_.front()->retainedBytes();
+    bytes_ -= n > 0 ? n : 0;
+    if (bytes_ < 0) bytes_ = 0;
+    undone_.erase(undone_.begin());
+}
+
+void History::setByteBudget(std::int64_t bytes) noexcept {
+    byteBudget_ = bytes > 0 ? bytes : 0;
+    trimToLimit();
+}
+
+void History::trimToLimit() {
+    if (limit_ != 0) {  // 0 == unlimited
+        while (done_.size() > limit_) dropFrontOfDone();
+    }
+    if (byteBudget_ <= 0) return;  // 0 == unlimited
+    // Oldest undo steps go first. Always keep one: a stroke the user just made and cannot
+    // undo would be worse than briefly exceeding a soft limit, and a single command can
+    // legitimately exceed the whole budget (kMaxStrokeTiles permits about 1 GB in one).
+    while (bytes_ > byteBudget_ && done_.size() > 1) dropFrontOfDone();
+    // Then the redo branch, which the user has already stepped away from.
+    while (bytes_ > byteBudget_ && !undone_.empty()) dropFurthestRedo();
 }
 
 void History::updateDirty() {

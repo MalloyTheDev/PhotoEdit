@@ -266,6 +266,14 @@ public:
     DocumentChange execute(Document&) override;
     DocumentChange undo(Document&) override;
 
+    // Two whole selection masks. Selection stores its tiles BY VALUE, so nothing here is
+    // shared with another command and both really are resident: at the tile cap that is
+    // 268 MB per snapshot, which is why a step count alone could never bound this.
+    [[nodiscard]] std::int64_t retainedBytes() const noexcept override {
+        const auto perTile = static_cast<std::int64_t>(kTilePixels);
+        return static_cast<std::int64_t>(newSel_.tileCount() + oldSel_.tileCount()) * perTile;
+    }
+
 private:
     Selection newSel_;  // the selection to apply
     Selection oldSel_;  // captured on first execute, for undo
