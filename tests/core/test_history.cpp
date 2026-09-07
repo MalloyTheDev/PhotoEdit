@@ -6,6 +6,8 @@
 #include "pe_test.hpp"
 
 #include <memory>
+#include <new>
+#include <string>
 #include <vector>
 
 using namespace pe;
@@ -274,4 +276,106 @@ PE_TEST(remove_group_clears_dangling_nested_active_layer) {
     doc->history().undo();
     PE_CHECK(doc->findLayer(childId) != nullptr);  // subtree restored
     PE_CHECK_EQ(doc->activeLayer(), childId);      // active restored
+}
+
+namespace {
+
+// A command that mutates, then optionally throws before returning. Models the real
+// pattern the issue names: GroupLayersCommand allocates a vector after it has begun
+// removing layers, AddLayerMaskCommand allocates a Mask and does a canvas-wide fillRect,
+// and CropCommand allocates a move command per layer. All are bad_alloc paths, and this
+// codebase runs near memory limits by design (a 3.7 GiB default content budget).
+class PartialThenThrow final : public Command {
+public:
+    PartialThenThrow(PixelLayer* layer, bool throwOnExecute, bool throwOnUndo)
+        : layer_(layer), throwOnExecute_(throwOnExecute), throwOnUndo_(throwOnUndo) {}
+
+    [[nodiscard]] std::string name() const override { return "Partial"; }
+
+    DocumentChange execute(Document&) override {
+        layer_->tiles().setPixel(0, 0, kRed);  // the partial mutation
+        mutated_ = true;
+        if (throwOnExecute_) throw std::bad_alloc{};
+        return DocumentChange{DocumentChange::Kind::Pixels, Rect{0, 0, 1, 1}, layer_->id()};
+    }
+
+    DocumentChange undo(Document&) override {
+        if (throwOnUndo_) throw std::bad_alloc{};
+        // Tolerant of a partially-completed execute, which is the contract History relies
+        // on when it keeps a throwing command on the undo stack.
+        if (mutated_) {
+            layer_->tiles().setPixel(0, 0, Rgba8{});
+            mutated_ = false;
+        }
+        return DocumentChange{DocumentChange::Kind::Pixels, Rect{0, 0, 1, 1}, layer_->id()};
+    }
+
+private:
+    PixelLayer* layer_;
+    bool throwOnExecute_;
+    bool throwOnUndo_;
+    bool mutated_ = false;
+};
+
+}  // namespace
+
+PE_TEST(history_keeps_a_command_whose_execute_throws) {
+    // push() executed the command and then moved it onto the stack, with nothing between.
+    // A throw partway through execute destroyed the command with its partial mutation
+    // still applied and on neither stack, so the document was permanently un-undoable
+    // past that point: the one object that knew how to revert the change was gone.
+    auto doc = Document::createBlank(Size{16, 16});
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+
+    bool threw = false;
+    try {
+        doc->history().push(std::make_unique<PartialThenThrow>(pl, true, false));
+    } catch (const std::bad_alloc&) {
+        threw = true;
+    }
+    PE_CHECK(threw);
+    PE_CHECK_EQ(pl->tiles().pixel(0, 0), kRed);  // the partial mutation is applied
+
+    // The command survives on the undo stack, so the mutation is still reversible.
+    PE_CHECK(doc->history().canUndo());
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().pixel(0, 0), (Rgba8{}));  // reverted
+}
+
+PE_TEST(history_keeps_a_command_whose_undo_throws) {
+    // undo() pops before calling undo(), so a throw there dropped the command from both
+    // stacks the same way.
+    auto doc = Document::createBlank(Size{16, 16});
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    doc->history().push(std::make_unique<PartialThenThrow>(pl, false, true));
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+
+    bool threw = false;
+    try {
+        doc->history().undo();
+    } catch (const std::bad_alloc&) {
+        threw = true;
+    }
+    PE_CHECK(threw);
+    // The undo did not complete, so the command belongs where it was, not on the redo
+    // stack: a subsequent undo must retry it rather than skip past it.
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+    PE_CHECK(!doc->history().canRedo());
+}
+
+PE_TEST(history_notifies_observers_after_a_throwing_execute) {
+    // The document really did change, so anything showing it must refresh. The extent is
+    // unknown at that point, so the notification has to be the conservative one.
+    auto doc = Document::createBlank(Size{16, 16});
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    RecordingObserver obs;
+    doc->addObserver(&obs);
+    try {
+        doc->history().push(std::make_unique<PartialThenThrow>(pl, true, false));
+    } catch (const std::bad_alloc&) {
+    }
+    PE_CHECK(obs.count > 0);
+    PE_CHECK(obs.saw(DocumentChange::Kind::LayerStructure));
+    doc->removeObserver(&obs);
 }
