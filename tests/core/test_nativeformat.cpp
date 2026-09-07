@@ -8,7 +8,9 @@
 #include "pe/core/SolidColorLayer.hpp"
 #include "pe_test.hpp"
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -18,6 +20,63 @@ namespace {
 PixelLayer* asPixel(Document& doc, std::size_t topIndex) {
     return dynamic_cast<PixelLayer*>(
         const_cast<Layer*>(doc.topLevelLayers()[topIndex].get()));  // NOLINT: test convenience
+}
+
+// --- helpers for the #173 solid-fill geometry cases ---------------------------------------
+
+// A document whose only serializable content is one solid fill at `bounds`.
+std::unique_ptr<Document> docWithSolid(Rect bounds, Rgba8 color, BitDepth depth = BitDepth::U8) {
+    auto doc = Document::createBlank(Size{64, 48}, ColorMode::RGB, depth, 72);
+    if (doc == nullptr) return nullptr;
+    // Drop the seeded pixel layer so the solid record is the only layer in the file, which
+    // keeps the byte offsets below unambiguous.
+    std::vector<LayerId> seeded;
+    for (const auto& l : doc->topLevelLayers()) seeded.push_back(l->id());
+    for (LayerId id : seeded) (void)doc->cmdRemoveTopLevel(id);
+    doc->cmdInsertTopLevel(0, std::make_unique<SolidColorLayer>(color, bounds, "Fill"));
+    return doc;
+}
+
+const SolidColorLayer* firstSolid(const Document& doc) {
+    for (const auto& l : doc.topLevelLayers()) {
+        if (const auto* s = dynamic_cast<const SolidColorLayer*>(l.get())) return s;
+    }
+    return nullptr;
+}
+
+void putI32(std::vector<std::byte>& blob, std::size_t at, std::int32_t v) {
+    const auto u = static_cast<std::uint32_t>(v);
+    blob[at] = static_cast<std::byte>(u & 0xFFu);
+    blob[at + 1] = static_cast<std::byte>((u >> 8) & 0xFFu);
+    blob[at + 2] = static_cast<std::byte>((u >> 16) & 0xFFu);
+    blob[at + 3] = static_cast<std::byte>((u >> 24) & 0xFFu);
+}
+
+// Where `rect` was written, found by its own bytes rather than by a hand-derived offset:
+// the layer record has grown twice already and a stale offset would silently patch the
+// wrong field. Returns npos unless the pattern occurs exactly once.
+std::size_t findRect(const std::vector<std::byte>& blob, Rect rect) {
+    std::vector<std::byte> want(16);
+    putI32(want, 0, rect.x);
+    putI32(want, 4, rect.y);
+    putI32(want, 8, rect.width);
+    putI32(want, 12, rect.height);
+    std::size_t found = static_cast<std::size_t>(-1);
+    std::size_t hits = 0;
+    if (blob.size() < want.size()) return static_cast<std::size_t>(-1);
+    for (std::size_t i = 0; i + want.size() <= blob.size(); ++i) {
+        if (std::equal(want.begin(), want.end(), blob.begin() + static_cast<std::ptrdiff_t>(i))) {
+            ++hits;
+            found = i;
+        }
+    }
+    return hits == 1 ? found : static_cast<std::size_t>(-1);
+}
+
+// Relabel a v6 blob as v7 (both the digit and the authoritative u32).
+void declareV7(std::vector<std::byte>& blob) {
+    blob[5] = std::byte{'7'};
+    blob[6] = std::byte{7};
 }
 }  // namespace
 
@@ -580,4 +639,154 @@ PE_TEST(native_format_rejects_an_off_canvas_rect_beyond_the_coordinate_range) {
 
     put(41, -300001);  // one past kMaxCanvasDimension: refused
     PE_CHECK(deserializeDocument(blob) == nullptr);
+}
+
+PE_TEST(native_format_round_trips_a_solid_fill_that_extends_past_every_edge) {
+    // #173. The writer emits a solid layer's rect unclamped, and hasOffCanvasContent bumps
+    // the file to v7 for it, but the reader validated the rect against the canvas anyway.
+    // A document with an off-canvas fill therefore SAVED successfully and could not be
+    // opened, losing everything in it, not just that layer.
+    //
+    // Every edge, and a corner, because the old check rejected on four separate conditions
+    // and fixing one of them would leave the rest.
+    const Rect cases[] = {
+        {-20, 10, 30, 20},     // past the left edge
+        {10, -15, 20, 30},     // past the top
+        {50, 10, 40, 20},      // past the right (canvas is 64 wide)
+        {10, 40, 20, 30},      // past the bottom (canvas is 48 tall)
+        {-8, -8, 16, 16},      // the top-left corner, two edges at once
+        {-99, -99, 400, 400},  // strictly larger than the canvas in every direction
+    };
+    for (const Rect bounds : cases) {
+        for (const BitDepth depth : {BitDepth::U8, BitDepth::U16, BitDepth::F32}) {
+            const Rgba8 color{200, 30, 40, 128};
+            auto doc = docWithSolid(bounds, color, depth);
+            PE_CHECK(doc != nullptr);
+            if (doc == nullptr) continue;
+
+            const std::vector<std::byte> blob = serializeDocument(*doc);
+            PE_CHECK(!blob.empty());
+            // It really is the off-canvas format: the version is the evidence that the
+            // writer considered this rect off-canvas rather than quietly clamping it.
+            PE_CHECK_EQ(static_cast<int>(blob[5]), static_cast<int>(std::byte{'7'}));
+
+            const auto back = deserializeDocument(blob);
+            PE_CHECK(back != nullptr);
+            if (back == nullptr) continue;
+            const SolidColorLayer* solid = firstSolid(*back);
+            PE_CHECK(solid != nullptr);
+            if (solid == nullptr) continue;
+            PE_CHECK(solid->bounds() == bounds);  // unclamped, exactly as written
+            PE_CHECK(solid->color() == color);
+            PE_CHECK(solid->name() == "Fill");
+            PE_CHECK_EQ(back->topLevelCount(), static_cast<std::size_t>(1));
+
+            // And it is stable: a second round trip produces the same bytes, so the reader
+            // did not merely accept the rect but store something else.
+            PE_CHECK(serializeDocument(*back) == blob);
+        }
+    }
+}
+
+PE_TEST(native_format_keeps_an_on_canvas_solid_fill_on_the_older_version) {
+    // The other half of #142's bargain, which must not regress: a document with nothing
+    // off-canvas still writes v6, so builds that predate v7 keep reading ordinary files.
+    auto doc = docWithSolid(Rect{10, 10, 20, 20}, Rgba8{1, 2, 3, 255});
+    PE_CHECK(doc != nullptr);
+    if (doc == nullptr) return;
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK_EQ(static_cast<int>(blob[5]), static_cast<int>(std::byte{'6'}));
+    const auto back = deserializeDocument(blob);
+    PE_CHECK(back != nullptr);
+    if (back != nullptr) {
+        const SolidColorLayer* solid = firstSolid(*back);
+        PE_CHECK(solid != nullptr);
+        if (solid != nullptr) PE_CHECK(solid->bounds() == Rect{10, 10, 20, 20});
+    }
+}
+
+PE_TEST(native_format_still_rejects_an_off_canvas_solid_fill_in_a_pre_v7_file) {
+    // Outside the canvas is legal from v7 only. A v6 file could never contain such a rect,
+    // so widening the check for every version would widen what a legacy file may claim.
+    auto doc = docWithSolid(Rect{10, 10, 20, 20}, Rgba8{1, 2, 3, 255});
+    PE_CHECK(doc != nullptr);
+    if (doc == nullptr) return;
+    std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK_EQ(static_cast<int>(blob[5]), static_cast<int>(std::byte{'6'}));
+    const std::size_t at = findRect(blob, Rect{10, 10, 20, 20});
+    PE_CHECK(at != static_cast<std::size_t>(-1));
+    if (at == static_cast<std::size_t>(-1)) return;
+
+    putI32(blob, at, -4);  // a plausible v7 origin, illegal in v6
+    PE_CHECK(deserializeDocument(blob) == nullptr);
+
+    // The same record is accepted once the file declares the version that permits it.
+    declareV7(blob);
+    const auto back = deserializeDocument(blob);
+    PE_CHECK(back != nullptr);
+    if (back != nullptr) {
+        const SolidColorLayer* solid = firstSolid(*back);
+        PE_CHECK(solid != nullptr);
+        if (solid != nullptr) PE_CHECK(solid->bounds() == Rect{-4, 10, 20, 20});
+    }
+}
+
+PE_TEST(native_format_rejects_a_solid_fill_rect_that_is_not_representable) {
+    // Widening the reader to accept off-canvas geometry must not widen it to accept
+    // geometry the engine cannot hold. Rect::right() is x + width in int, so a rect whose
+    // far edge leaves the representable range would overflow on the first use.
+    //
+    // Each case is patched into an otherwise valid v7 file, so the rect is the only thing
+    // under test and the record that follows still has the length the reader expects.
+    const Rect start{10, 10, 20, 20};
+    const Rect bad[] = {
+        {2'000'000'000, 10, 20, 20},   // origin past the coordinate range
+        {10, 2'000'000'000, 20, 20},   // the same on y
+        {-2'000'000'000, 10, 20, 20},  // and negatively
+        {10, 10, 2'000'000'000, 20},   // far edge past the range: x + width overflows
+        {10, 10, 20, 2'000'000'000},   // the same on the other axis
+        {10, 10, -1, 20},              // negative extent
+        {10, 10, 20, -1},
+    };
+    for (const Rect r : bad) {
+        auto doc = docWithSolid(start, Rgba8{1, 2, 3, 255});
+        PE_CHECK(doc != nullptr);
+        if (doc == nullptr) continue;
+        std::vector<std::byte> blob = serializeDocument(*doc);
+        declareV7(blob);  // the version that permits off-canvas, so only the rect is on trial
+        const std::size_t at = findRect(blob, start);
+        PE_CHECK(at != static_cast<std::size_t>(-1));
+        if (at == static_cast<std::size_t>(-1)) continue;
+        PE_CHECK(deserializeDocument(blob) != nullptr);  // the relabel alone changes nothing
+
+        putI32(blob, at, r.x);
+        putI32(blob, at + 4, r.y);
+        putI32(blob, at + 8, r.width);
+        putI32(blob, at + 12, r.height);
+        // Cleanly: a null return through the normal API, not a crash or a hang.
+        PE_CHECK(deserializeDocument(blob) == nullptr);
+    }
+}
+
+PE_TEST(native_format_accepts_a_solid_fill_larger_than_the_dense_pixel_cap) {
+    // A solid fill is procedural: it stores four numbers and renders by intersecting each
+    // tile, so it allocates nothing proportional to its area. Applying the dense
+    // per-layer pixel cap to it would refuse a legal full-canvas fill on any document
+    // bigger than the cap, which the project's target document size exceeds by 14x.
+    auto doc = Document::createBlank(Size{20'000, 20'000});  // 400 MP, over kMaxLayerPixels
+    PE_CHECK(doc != nullptr);
+    if (doc == nullptr) return;
+    std::vector<LayerId> seeded;
+    for (const auto& l : doc->topLevelLayers()) seeded.push_back(l->id());
+    for (LayerId id : seeded) (void)doc->cmdRemoveTopLevel(id);
+    doc->cmdInsertTopLevel(0, std::make_unique<SolidColorLayer>(Rgba8{9, 8, 7, 255},
+                                                                Rect{0, 0, 20'000, 20'000}, "Big"));
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK(blob.size() < 1000);  // procedural: the file is tiny whatever the area
+    const auto back = deserializeDocument(blob);
+    PE_CHECK(back != nullptr);
+    if (back == nullptr) return;
+    const SolidColorLayer* solid = firstSolid(*back);
+    PE_CHECK(solid != nullptr);
+    if (solid != nullptr) PE_CHECK(solid->bounds() == Rect{0, 0, 20'000, 20'000});
 }

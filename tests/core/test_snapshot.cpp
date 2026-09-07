@@ -428,7 +428,7 @@ namespace {
 // The point is coverage of the SERIALIZED surface. Anything the writer reads should be
 // reachable from here, so the round-trip test below fails the day a field is added to
 // Document or Layer, persisted, and left out of snapshot().
-std::unique_ptr<Document> everyFeatureDoc(BitDepth depth, bool offCanvasSolidFill = true) {
+std::unique_ptr<Document> everyFeatureDoc(BitDepth depth) {
     auto doc =
         Document::createBlank(Size{3 * kTileSize, 2 * kTileSize}, ColorMode::RGB, depth, 300);
     if (doc == nullptr) return nullptr;
@@ -492,13 +492,12 @@ std::unique_ptr<Document> everyFeatureDoc(BitDepth depth, bool offCanvasSolidFil
     doc->cmdInsertTopLevel(doc->topLevelCount(),
                            std::make_unique<AdjustmentLayer>(
                                std::make_unique<BrightnessContrast>(0.25f, -0.1f), "Adj"));
-    // A solid fill, off the canvas edge by default because that is a state the writer
-    // deliberately emits (hasOffCanvasContent bumps the format version for it).
+    // A solid fill off the canvas edge, which is a state the writer deliberately emits
+    // (hasOffCanvasContent bumps the format version for it). It is in the round trip
+    // below, not held out of it: #173 is fixed.
     doc->cmdInsertTopLevel(
         doc->topLevelCount(),
-        std::make_unique<SolidColorLayer>(
-            Rgba8{200, 30, 40, 128},
-            offCanvasSolidFill ? Rect{-10, -10, 80, 80} : Rect{10, 10, 80, 80}, "Fill"));
+        std::make_unique<SolidColorLayer>(Rgba8{200, 30, 40, 128}, Rect{-10, -10, 80, 80}, "Fill"));
 
     PixelBuffer raster(24, 12, Rgba8{255, 255, 255, 200});
     doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<TextLayer>(
@@ -543,28 +542,16 @@ PE_TEST(a_snapshot_serializes_byte_identically_to_the_document_it_came_from) {
         PE_CHECK(fromLive.size() > 1000);
 
         // The round trip also has to survive reloading, or "identical bytes" could mean the
-        // writer dropped the same thing twice.
-        //
-        // Reloaded from a document whose solid fill sits ON the canvas. The off-canvas one
-        // above writes a record the reader rejects, which loses the whole file: that is
-        // #173, a defect this test found rather than a property of snapshots. Switch this
-        // back to `fromSnapshot` when #173 is fixed.
-        const auto onCanvas = everyFeatureDoc(depth, false);
-        PE_CHECK(onCanvas != nullptr);
-        if (onCanvas == nullptr) continue;
-        const auto onCanvasSnap = onCanvas->snapshot();
-        PE_CHECK(onCanvasSnap != nullptr);
-        if (onCanvasSnap == nullptr) continue;
-        const std::vector<std::byte> reloadable =
-            exportDocument(*onCanvasSnap, ImageFormat::Native);
-        PE_CHECK(reloadable == exportDocument(*onCanvas, ImageFormat::Native));
-        const auto reloaded = importDocument(reloadable, ImageFormat::Native);
+        // writer dropped the same thing twice. Reloaded from the snapshot's own bytes, so
+        // this covers the complete writer output including the off-canvas solid fill that
+        // #173 used to make unreadable.
+        const auto reloaded = importDocument(fromSnapshot, ImageFormat::Native);
         PE_CHECK(reloaded != nullptr);
         if (reloaded == nullptr) continue;
-        PE_CHECK_EQ(reloaded->topLevelCount(), onCanvas->topLevelCount());
-        PE_CHECK_EQ(reloaded->resolutionPpi(), onCanvas->resolutionPpi());
+        PE_CHECK_EQ(reloaded->topLevelCount(), doc->topLevelCount());
+        PE_CHECK_EQ(reloaded->resolutionPpi(), doc->resolutionPpi());
         const std::vector<std::byte> again = exportDocument(*reloaded, ImageFormat::Native);
-        PE_CHECK(again == reloadable);
+        PE_CHECK(again == fromLive);
     }
 }
 

@@ -653,18 +653,35 @@ bool readPixelBlock(Reader& r, TileStoreT<Pixel>& store, std::int32_t cx, std::i
     return true;
 }
 
-// Read and validate a content rect that must lie within the canvas. Returns false on an
-// out-of-canvas, overflowing, or oversized rect; on success cx/cy/cw/ch are filled. The
-// int64 math keeps cx+cw / cy+ch from overflowing the int loop bounds and confines tile
-// allocation to the canvas.
-bool readContentRect(Reader& r, int canvasW, int canvasH, bool allowOffCanvas, std::int32_t& cx,
-                     std::int32_t& cy, std::int32_t& cw, std::int32_t& ch) {
+// Whether the record this rect describes allocates storage proportional to the rect's
+// AREA. A pixel or mask block does, and is capped at kMaxLayerPixels accordingly. A solid
+// fill does not: it is procedural, stores only the four coordinates, and renders by
+// intersecting each tile against them, so capping its area would refuse a legal
+// full-canvas fill on any document larger than the cap. The distinction is the record's
+// storage, not its geometry, so both kinds get the same coordinate validation below.
+enum class RectStorage : std::uint8_t { Dense, Procedural };
+
+// Read and validate a content rect. Returns false on an out-of-range, overflowing, or (for
+// a dense record) oversized rect; on success cx/cy/cw/ch are filled.
+//
+// From v7 a rect may lie outside the canvas, for pixel content, masks and a solid layer's
+// fill rect alike (see kMinOffCanvasVersion and the writer). Outside the canvas is not the
+// same as invalid: what makes a rect invalid is being unrepresentable. The int64 math keeps
+// cx+cw / cy+ch inside the engine's coordinate range, which is what stops Rect::right() and
+// the tile math overflowing an int, and pre-v7 files keep their original stricter rule.
+//
+// EVERY persisted rect goes through here. #173 was one record kind validating its own way
+// and being missed when the rules changed underneath it.
+bool readContentRect(Reader& r, int canvasW, int canvasH, bool allowOffCanvas, RectStorage storage,
+                     std::int32_t& cx, std::int32_t& cy, std::int32_t& cw, std::int32_t& ch) {
     cx = r.i32();
     cy = r.i32();
     cw = r.i32();
     ch = r.i32();
     if (!r.ok() || cw < 0 || ch < 0) return false;
-    if (static_cast<std::int64_t>(cw) * ch > kMaxLayerPixels) return false;
+    if (storage == RectStorage::Dense && static_cast<std::int64_t>(cw) * ch > kMaxLayerPixels) {
+        return false;
+    }
 
     const std::int64_t x0 = cx;
     const std::int64_t y0 = cy;
@@ -863,7 +880,8 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allow
         std::int32_t mw = 0;
         std::int32_t mh = 0;
         if (!r.ok() || mkind > static_cast<std::uint8_t>(Mask::Kind::Quick) ||
-            !readContentRect(r, canvasW, canvasH, allowOffCanvas, mx, my, mw, mh)) {
+            !readContentRect(r, canvasW, canvasH, allowOffCanvas, RectStorage::Dense, mx, my, mw,
+                             mh)) {
             return nullptr;
         }
         std::vector<std::byte> mraw;
@@ -908,16 +926,22 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allow
         const std::uint8_t cg = r.u8();
         const std::uint8_t cb = r.u8();
         const std::uint8_t ca = r.u8();
-        const std::int32_t bx = r.i32();
-        const std::int32_t by = r.i32();
-        const std::int32_t bw = r.i32();
-        const std::int32_t bh = r.i32();
-        // Validate against the canvas (the writer clamps to it). No pixel cap: a solid fill is
-        // procedural (stores only the rect), so a full-canvas rect is fine even past
-        // kMaxLayerPixels.
-        if (!r.ok() || bw < 0 || bh < 0 || bx < 0 || by < 0 ||
-            static_cast<std::int64_t>(bx) + bw > canvasW ||
-            static_cast<std::int64_t>(by) + bh > canvasH) {
+        // The same rect rules as pixel content and masks. The writer emits this rect
+        // UNCLAMPED (a fill moved partly past the edge keeps its full extent, so moving it
+        // back is non-destructive), and hasOffCanvasContent bumps the file to v7 when it is
+        // off-canvas; this branch used to validate against the canvas regardless, which
+        // meant PhotoEdit wrote files its own reader refused, losing the whole document
+        // with the save still reporting success. That was #173.
+        //
+        // Procedural, not Dense: a solid fill stores only these four numbers, so the
+        // kMaxLayerPixels area cap would refuse a legal full-canvas fill on a large
+        // document while protecting nothing.
+        std::int32_t bx = 0;
+        std::int32_t by = 0;
+        std::int32_t bw = 0;
+        std::int32_t bh = 0;
+        if (!readContentRect(r, canvasW, canvasH, allowOffCanvas, RectStorage::Procedural, bx, by,
+                             bw, bh)) {
             return nullptr;
         }
         layer = std::make_unique<SolidColorLayer>(Rgba8{cr, cg, cb, ca}, Rect{bx, by, bw, bh},
@@ -977,7 +1001,10 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allow
         std::int32_t cy = 0;
         std::int32_t cw = 0;
         std::int32_t ch = 0;
-        if (!readContentRect(r, canvasW, canvasH, allowOffCanvas, cx, cy, cw, ch)) return nullptr;
+        if (!readContentRect(r, canvasW, canvasH, allowOffCanvas, RectStorage::Dense, cx, cy, cw,
+                             ch)) {
+            return nullptr;
+        }
         // Read into the store matching the document depth (the active one); the per-pixel
         // size and the aggregate budget are handled inside readPixelBlock/readBlock.
         bool okPixels = false;

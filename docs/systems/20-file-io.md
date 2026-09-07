@@ -243,6 +243,32 @@ streams). Read reverses it, faulting tiles lazily so opening a huge document doe
 (minor) bump still loads in older builds (unknown chunks skipped); a major bump is
 gated with a clear message and, where possible, a one-way **migration**.
 
+**Persisted geometry, as implemented in `.pedoc`.** Every rectangle the format stores
+(pixel content, mask content, a solid fill's rect) follows one rule, and it is one rule on
+purpose:
+
+- **Outside the canvas is legal, from v7 on.** The engine supports off-canvas content
+  everywhere else, so the writer emits these rects unclamped and a layer moved partly past
+  the edge keeps its full extent, which is what makes moving it back non-destructive. A
+  file is written as v7 only when something in it is actually off-canvas, so an ordinary
+  document stays v6 and older builds keep reading it.
+- **Pre-v7 files keep the stricter rule.** Such a file could never legitimately contain a
+  negative origin, so accepting one would widen what a legacy file may claim.
+- **Outside the canvas is not the same as invalid.** What makes a rect invalid is being
+  unrepresentable: a negative extent, or an origin or far edge outside the engine's
+  coordinate range. `Rect::right()` is `x + width` in `int`, so a rect that leaves that
+  range would overflow on first use. That bound, not the canvas, is the safety limit.
+- **The area cap applies to storage, not to geometry.** A pixel or mask block allocates in
+  proportion to its area and is capped accordingly. A solid fill is procedural: it stores
+  four numbers and renders by intersecting each tile, so capping its area would refuse a
+  legal full-canvas fill on any document larger than the cap while protecting nothing. The
+  reader states which kind each record is at the call site.
+
+All of it lives in one function, `readContentRect`. #173 was the cost of not doing that:
+the solid-fill branch validated its own way, was missed when v7 widened the rules, and
+PhotoEdit wrote files its own reader refused. The save reported success, and opening the
+file lost the whole document rather than that one layer.
+
 **PSD/PSB mapping.** A bidirectional mapping table translates between our model and
 Photoshop's records, accepting deliberate lossiness:
 
