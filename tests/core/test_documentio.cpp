@@ -322,3 +322,78 @@ PE_TEST(export_over_the_composite_cap_fails_instead_of_writing_an_empty_raster) 
     // route out that the app's failure message points the user at.
     PE_CHECK(!exportDocument(*doc, ImageFormat::Native).empty());
 }
+
+PE_TEST(loaddocument_reports_why_it_failed) {
+    // Six distinct failures used to collapse into a single nullptr, so a user denied read
+    // access got the same message as one opening a corrupt file. Only the first is
+    // recoverable by the user, and only if they are told which one it is.
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "pe_loaderr_test";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+
+    LoadError err = LoadError::None;
+
+    // Unknown extension: rejected before the file is even looked for.
+    PE_CHECK(loadDocument((dir / "x.qqq").string(), &err) == nullptr);
+    PE_CHECK(err == LoadError::UnsupportedFormat);
+
+    // A recognized extension that is simply not there.
+    err = LoadError::None;
+    PE_CHECK(loadDocument((dir / "missing.png").string(), &err) == nullptr);
+    PE_CHECK(err == LoadError::NotFound);
+
+    // Present and readable, but the contents are not a PNG.
+    const fs::path junk = dir / "junk.png";
+    {
+        std::ofstream f(junk, std::ios::binary);
+        const char* text = "this is definitely not a png";
+        f.write(text, 28);
+    }
+    err = LoadError::None;
+    PE_CHECK(loadDocument(junk.string(), &err) == nullptr);
+    PE_CHECK(err == LoadError::DecodeFailed);
+
+    // A successful load must leave the code alone rather than reporting a stale failure.
+    const fs::path good = dir / "good.pedoc";
+    auto doc = Document::createBlank(Size{8, 8});
+    PE_CHECK(saveDocument(*doc, good.string()));
+    err = LoadError::DecodeFailed;  // deliberately dirty
+    auto back = loadDocument(good.string(), &err);
+    PE_CHECK(back != nullptr);
+    PE_CHECK(err == LoadError::None);
+
+    fs::remove_all(dir, ec);
+}
+
+PE_TEST(savedocument_reports_why_it_failed) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "pe_saveerr_test";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+
+    auto doc = Document::createBlank(Size{8, 8});
+    SaveError err = SaveError::None;
+
+    PE_CHECK(!saveDocument(*doc, (dir / "x.qqq").string(), &err));
+    PE_CHECK(err == SaveError::UnsupportedFormat);
+
+    // A directory that does not exist cannot receive the temp file.
+    err = SaveError::None;
+    PE_CHECK(!saveDocument(*doc, (dir / "nope" / "a.pedoc").string(), &err));
+    PE_CHECK(err == SaveError::CannotCreate);
+
+    // Over the composite cap every raster format fails, and the cause is the flatten
+    // limit rather than anything about the disk. The native format still succeeds, which
+    // is exactly what the message tells the user to do.
+    auto big = Document::createBlank(Size{9000, 9000});  // 81 MP, over the 64 MP cap
+    PE_CHECK(big != nullptr);
+    err = SaveError::None;
+    PE_CHECK(!saveDocument(*big, (dir / "big.png").string(), &err));
+    PE_CHECK(err == SaveError::TooLargeToFlatten);
+    err = SaveError::UnsupportedFormat;  // deliberately dirty
+    PE_CHECK(saveDocument(*big, (dir / "big.pedoc").string(), &err));
+    PE_CHECK(err == SaveError::None);
+
+    fs::remove_all(dir, ec);
+}

@@ -3,7 +3,8 @@
 #include "Theme.hpp"
 
 #include "pe/core/Document.hpp"  // pe::DocumentObserver (base class)
-#include "pe/core/Layer.hpp"     // pe::LayerId
+#include "pe/core/DocumentIO.hpp"
+#include "pe/core/Layer.hpp"  // pe::LayerId
 
 #include <QMainWindow>
 #include <QString>
@@ -41,7 +42,13 @@ class PropertiesPanel;
 //
 // A free function rather than a member because it is a pure function of the document
 // and the path, which also makes it testable without opening up MainWindow.
-[[nodiscard]] QString saveFailureReason(const pe::Document* doc, const QString& path);
+[[nodiscard]] QString saveFailureReason(const pe::Document* doc, const QString& path,
+                                        pe::SaveError err);
+
+// Why pe::loadDocument() returned nullptr, phrased for a dialog. Six distinct failures
+// used to collapse into one generic line, so a user denied read access saw the same text
+// as one opening a corrupt file.
+[[nodiscard]] QString openFailureReason(const QString& path, pe::LoadError err);
 
 class MainWindow : public QMainWindow, public pe::DocumentObserver {
     Q_OBJECT

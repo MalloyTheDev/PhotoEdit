@@ -504,18 +504,20 @@ PE_TEST(mainwindow_save_failure_names_the_flatten_limit) {
     auto doc = pe::Document::createBlank(pe::Size{9000, 9000});  // 81 MP, over the cap
     PE_CHECK(doc != nullptr);
 
-    const QString png = pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/big.png"));
+    const QString png = pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/big.png"),
+                                                   pe::SaveError::TooLargeToFlatten);
     PE_CHECK(png.contains(QStringLiteral("megapixel")));
     PE_CHECK(png.contains(QStringLiteral("9000")));
     PE_CHECK(png.contains(QStringLiteral(".pedoc")));  // and where to go instead
 
     // The native format has no such limit, so its failure must not blame the size.
-    const QString native =
-        pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/big.pedoc"));
+    const QString native = pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/big.pedoc"),
+                                                      pe::SaveError::WriteFailed);
     PE_CHECK(!native.contains(QStringLiteral("megapixel")));
 
     // An extension this build cannot write is its own distinct case.
-    const QString unknown = pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/big.xyz"));
+    const QString unknown = pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/big.xyz"),
+                                                       pe::SaveError::UnsupportedFormat);
     PE_CHECK(!unknown.contains(QStringLiteral("megapixel")));
     PE_CHECK(unknown != native);
 }

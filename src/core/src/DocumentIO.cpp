@@ -1,5 +1,6 @@
 #include "pe/core/DocumentIO.hpp"
 
+#include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/ImageIO.hpp"
 #include "pe/core/NativeFormat.hpp"
@@ -159,20 +160,37 @@ namespace {
 constexpr std::uintmax_t kMaxFileBytes = 512ull * 1024 * 1024;  // 512 MB
 }  // namespace
 
-std::unique_ptr<Document> loadDocument(const std::string& path) {
+std::unique_ptr<Document> loadDocument(const std::string& path, LoadError* err) {
+    const auto fail = [err](LoadError e) {
+        if (err != nullptr) *err = e;
+        return nullptr;
+    };
+    if (err != nullptr) *err = LoadError::None;
+
     const ImageFormat fmt = formatFromExtension(path);
-    if (fmt == ImageFormat::Unknown) return nullptr;
+    if (fmt == ImageFormat::Unknown) return fail(LoadError::UnsupportedFormat);
+
+    // Separate "not there" from "there but unreadable" before opening: ifstream reports
+    // both the same way, and they call for completely different things from the user.
+    std::error_code ec;
+    const std::filesystem::path fsPath(path);
+    if (!std::filesystem::exists(fsPath, ec) || ec) return fail(LoadError::NotFound);
 
     std::ifstream file(path, std::ios::binary);
-    if (!file) return nullptr;
+    if (!file) return fail(LoadError::PermissionDenied);
     file.seekg(0, std::ios::end);
     const std::streamoff size = file.tellg();
-    if (size < 0 || static_cast<std::uintmax_t>(size) > kMaxFileBytes) return nullptr;
+    if (size < 0) return fail(LoadError::DecodeFailed);  // not a seekable regular file
+    if (static_cast<std::uintmax_t>(size) > kMaxFileBytes) return fail(LoadError::TooLarge);
     file.seekg(0, std::ios::beg);
 
     std::vector<std::byte> bytes(static_cast<std::size_t>(size));
-    if (size > 0 && !file.read(reinterpret_cast<char*>(bytes.data()), size)) return nullptr;
-    return importDocument(bytes, fmt);
+    if (size > 0 && !file.read(reinterpret_cast<char*>(bytes.data()), size)) {
+        return fail(LoadError::Truncated);  // shorter than the size the filesystem reported
+    }
+    auto doc = importDocument(bytes, fmt);
+    if (doc == nullptr) return fail(LoadError::DecodeFailed);
+    return doc;
 }
 
 namespace {
@@ -192,16 +210,32 @@ std::filesystem::path tempSiblingPath(const std::filesystem::path& dst) {
 
 }  // namespace
 
-bool saveDocument(const Document& doc, const std::string& path) {
-    return saveDocument(doc, path, ExportOptions{});
+bool saveDocument(const Document& doc, const std::string& path, SaveError* err) {
+    return saveDocument(doc, path, ExportOptions{}, err);
 }
 
-bool saveDocument(const Document& doc, const std::string& path, const ExportOptions& opts) {
+bool saveDocument(const Document& doc, const std::string& path, const ExportOptions& opts,
+                  SaveError* err) {
+    const auto fail = [err](SaveError e) {
+        if (err != nullptr) *err = e;
+        return false;
+    };
+    if (err != nullptr) *err = SaveError::None;
     const ImageFormat fmt = formatFromExtension(path);
-    if (fmt == ImageFormat::Unknown) return false;
+    if (fmt == ImageFormat::Unknown) return fail(SaveError::UnsupportedFormat);
 
     const std::vector<std::byte> bytes = exportDocument(doc, fmt, opts);
-    if (bytes.empty()) return false;
+    if (bytes.empty()) {
+        // Empty means the encode produced nothing. Two causes, and the user can act on
+        // only one of them: the canvas is over the composite cap that every raster format
+        // flattens through, or that codec is not compiled into this build.
+        const Size canvas = doc.canvasSize();
+        const std::int64_t area = static_cast<std::int64_t>(canvas.width) * canvas.height;
+        if (fmt != ImageFormat::Native && area > kMaxCompositeImagePixels) {
+            return fail(SaveError::TooLargeToFlatten);
+        }
+        return fail(SaveError::CodecUnavailable);
+    }
 
     // Crash-safe write, as docs/systems/20-file-io.md requires: the destination is
     // never opened for writing. Everything goes to a sibling temp file which only
@@ -219,14 +253,14 @@ bool saveDocument(const Document& doc, const std::string& path, const ExportOpti
 
     {
         std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file) return false;  // could not create the temp; original untouched
+        if (!file) return fail(SaveError::CannotCreate);  // original untouched
         file.write(reinterpret_cast<const char*>(bytes.data()),
                    static_cast<std::streamsize>(bytes.size()));
         file.close();  // flushes; some errors only surface here
         if (!file) {
             std::error_code rm;
             std::filesystem::remove(tmp, rm);
-            return false;
+            return fail(SaveError::WriteFailed);  // typically a full disk
         }
     }
 
@@ -238,7 +272,7 @@ bool saveDocument(const Document& doc, const std::string& path, const ExportOpti
     if (ec) {
         std::error_code rm;
         std::filesystem::remove(tmp, rm);
-        return false;
+        return fail(SaveError::ReplaceFailed);
     }
     return true;
 }

@@ -1017,10 +1017,10 @@ void MainWindow::openDocument() {
         QFileDialog::getOpenFileName(this, QStringLiteral("Open Image"), QString(), kOpenFilter);
     if (path.isEmpty()) return;
 
-    auto doc = pe::loadDocument(path.toStdString());
+    pe::LoadError loadErr = pe::LoadError::None;
+    auto doc = pe::loadDocument(path.toStdString(), &loadErr);
     if (doc == nullptr) {
-        QMessageBox::warning(this, QStringLiteral("Open failed"),
-                             QStringLiteral("Could not open \"%1\".").arg(path));
+        QMessageBox::warning(this, QStringLiteral("Open failed"), openFailureReason(path, loadErr));
         return;
     }
     // A freshly loaded document is at a "saved" state for dirty tracking.
@@ -1029,30 +1029,78 @@ void MainWindow::openDocument() {
     statusBar()->showMessage(QStringLiteral("Opened %1").arg(path), 3000);
 }
 
-QString saveFailureReason(const pe::Document* doc, const QString& path) {
-    // The native .pedoc format serializes tiles directly, so it has no flatten limit and
-    // is the way out of the oversize case.
-    const pe::ImageFormat fmt = pe::formatFromExtension(path.toStdString());
-    const pe::Size canvas = doc != nullptr ? doc->canvasSize() : pe::Size{0, 0};
-    const int64_t area = static_cast<int64_t>(canvas.width) * canvas.height;
-    if (fmt != pe::ImageFormat::Native && fmt != pe::ImageFormat::Unknown &&
-        area > pe::kMaxCompositeImagePixels) {
-        return QStringLiteral(
-                   "\"%1\" is %2 x %3 (%4 megapixels). Flattening to a raster format is "
-                   "limited to %5 megapixels.\n\nSave as .pedoc to keep the full document.")
-            .arg(path)
-            .arg(canvas.width)
-            .arg(canvas.height)
-            .arg(area / 1'000'000)
-            .arg(pe::kMaxCompositeImagePixels / 1'000'000);
+QString saveFailureReason(const pe::Document* doc, const QString& path, pe::SaveError err) {
+    switch (err) {
+        case pe::SaveError::TooLargeToFlatten: {
+            // The native .pedoc format serializes tiles directly, so it has no flatten
+            // limit and is the way out of this one.
+            const pe::Size canvas = doc != nullptr ? doc->canvasSize() : pe::Size{0, 0};
+            const int64_t area = static_cast<int64_t>(canvas.width) * canvas.height;
+            return QStringLiteral(
+                       "\"%1\" is %2 x %3 (%4 megapixels). Flattening to a raster format is "
+                       "limited to %5 megapixels.\n\nSave as .pedoc to keep the full document.")
+                .arg(path)
+                .arg(canvas.width)
+                .arg(canvas.height)
+                .arg(area / 1'000'000)
+                .arg(pe::kMaxCompositeImagePixels / 1'000'000);
+        }
+        case pe::SaveError::UnsupportedFormat:
+            return QStringLiteral("\"%1\" has no extension this build can write.").arg(path);
+        case pe::SaveError::CodecUnavailable:
+            return QStringLiteral(
+                "This build cannot write that format. Save as .pedoc, or use a build "
+                "with the codec compiled in.");
+        case pe::SaveError::CannotCreate:
+            return QStringLiteral(
+                       "Could not create a file next to \"%1\". Check that the folder exists, "
+                       "is not read-only, and that you have permission to write to it.")
+                .arg(path);
+        case pe::SaveError::WriteFailed:
+            return QStringLiteral(
+                       "Writing \"%1\" failed partway. The most likely cause is a full disk. "
+                       "Your previous file, if any, is untouched.")
+                .arg(path);
+        case pe::SaveError::ReplaceFailed:
+            return QStringLiteral(
+                       "\"%1\" was written but could not replace the existing file, which is "
+                       "usually another program holding it open. Close it and try again; the "
+                       "existing file is untouched.")
+                .arg(path);
+        case pe::SaveError::None:
+            break;
     }
-    if (fmt == pe::ImageFormat::Unknown) {
-        return QStringLiteral("\"%1\" has no extension this build can write.").arg(path);
+    return QStringLiteral("Could not save \"%1\".").arg(path);
+}
+
+QString openFailureReason(const QString& path, pe::LoadError err) {
+    switch (err) {
+        case pe::LoadError::UnsupportedFormat:
+            return QStringLiteral("\"%1\" is not a format this build can open.").arg(path);
+        case pe::LoadError::NotFound:
+            return QStringLiteral("\"%1\" no longer exists. It may have been moved or deleted.")
+                .arg(path);
+        case pe::LoadError::PermissionDenied:
+            return QStringLiteral(
+                       "\"%1\" exists but could not be opened. Check that you have permission "
+                       "to read it and that no other program has it locked.")
+                .arg(path);
+        case pe::LoadError::TooLarge:
+            return QStringLiteral("\"%1\" is larger than the %2 MB this build will read.")
+                .arg(path)
+                .arg(512);
+        case pe::LoadError::Truncated:
+            return QStringLiteral("\"%1\" ended early. The file is incomplete or damaged.")
+                .arg(path);
+        case pe::LoadError::DecodeFailed:
+            return QStringLiteral(
+                       "\"%1\" could not be decoded. The contents do not match its extension, "
+                       "or the file is damaged.")
+                .arg(path);
+        case pe::LoadError::None:
+            break;
     }
-    return QStringLiteral(
-               "Could not write \"%1\". Check that the folder exists and is "
-               "writable, and that there is enough free space.")
-        .arg(path);
+    return QStringLiteral("Could not open \"%1\".").arg(path);
 }
 
 bool MainWindow::saveDocument() {
@@ -1070,9 +1118,10 @@ bool MainWindow::saveDocumentAs() {
 
 bool MainWindow::writeTo(const QString& path) {
     if (doc_ == nullptr) return false;
-    if (!pe::saveDocument(*doc_, path.toStdString())) {
+    pe::SaveError saveErr = pe::SaveError::None;
+    if (!pe::saveDocument(*doc_, path.toStdString(), &saveErr)) {
         QMessageBox::warning(this, QStringLiteral("Save failed"),
-                             saveFailureReason(doc_.get(), path));
+                             saveFailureReason(doc_.get(), path, saveErr));
         return false;
     }
     // Tell history the on-disk state now matches; this clears the dirty flag

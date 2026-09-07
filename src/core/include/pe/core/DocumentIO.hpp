@@ -51,16 +51,44 @@ struct ExportOptions {
                                                     const ExportOptions& opts);
 
 // --- filesystem convenience (the layer the app's Open/Save call) ---
+
+// Why a load failed. Distinguishing these is the difference between "you cannot read
+// this file" and "this file is not a supported format", which a user needs in order to
+// know whether the situation is recoverable.
+enum class LoadError : std::uint8_t {
+    None,
+    UnsupportedFormat,  // extension not recognized, or its codec is not in this build
+    NotFound,           // no such file or directory
+    PermissionDenied,   // exists, but cannot be opened for reading
+    TooLarge,           // above the read cap, so it is never loaded into memory
+    Truncated,          // shorter than its own header/records claim
+    DecodeFailed,       // well-formed enough to read, but the decoder rejected it
+};
+
+// Why a save failed. The save path is the one where a bad diagnosis costs work: a user
+// losing a document to a full disk must not be told the same thing as one who picked an
+// extension this build cannot write.
+enum class SaveError : std::uint8_t {
+    None,
+    UnsupportedFormat,  // extension not recognized
+    CodecUnavailable,   // recognized, but that codec is not compiled into this build
+    TooLargeToFlatten,  // over the composite cap; every raster format goes through it
+    CannotCreate,       // the temp file could not be created (permissions, read-only, path)
+    WriteFailed,        // ran out of space, or the device reported an error mid-write
+    ReplaceFailed,      // written, but could not replace the destination
+};
+
 // Load a document from a file on disk; the format is inferred from the extension.
-// Returns nullptr on a missing/unreadable file, an unknown extension, a file larger
-// than the read cap, or malformed/oversized content.
-[[nodiscard]] std::unique_ptr<Document> loadDocument(const std::string& path);
+// Returns nullptr on failure; pass `err` to learn which failure.
+[[nodiscard]] std::unique_ptr<Document> loadDocument(const std::string& path,
+                                                     LoadError* err = nullptr);
 
 // Save a document to a file on disk; the format is inferred from the extension.
-// Returns false on an unknown extension, an encode failure, or a write error. The first
-// overload uses default encode options; the second honors `opts` (e.g. JPEG quality).
-[[nodiscard]] bool saveDocument(const Document& doc, const std::string& path);
+// Returns false on failure; pass `err` to learn which failure. The first overload uses
+// default encode options; the second honors `opts` (e.g. JPEG quality).
 [[nodiscard]] bool saveDocument(const Document& doc, const std::string& path,
-                                const ExportOptions& opts);
+                                SaveError* err = nullptr);
+[[nodiscard]] bool saveDocument(const Document& doc, const std::string& path,
+                                const ExportOptions& opts, SaveError* err = nullptr);
 
 }  // namespace pe
