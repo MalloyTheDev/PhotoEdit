@@ -165,10 +165,30 @@ std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
     TIFFGetFieldDefaulted(tif, TIFFTAG_BITSPERSAMPLE, &bps);
     TIFFGetField(tif, TIFFTAG_PHOTOMETRIC, &photometric);
     TIFFGetFieldDefaulted(tif, TIFFTAG_PLANARCONFIG, &planar);
+    // The stored origin. The fast path reads scanlines in storage order, so it has to place
+    // them itself; only the general fallback below normalizes orientation, via
+    // TIFFReadRGBAImageOriented. Ignoring this decoded a BOTLEFT file (several scanners, and
+    // some GIMP and ImageMagick paths) vertically flipped, while the same image at 16 bit
+    // took the fallback and came out right.
+    //
+    // Orientations 5 to 8 transpose the axes, so the output extent is not the stored
+    // ImageWidth x ImageLength. Rather than reshape here, they are excluded from the fast
+    // path and handled by the fallback, which is what they already got.
+    uint16_t orientation = ORIENTATION_TOPLEFT;
+    TIFFGetFieldDefaulted(tif, TIFFTAG_ORIENTATION, &orientation);
+    const bool axisAligned =
+        orientation == ORIENTATION_TOPLEFT || orientation == ORIENTATION_TOPRIGHT ||
+        orientation == ORIENTATION_BOTRIGHT || orientation == ORIENTATION_BOTLEFT;
     const bool simpleRgb = bps == 8 && (spp == 3 || spp == 4) && photometric == PHOTOMETRIC_RGB &&
-                           planar == PLANARCONFIG_CONTIG && TIFFIsTiled(tif) == 0;
+                           planar == PLANARCONFIG_CONTIG && TIFFIsTiled(tif) == 0 && axisAligned;
 
     if (simpleRgb) {
+        // TOPRIGHT and BOTRIGHT store columns right to left; BOTLEFT and BOTRIGHT store rows
+        // bottom to top.
+        const bool flipX =
+            orientation == ORIENTATION_TOPRIGHT || orientation == ORIENTATION_BOTRIGHT;
+        const bool flipY =
+            orientation == ORIENTATION_BOTLEFT || orientation == ORIENTATION_BOTRIGHT;
         std::vector<std::uint8_t> row(static_cast<std::size_t>(w) * spp);
         bool ok = true;
         for (uint32_t y = 0; y < h && ok; ++y) {
@@ -176,11 +196,12 @@ std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
                 ok = false;
                 break;
             }
+            const int dy = static_cast<int>(flipY ? h - 1 - y : y);
             for (uint32_t x = 0; x < w; ++x) {
                 const std::size_t i = static_cast<std::size_t>(x) * spp;
                 const std::uint8_t a = spp == 4 ? row[i + 3] : 255;
-                out.set(static_cast<int>(x), static_cast<int>(y),
-                        Rgba8{row[i], row[i + 1], row[i + 2], a});
+                const int dx = static_cast<int>(flipX ? w - 1 - x : x);
+                out.set(dx, dy, Rgba8{row[i], row[i + 1], row[i + 2], a});
             }
         }
         // A simple-RGB TIFF is authoritative: if a scanline read fails the file is
