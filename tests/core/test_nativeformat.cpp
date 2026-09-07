@@ -2,6 +2,7 @@
 #include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/GroupLayer.hpp"
+#include "pe/core/Mask.hpp"
 #include "pe/core/NativeFormat.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/SolidColorLayer.hpp"
@@ -438,4 +439,145 @@ PE_TEST(native_format_budget_shared_across_group_children) {
     // Fits one child (262144) but not both: reject — proving the budget is not reset per child.
     PE_CHECK(deserializeDocument(blob, 400'000) == nullptr);
     PE_CHECK(deserializeDocument(blob) != nullptr);  // default budget loads it
+}
+
+PE_TEST(native_format_roundtrips_content_outside_the_canvas) {
+    // The writer used to clamp every content rect to the canvas, so pixels a user had
+    // moved past the edge were dropped at save time and could not be recovered by undo.
+    // The engine supports off-canvas content deliberately elsewhere: floorDiv and
+    // tileLocalOffset are correct for negative coordinates and tested, and Selection goes
+    // out of its way to preserve off-canvas coverage.
+    auto doc = Document::createBlank(Size{64, 64});
+    auto* base = asPixel(*doc, 0);
+    base->setName("Moved");
+    base->tiles().fillRect(Rect{-40, -40, 60, 60}, Rgba8{7, 8, 9, 255});  // straddles the origin
+    base->tiles().setPixel(-30, -30, Rgba8{200, 100, 50, 255});
+
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+    auto back = deserializeDocument(blob);
+    PE_CHECK(back != nullptr);
+    auto* rl = asPixel(*back, 0);
+    PE_CHECK(rl != nullptr);
+
+    PE_CHECK_EQ(rl->tiles().pixel(-30, -30), (Rgba8{200, 100, 50, 255}));  // off-canvas survives
+    PE_CHECK_EQ(rl->tiles().pixel(-5, -5), (Rgba8{7, 8, 9, 255}));
+    PE_CHECK_EQ(rl->tiles().pixel(10, 10), (Rgba8{7, 8, 9, 255}));  // on-canvas unchanged
+    PE_CHECK_EQ(rl->tiles().pixel(30, 30), (Rgba8{}));              // never painted
+}
+
+PE_TEST(native_format_roundtrips_a_mask_outside_the_canvas) {
+    auto doc = Document::createBlank(Size{64, 64});
+    auto* base = asPixel(*doc, 0);
+    base->setName("");
+    base->tiles().fillRect(Rect{-40, -40, 120, 120}, Rgba8{7, 8, 9, 255});
+    auto mask = std::make_unique<Mask>();
+    mask->buffer().fillRect(Rect{-30, -30, 40, 40}, MaskBuffer::kClear);
+    base->setMask(std::move(mask));
+
+    auto back = deserializeDocument(serializeDocument(*doc));
+    PE_CHECK(back != nullptr);
+    const Layer* rl = back->topLevelLayers()[0].get();
+    PE_CHECK(rl->mask() != nullptr);
+    PE_CHECK_EQ(rl->mask()->buffer().value(-20, -20), MaskBuffer::kClear);
+    PE_CHECK_EQ(rl->mask()->buffer().value(40, 40), MaskBuffer::kOpaque);
+}
+
+PE_TEST(native_format_stays_on_the_old_version_when_nothing_is_off_canvas) {
+    // Bumping the version on every save would stop older builds reading ordinary files.
+    // The newer version is only written when a document actually needs it.
+    auto doc = Document::createBlank(Size{32, 32});
+    asPixel(*doc, 0)->tiles().fillRect(Rect{0, 0, 32, 32}, Rgba8{1, 2, 3, 255});
+    const std::vector<std::byte> ordinary = serializeDocument(*doc);
+    PE_CHECK(ordinary.size() > 6);
+    PE_CHECK_EQ(static_cast<int>(ordinary[5]), static_cast<int>(std::byte{'6'}));
+
+    asPixel(*doc, 0)->tiles().setPixel(-1, -1, Rgba8{4, 5, 6, 255});
+    const std::vector<std::byte> offCanvas = serializeDocument(*doc);
+    PE_CHECK_EQ(static_cast<int>(offCanvas[5]), static_cast<int>(std::byte{'7'}));
+    PE_CHECK(deserializeDocument(offCanvas) != nullptr);
+}
+
+PE_TEST(native_format_stays_on_the_old_version_with_an_ordinary_mask) {
+    // MaskBuffer::contentBounds() is tile-granular like TileStoreT's, so a mask painted
+    // anywhere inside a small canvas reports bounds that overhang it. Writing that
+    // verbatim would bloat every masked file to whole tiles and, worse, make every
+    // masked document claim the newer version and stop older builds reading it.
+    auto doc = Document::createBlank(Size{32, 32});
+    auto* base = asPixel(*doc, 0);
+    base->setName("");
+    base->tiles().fillRect(Rect{0, 0, 32, 32}, Rgba8{1, 2, 3, 255});
+    auto mask = std::make_unique<Mask>();
+    mask->buffer().fillRect(Rect{4, 4, 8, 8}, MaskBuffer::kClear);  // well inside the canvas
+    base->setMask(std::move(mask));
+
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK(blob.size() > 6);
+    PE_CHECK_EQ(static_cast<int>(blob[5]), static_cast<int>(std::byte{'6'}));
+
+    auto back = deserializeDocument(blob);
+    PE_CHECK(back != nullptr);
+    const Layer* rl = back->topLevelLayers()[0].get();
+    PE_CHECK(rl->mask() != nullptr);
+    PE_CHECK_EQ(rl->mask()->buffer().value(6, 6), MaskBuffer::kClear);
+    PE_CHECK_EQ(rl->mask()->buffer().value(20, 20), MaskBuffer::kOpaque);
+}
+
+PE_TEST(native_format_still_rejects_off_canvas_in_a_pre_v7_file) {
+    // Off-canvas content rects are legal only from v7. A v6 file could never contain one,
+    // so a v6 record claiming a negative origin is malformed and must still be refused:
+    // relaxing the check for every version would widen what a legacy file may claim.
+    // The existing extreme-origin test does not cover this, because 2.1e9 is out of range
+    // under the v7 rules too and so is rejected either way.
+    auto doc = Document::createBlank(Size{16, 16});
+    auto* base = asPixel(*doc, 0);
+    base->setName("");  // nameLen 0 -> known field offsets
+    base->tiles().fillRect(Rect{0, 0, 16, 16}, Rgba8{9, 9, 9, 255});
+    std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK_EQ(static_cast<int>(blob[5]), static_cast<int>(std::byte{'6'}));  // nothing off-canvas
+    PE_CHECK(deserializeDocument(blob) != nullptr);
+
+    // cy lives at byte 45; make it -8, which is a plausible v7 value and illegal in v6.
+    PE_CHECK(blob.size() > 49);
+    blob[45] = std::byte{0xF8};
+    blob[46] = std::byte{0xFF};
+    blob[47] = std::byte{0xFF};
+    blob[48] = std::byte{0xFF};
+    PE_CHECK(deserializeDocument(blob) == nullptr);
+
+    // The same record is accepted once the file declares v7.
+    blob[5] = std::byte{'7'};
+    blob[6] = std::byte{7};  // the u32 version field is authoritative
+    PE_CHECK(deserializeDocument(blob) != nullptr);
+}
+
+PE_TEST(native_format_rejects_an_off_canvas_rect_beyond_the_coordinate_range) {
+    // v7 permits a negative content origin, but only within the engine's representable
+    // canvas range, so the int loop bounds and the tile math cannot overflow. The origin
+    // is moved without changing cw or ch, so the pixel block that follows still has the
+    // length the reader expects and the content rect is the only thing under test.
+    //
+    // Allocation itself is bounded elsewhere and always was: readBlock charges the
+    // aggregate budget the resident tiled footprint rather than the packed rect size, so
+    // a thin strip cannot commit more memory than its pixel count suggests.
+    auto doc = Document::createBlank(Size{16, 16});
+    auto* base = asPixel(*doc, 0);
+    base->setName("");
+    base->tiles().fillRect(Rect{0, 0, 16, 16}, Rgba8{9, 9, 9, 255});
+    std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK(blob.size() > 57);
+    blob[5] = std::byte{'7'};  // declare the version that permits off-canvas origins
+    blob[6] = std::byte{7};
+    PE_CHECK(deserializeDocument(blob) != nullptr);  // the relabel alone changes nothing
+
+    const auto put = [&blob](std::size_t at, std::int32_t v) {
+        const auto u = static_cast<std::uint32_t>(v);
+        for (int i = 0; i < 4; ++i) {
+            blob[at + static_cast<std::size_t>(i)] = static_cast<std::byte>((u >> (8 * i)) & 0xFF);
+        }
+    };
+    put(41, -1000);  // comfortably off-canvas, well inside the range: accepted
+    PE_CHECK(deserializeDocument(blob) != nullptr);
+
+    put(41, -300001);  // one past kMaxCanvasDimension: refused
+    PE_CHECK(deserializeDocument(blob) == nullptr);
 }

@@ -27,11 +27,18 @@ namespace pe {
 namespace {
 
 // Magic is "PEDOC" + a version digit. v5 adds adjustment & solid-color layer records; v6 adds text
-// layers. The reader checks only the "PEDOC" prefix + the u32 version, so it still accepts v4/v5
-// files (they only ever contained the earlier kinds, which read identically).
-constexpr char kMagic[6] = {'P', 'E', 'D', 'O', 'C', '6'};
-constexpr std::uint32_t kVersion = 6;
+// layers; v7 allows content rects to lie outside the canvas. The reader checks only the "PEDOC"
+// prefix + the u32 version, so it still accepts v4/v5 files (they only ever contained the earlier
+// kinds, which read identically).
+//
+// v7 is written ONLY when a document actually has off-canvas content, so an ordinary file stays
+// readable by builds that predate it. A v7 file is correctly refused by those builds rather than
+// silently losing the content they cannot represent.
+constexpr char kMagicPrefix[5] = {'P', 'E', 'D', 'O', 'C'};
+constexpr std::uint32_t kVersion = 7;                 // newest this writer can emit
+constexpr std::uint32_t kVersionOnCanvas = 6;         // emitted when nothing is off-canvas
 constexpr std::uint32_t kMinReadVersion = 4;          // oldest format this reader accepts
+constexpr std::uint32_t kMinOffCanvasVersion = 7;     // first version allowed a negative origin
 constexpr std::int64_t kMaxLayerPixels = 64'000'000;  // per-layer content cap
 // Text-raster caps live in TextLayer.hpp (pe::kMaxTextRasterDim / pe::kMaxTextRasterPixels) so the
 // app producer, the engine type, and this reader share one source of truth.
@@ -511,12 +518,96 @@ bool readBlock(Reader& r, std::size_t expectedSize, std::vector<std::byte>& out,
     return expectedSize == 0 || r.read(out.data(), expectedSize);
 }
 
-// Serialize one layer's pixel store: content rect (clamped to the canvas) followed by a
-// writeBlock of its pixels, sizeof(Pixel) bytes each. Templated over the store's pixel
-// type so the 8/16/32-bit stores share one path (Rgba8/Rgba16/Rgbaf differ only in size).
+// Serialize one layer's pixel store: its content rect followed by a writeBlock of its
+// pixels, sizeof(Pixel) bytes each. Templated over the store's pixel type so the 8/16/32-bit
+// stores share one path (Rgba8/Rgba16/Rgbaf differ only in size).
+
+// Pixel-exact bounds of the non-default pixels in `store`.
+//
+// TileStoreT::contentBounds() is TILE-granular, so it overhangs the real content by up to
+// 255 px on each side. The writer used to hide that by intersecting with the canvas, which
+// also silently dropped genuine off-canvas content (the bug this is part of fixing). Simply
+// dropping the intersect would instead inflate every ordinary file to whole tiles and make
+// every document look off-canvas, so compute the tight rect instead.
+//
+// Scanned tile by tile through find(), not pixel by pixel through pixel(): the latter does
+// a map lookup per pixel, which is exactly what #150 removed from the other hot paths.
 template <class Pixel>
-void writePixelBlock(Writer& w, const TileStoreT<Pixel>& store, Rect canvasBounds) {
-    const Rect b = store.contentBounds().intersected(canvasBounds);
+Rect tightContentBounds(const TileStoreT<Pixel>& store) {
+    const Rect coarse = store.contentBounds();
+    if (coarse.isEmpty()) return Rect{};
+    const Pixel defaultPixel{};
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    int maxX = std::numeric_limits<int>::min();
+    int maxY = std::numeric_limits<int>::min();
+    bool any = false;
+    const TileSpan span = tilesForRect(coarse);
+    for (int row = span.rowBegin; row < span.rowEnd; ++row) {
+        for (int col = span.colBegin; col < span.colEnd; ++col) {
+            const TileCoord coord{col, row};
+            const TileDataT<Pixel>* tile = store.find(coord);
+            if (tile == nullptr) continue;
+            const int baseX = col * kTileSize;
+            const int baseY = row * kTileSize;
+            for (int ly = 0; ly < kTileSize; ++ly) {
+                for (int lx = 0; lx < kTileSize; ++lx) {
+                    const Pixel px = tile->at(lx, ly);
+                    if (std::memcmp(&px, &defaultPixel, sizeof(Pixel)) == 0) continue;
+                    any = true;
+                    minX = std::min(minX, baseX + lx);
+                    minY = std::min(minY, baseY + ly);
+                    maxX = std::max(maxX, baseX + lx);
+                    maxY = std::max(maxY, baseY + ly);
+                }
+            }
+        }
+    }
+    if (!any) return Rect{};
+    return Rect{minX, minY, maxX - minX + 1, maxY - minY + 1};
+}
+
+// The same idea for a mask. MaskBuffer::contentBounds() is tile-granular too, and its
+// default byte is kOpaque (fully revealing) rather than a zeroed pixel.
+Rect tightMaskBounds(const MaskBuffer& buf) {
+    const Rect coarse = buf.contentBounds();
+    if (coarse.isEmpty()) return Rect{};
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    int maxX = std::numeric_limits<int>::min();
+    int maxY = std::numeric_limits<int>::min();
+    bool any = false;
+    const TileSpan span = tilesForRect(coarse);
+    for (int row = span.rowBegin; row < span.rowEnd; ++row) {
+        for (int col = span.colBegin; col < span.colEnd; ++col) {
+            const MaskBuffer::GrayTile* tile = buf.findTile(TileCoord{col, row});
+            if (tile == nullptr) continue;
+            const int baseX = col * kTileSize;
+            const int baseY = row * kTileSize;
+            for (int ly = 0; ly < kTileSize; ++ly) {
+                for (int lx = 0; lx < kTileSize; ++lx) {
+                    if ((*tile)[static_cast<std::size_t>(ly) * kTileSize +
+                                static_cast<std::size_t>(lx)] == MaskBuffer::kOpaque) {
+                        continue;
+                    }
+                    any = true;
+                    minX = std::min(minX, baseX + lx);
+                    minY = std::min(minY, baseY + ly);
+                    maxX = std::max(maxX, baseX + lx);
+                    maxY = std::max(maxY, baseY + ly);
+                }
+            }
+        }
+    }
+    if (!any) return Rect{};
+    return Rect{minX, minY, maxX - minX + 1, maxY - minY + 1};
+}
+
+template <class Pixel>
+void writePixelBlock(Writer& w, const TileStoreT<Pixel>& store) {
+    // NOT clamped to the canvas: content a user moved past the edge is real data, and
+    // clamping here dropped it permanently at save time. See kMinOffCanvasVersion.
+    const Rect b = tightContentBounds(store);
     w.i32(b.x);
     w.i32(b.y);
     w.i32(b.width);
@@ -566,16 +657,35 @@ bool readPixelBlock(Reader& r, TileStoreT<Pixel>& store, std::int32_t cx, std::i
 // out-of-canvas, overflowing, or oversized rect; on success cx/cy/cw/ch are filled. The
 // int64 math keeps cx+cw / cy+ch from overflowing the int loop bounds and confines tile
 // allocation to the canvas.
-bool readContentRect(Reader& r, int canvasW, int canvasH, std::int32_t& cx, std::int32_t& cy,
-                     std::int32_t& cw, std::int32_t& ch) {
+bool readContentRect(Reader& r, int canvasW, int canvasH, bool allowOffCanvas, std::int32_t& cx,
+                     std::int32_t& cy, std::int32_t& cw, std::int32_t& ch) {
     cx = r.i32();
     cy = r.i32();
     cw = r.i32();
     ch = r.i32();
-    return r.ok() && cw >= 0 && ch >= 0 && cx >= 0 && cy >= 0 &&
-           static_cast<std::int64_t>(cx) + cw <= canvasW &&
-           static_cast<std::int64_t>(cy) + ch <= canvasH &&
-           static_cast<std::int64_t>(cw) * ch <= kMaxLayerPixels;
+    if (!r.ok() || cw < 0 || ch < 0) return false;
+    if (static_cast<std::int64_t>(cw) * ch > kMaxLayerPixels) return false;
+
+    const std::int64_t x0 = cx;
+    const std::int64_t y0 = cy;
+    const std::int64_t x1 = x0 + cw;
+    const std::int64_t y1 = y0 + ch;
+    if (allowOffCanvas) {
+        // Bounded, not unbounded: coordinates stay inside the engine's representable canvas
+        // range so the int loop bounds and the tile math cannot overflow.
+        const std::int64_t lim = kMaxCanvasDimension;
+        if (x0 < -lim || y0 < -lim || x1 > lim || y1 > lim) return false;
+    } else {
+        // Pre-v7 files could not contain off-canvas content, so keep their original, stricter
+        // validation rather than widening what a legacy file is allowed to claim.
+        if (x0 < 0 || y0 < 0 || x1 > canvasW || y1 > canvasH) return false;
+    }
+
+    // No tile-span cap is needed here: readBlock charges the aggregate budget the RESIDENT
+    // tiled footprint (tileFootprintBytes), not the packed rect size, precisely so a thin
+    // strip cannot commit far more memory than its pixel count suggests. Widening the
+    // coordinate range does not escape that, it only doubles the reachable span.
+    return true;
 }
 
 void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active, BitDepth depth) {
@@ -607,7 +717,7 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
         w.u8(mask->enabled() ? 1 : 0);
         w.f32(mask->density());
         w.u8(mask->inverted() ? 1 : 0);
-        const Rect mb = mask->buffer().contentBounds().intersected(canvasBounds);
+        const Rect mb = tightMaskBounds(mask->buffer());  // unclamped; see writePixelBlock
         w.i32(mb.x);
         w.i32(mb.y);
         w.i32(mb.width);
@@ -645,9 +755,9 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
         w.u8(c.g);
         w.u8(c.b);
         w.u8(c.a);
-        // Clamp the fill rect to the canvas so it round-trips through readContentRect (which
-        // rejects off-canvas rects); the part outside the canvas isn't visible anyway.
-        const Rect b = solid->bounds().intersected(canvasBounds);
+        // Unclamped, like the pixel and mask blocks: a solid layer moved partly past the
+        // edge keeps its full extent, so moving it back is non-destructive.
+        const Rect b = solid->bounds();
         w.i32(b.x);
         w.i32(b.y);
         w.i32(b.width);
@@ -703,23 +813,23 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
     const auto& pl = static_cast<const PixelLayer&>(layer);
     switch (depth) {
         case BitDepth::U16:
-            writePixelBlock(w, pl.tiles16(), canvasBounds);
+            writePixelBlock(w, pl.tiles16());
             break;
         case BitDepth::F32:
-            writePixelBlock(w, pl.tilesF(), canvasBounds);
+            writePixelBlock(w, pl.tilesF());
             break;
         case BitDepth::U8:
         default:
-            writePixelBlock(w, pl.tiles(), canvasBounds);
+            writePixelBlock(w, pl.tiles());
             break;
     }
 }
 
 // Reads one layer (recursively for groups). Returns nullptr on any inconsistency.
 // Sets activeId/haveActive if a record carries the active flag.
-std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth depth,
-                                 LayerId& activeId, bool& haveActive, int depthGuard,
-                                 std::int64_t& budget, std::int64_t& nodeCount) {
+std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allowOffCanvas,
+                                 BitDepth depth, LayerId& activeId, bool& haveActive,
+                                 int depthGuard, std::int64_t& budget, std::int64_t& nodeCount) {
     if (depthGuard > kMaxGroupDepth) return nullptr;
     // Global node cap across the WHOLE tree: the childCount/topCount checks are per-level only, so
     // without this a crafted file could declare ~kMaxLayers groups each with ~kMaxLayers (zero-
@@ -753,7 +863,7 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
         std::int32_t mw = 0;
         std::int32_t mh = 0;
         if (!r.ok() || mkind > static_cast<std::uint8_t>(Mask::Kind::Quick) ||
-            !readContentRect(r, canvasW, canvasH, mx, my, mw, mh)) {
+            !readContentRect(r, canvasW, canvasH, allowOffCanvas, mx, my, mw, mh)) {
             return nullptr;
         }
         std::vector<std::byte> mraw;
@@ -783,8 +893,8 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
         if (!r.ok() || childCount > kMaxLayers) return nullptr;
         group->setIsolated(isolated != 0);
         for (std::uint32_t i = 0; i < childCount; ++i) {
-            auto child = readLayer(r, canvasW, canvasH, depth, activeId, haveActive, depthGuard + 1,
-                                   budget, nodeCount);
+            auto child = readLayer(r, canvasW, canvasH, allowOffCanvas, depth, activeId, haveActive,
+                                   depthGuard + 1, budget, nodeCount);
             if (child == nullptr) return nullptr;
             group->addChild(std::move(child));
         }
@@ -867,7 +977,7 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
         std::int32_t cy = 0;
         std::int32_t cw = 0;
         std::int32_t ch = 0;
-        if (!readContentRect(r, canvasW, canvasH, cx, cy, cw, ch)) return nullptr;
+        if (!readContentRect(r, canvasW, canvasH, allowOffCanvas, cx, cy, cw, ch)) return nullptr;
         // Read into the store matching the document depth (the active one); the per-pixel
         // size and the aggregate budget are handled inside readPixelBlock/readBlock.
         bool okPixels = false;
@@ -898,12 +1008,57 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, BitDepth d
     return layer;
 }
 
+// Whether anything in the tree extends past the canvas, which is what decides the file
+// version. Checked over the same three things the writer emits unclamped: pixel content,
+// mask content, and a solid-color layer's fill rect.
+bool hasOffCanvasContent(const Layer& layer, Rect canvasBounds) {
+    const auto outside = [canvasBounds](Rect r) {
+        return !r.isEmpty() && r.intersected(canvasBounds) != r;
+    };
+    if (layer.mask() != nullptr && outside(tightMaskBounds(layer.mask()->buffer()))) return true;
+    if (const auto* solid = dynamic_cast<const SolidColorLayer*>(&layer)) {
+        if (outside(solid->bounds())) return true;
+    }
+    if (const auto* group = dynamic_cast<const GroupLayer*>(&layer)) {
+        for (const auto& child : group->children()) {
+            if (child != nullptr && hasOffCanvasContent(*child, canvasBounds)) return true;
+        }
+        return false;
+    }
+    if (const auto* pl = dynamic_cast<const PixelLayer*>(&layer)) {
+        // The same tight bounds the writer emits, or the version would disagree with the
+        // record it describes.
+        switch (pl->depth()) {
+            case BitDepth::U16:
+                return outside(tightContentBounds(pl->tiles16()));
+            case BitDepth::F32:
+                return outside(tightContentBounds(pl->tilesF()));
+            default:
+                return outside(tightContentBounds(pl->tiles()));
+        }
+    }
+    return false;
+}
+
+bool hasOffCanvasContent(const Document& doc) {
+    const Rect canvasBounds = doc.canvasBounds();
+    for (const auto& layer : doc.topLevelLayers()) {
+        if (layer != nullptr && hasOffCanvasContent(*layer, canvasBounds)) return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 std::vector<std::byte> serializeDocument(const Document& doc) {
     Writer w;
-    w.bytes(kMagic, sizeof(kMagic));
-    w.u32(kVersion);
+    // Only claim the newer version when the document actually needs it, so an ordinary file
+    // stays readable by builds that predate off-canvas support.
+    const bool offCanvas = hasOffCanvasContent(doc);
+    const std::uint32_t version = offCanvas ? kVersion : kVersionOnCanvas;
+    w.bytes(kMagicPrefix, sizeof(kMagicPrefix));
+    w.u8(static_cast<std::uint8_t>('0' + version));
+    w.u32(version);
 
     const Size size = doc.canvasSize();
     w.i32(size.width);
@@ -930,11 +1085,13 @@ std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data,
     char magic[6] = {};
     // Check the 5-char "PEDOC" prefix; the 6th byte is the version digit, redundant with the u32
     // version below (which is authoritative and gates the accepted range).
-    if (!r.read(magic, sizeof(magic)) || std::memcmp(magic, kMagic, 5) != 0) {
+    if (!r.read(magic, sizeof(magic)) ||
+        std::memcmp(magic, kMagicPrefix, sizeof(kMagicPrefix)) != 0) {
         return nullptr;
     }
     const std::uint32_t ver = r.u32();
     if (!r.ok() || ver < kMinReadVersion || ver > kVersion) return nullptr;
+    const bool allowOffCanvas = ver >= kMinOffCanvasVersion;
 
     const std::int32_t canvasW = r.i32();
     const std::int32_t canvasH = r.i32();
@@ -966,8 +1123,8 @@ std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data,
     std::int64_t budget = maxTotalContentBytes < 0 ? 0 : maxTotalContentBytes;
     std::int64_t nodeCount = 0;  // total layers across the whole tree (global cap, not per-level)
     for (std::uint32_t i = 0; i < topCount; ++i) {
-        auto layer =
-            readLayer(r, canvasW, canvasH, depth, activeId, haveActive, 0, budget, nodeCount);
+        auto layer = readLayer(r, canvasW, canvasH, allowOffCanvas, depth, activeId, haveActive, 0,
+                               budget, nodeCount);
         if (layer == nullptr) return nullptr;
         doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(layer));
     }
