@@ -12,6 +12,8 @@
 #include "CanvasView.hpp"
 #include "EffectDialog.hpp"
 #include "MainWindow.hpp"
+#include "pe/core/Adjustment.hpp"
+#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Commands.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Refusal.hpp"
@@ -759,4 +761,64 @@ PE_TEST(refusal_code_category_and_retry_cannot_disagree) {
     }
     // None is not a refusal, so a default-constructed value cannot be mistaken for one.
     PE_CHECK(!pe::Refusal{}.isRefusal());
+}
+
+PE_TEST(effect_refusal_names_the_actual_reason) {
+    // applyFilter returns nullptr for four different reasons and the dialog only sees the
+    // null, so it classifies from the same document state the engine checked. Getting this
+    // wrong would be worse than silence: a confident wrong explanation sends the user to
+    // fix something that was never the problem.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    const pe::LayerId base = doc->activeLayer();
+
+    // Empty layer: nothing to filter.
+    const pe::Refusal empty = pe::app::effectRefusal(doc.get(), QStringLiteral("Gaussian Blur"));
+    PE_CHECK(empty.code == pe::RefusalCode::NoEffect);
+    PE_CHECK(empty.explanation.find("empty") != std::string::npos);
+
+    // With content, the same call must NOT claim it is empty.
+    static_cast<pe::PixelLayer*>(doc->findLayer(base))
+        ->tiles()
+        .fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{1, 2, 3, 255});
+    const pe::Refusal ok = pe::app::effectRefusal(doc.get(), QStringLiteral("Gaussian Blur"));
+    PE_CHECK(ok.explanation.find("empty") == std::string::npos);
+
+    // A non-pixel active layer.
+    auto adj = std::make_unique<pe::AdjustmentLayer>(std::make_unique<pe::Invert>(), "Invert");
+    const pe::LayerId adjId = adj->id();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(adj));
+    doc->setActiveLayer(adjId);
+    const pe::Refusal wrongKind =
+        pe::app::effectRefusal(doc.get(), QStringLiteral("Gaussian Blur"));
+    PE_CHECK(wrongKind.code == pe::RefusalCode::LayerNotPixel);
+    PE_CHECK(wrongKind.category == pe::RefusalCategory::WrongTarget);
+
+    // No document at all.
+    const pe::Refusal none = pe::app::effectRefusal(nullptr, QStringLiteral("Gaussian Blur"));
+    PE_CHECK(none.code == pe::RefusalCode::NoDocument);
+
+    // Every one names the operation and the affordance, so a report identifies both.
+    for (const pe::Refusal* r : {&empty, &wrongKind, &none}) {
+        PE_CHECK(!r->operation.empty());
+        PE_CHECK(!r->action.empty());
+        PE_CHECK(r->isRefusal());
+    }
+}
+
+PE_TEST(effect_refusal_reports_an_over_budget_layer) {
+    // Over pe::kMaxFilterPixels every destructive filter returns nullptr. The message has
+    // to name the limit, because no amount of retrying or reselecting fixes it: the user
+    // has to select a smaller region.
+    const int side = 5000;  // 25 MP, over the 16 MP cap
+    auto doc = pe::Document::createBlank(pe::Size{side, side});
+    static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()))
+        ->tiles()
+        .fillRect(pe::Rect{0, 0, side, side}, pe::Rgba8{9, 9, 9, 255});
+
+    const pe::Refusal r = pe::app::effectRefusal(doc.get(), QStringLiteral("Gaussian Blur"));
+    PE_CHECK(r.code == pe::RefusalCode::OverSizeBudget);
+    PE_CHECK(r.category == pe::RefusalCategory::OverBudget);
+    PE_CHECK(r.explanation.find("megapixel") != std::string::npos);
+    PE_CHECK(!r.retryMeaningful);
+    PE_CHECK(!r.context.empty());
 }

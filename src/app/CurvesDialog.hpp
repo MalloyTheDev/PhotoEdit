@@ -1,5 +1,7 @@
 #pragma once
 
+#include "pe/core/Refusal.hpp"
+
 #include <QDialog>
 
 #include <functional>
@@ -25,6 +27,10 @@ class CurveEditorWidget;
 // document's observers, so the caller supplies onPreview to refresh the canvas.
 class CurvesDialog : public QDialog {
     Q_OBJECT
+
+signals:
+    // Accepted but produced no command. Same contract as EffectDialog::refused.
+    void refused(const pe::Refusal& r);
 
 public:
     // Builds an undoable command from the current curve points, or nullptr if it can't apply.

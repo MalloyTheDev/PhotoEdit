@@ -1,5 +1,7 @@
 #pragma once
 
+#include "pe/core/Refusal.hpp"
+
 #include <QDialog>
 #include <QString>
 #include <QTimer>
@@ -30,8 +32,19 @@ namespace pe::app {
 // On OK the provisional command is committed as a single undo step; on Cancel (or close,
 // or unchecking Preview) it is reverted. The preview bypasses the document's observer, so
 // the caller passes an onPreview callback that refreshes the canvas.
+// Why an adjustment or filter produced no command. applyFilter and applyAdjustment return
+// nullptr for four distinct reasons and the dialog cannot tell them apart from the null
+// alone, so it classifies them from the same document state the engine checked. Pressing
+// OK and having the dialog close with nothing applied, and nothing said, is the silent
+// refusal this exists to remove.
+[[nodiscard]] pe::Refusal effectRefusal(const pe::Document* doc, const QString& title);
+
 class EffectDialog : public QDialog {
     Q_OBJECT
+
+signals:
+    // The dialog was accepted but produced no command. MainWindow renders it.
+    void refused(const pe::Refusal& r);
 
 public:
     struct Param {

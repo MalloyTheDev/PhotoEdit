@@ -1,4 +1,8 @@
 #include "EffectDialog.hpp"
+#include <cstdint>
+#include <string>
+#include "pe/core/Filter.hpp"
+#include "pe/core/PixelLayer.hpp"
 
 #include "pe/core/Command.hpp"   // pe::Command (execute/undo/name)
 #include "pe/core/Document.hpp"  // pe::Document, history()
@@ -214,6 +218,46 @@ void EffectDialog::onPreviewToggled(bool on) {
     }
 }
 
+pe::Refusal effectRefusal(const pe::Document* doc, const QString& title) {
+    const auto op = ("effect." + title.toLower().remove(QChar('.')).replace(QChar(' '), QChar('.')))
+                        .toStdString();
+    const std::string action = title.toStdString();
+    if (doc == nullptr) {
+        return pe::refuse(op, pe::RefusalCode::NoDocument, action, "Open an image first.");
+    }
+    const pe::Layer* l = doc->findLayer(doc->activeLayer());
+    const std::string where = "active layer " + (l == nullptr ? std::string("none") : l->name());
+    if (l == nullptr) {
+        return pe::refuse(op, pe::RefusalCode::NoActiveLayer, action,
+                          "Select a layer to apply this to.", where);
+    }
+    if (l->kind() != pe::LayerKind::Pixel) {
+        return pe::refuse(op, pe::RefusalCode::LayerNotPixel, action,
+                          "\"" + l->name() +
+                              "\" is not a pixel layer. Select a pixel layer, or add an "
+                              "adjustment layer instead.",
+                          where);
+    }
+    const pe::Rect content = static_cast<const pe::PixelLayer*>(l)->tiles().contentBounds();
+    if (content.isEmpty()) {
+        return pe::refuse(op, pe::RefusalCode::NoEffect, action,
+                          "\"" + l->name() + "\" is empty, so there is nothing to change.", where);
+    }
+    const std::int64_t area = static_cast<std::int64_t>(content.width) * content.height;
+    if (area > pe::kMaxFilterPixels) {
+        return pe::refuse(op, pe::RefusalCode::OverSizeBudget, action,
+                          "\"" + l->name() + "\" covers " + std::to_string(area / 1'000'000) +
+                              " megapixels. Applying this is limited to " +
+                              std::to_string(pe::kMaxFilterPixels / 1'000'000) +
+                              " megapixels; select a smaller region first.",
+                          where + ", content " + std::to_string(content.width) + "x" +
+                              std::to_string(content.height));
+    }
+    // Nothing about the document explains it, so say that rather than inventing a cause.
+    return pe::refuse(op, pe::RefusalCode::NoEffect, action,
+                      "Those settings left the image unchanged.", where);
+}
+
 void EffectDialog::commit() {
     if (doc_ != nullptr) {
         // The preview may be stale (preview off) — rebuild from the final values so OK always
@@ -227,8 +271,11 @@ void EffectDialog::commit() {
             // History re-executes from the original state and notifies observers (the canvas
             // refreshes itself), collapsing the whole edit into one undo step.
             doc_->history().push(std::move(cmd));
-        } else if (onPreview_) {
-            onPreview_();  // nothing applied (e.g. empty layer); make sure the canvas is clean
+        } else {
+            // Nothing applied. Saying so is the point: OK closing the dialog with no
+            // visible change is indistinguishable from the filter being broken.
+            emit refused(effectRefusal(doc_, windowTitle()));
+            if (onPreview_) onPreview_();  // make sure the canvas is clean
         }
     }
     accept();

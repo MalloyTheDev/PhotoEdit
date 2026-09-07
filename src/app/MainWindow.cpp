@@ -185,6 +185,7 @@ void MainWindow::buildMenuBar() {
         if (!doc_) return;
         EffectDialog dlg(this, title, std::move(params), std::move(factory), doc_.get(),
                          [this] { canvas_->reloadImage(); });
+        connect(&dlg, &EffectDialog::refused, this, &MainWindow::reportRefusal);
         dlg.exec();
     };
     // Apply a no-parameter effect destructively and undoably to the active layer.
@@ -1510,6 +1511,7 @@ void MainWindow::editAdjustmentLayer(pe::LayerId id) {
                     return std::make_unique<pe::EditAdjustmentCommand>(id, std::move(c));
                 },
                 doc_.get(), [this] { canvas_->reloadImage(); });
+            connect(&dlg, &CurvesDialog::refused, this, &MainWindow::reportRefusal);
             dlg.exec();
             return;
         }
@@ -1539,6 +1541,7 @@ void MainWindow::editAdjustmentLayer(pe::LayerId id) {
                     return std::make_unique<pe::EditAdjustmentCommand>(id, std::move(cm));
                 },
                 doc_.get(), [this] { canvas_->reloadImage(); });
+            connect(&dlg, &GroupedSlidersDialog::refused, this, &MainWindow::reportRefusal);
             dlg.exec();
             return;
         }
@@ -1573,6 +1576,7 @@ void MainWindow::editAdjustmentLayer(pe::LayerId id) {
                     return std::make_unique<pe::EditAdjustmentCommand>(id, std::move(sc));
                 },
                 doc_.get(), [this] { canvas_->reloadImage(); });
+            connect(&dlg, &GroupedSlidersDialog::refused, this, &MainWindow::reportRefusal);
             dlg.exec();
             return;
         }

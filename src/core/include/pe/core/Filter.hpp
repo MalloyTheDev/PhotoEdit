@@ -17,6 +17,16 @@ class Document;
 class Selection;
 class PixelBuffer;
 
+// Max content area a destructive filter rasterizes at once. Tighter than the compositor's
+// 8-bit cap because filters allocate several full-region FLOAT buffers (premultiplied src,
+// tmp, dst, blurred) at about 16 bytes a pixel each; 16 MP keeps transient memory near
+// 1 GB. Larger regions need tile-streaming (a later increment).
+//
+// Public because a caller has to be able to explain a refusal: over this cap every
+// destructive filter and adjustment returns nullptr, and the shell can only tell the user
+// why if it can name the limit.
+inline constexpr std::int64_t kMaxFilterPixels = 16'000'000;
+
 // Run an in-place per-pixel transform over a pixel layer's content as a reversible
 // tile-delta command (the shared machinery behind destructive filters and
 // adjustments). `transform(img, w, h)` mutates the extracted content image in

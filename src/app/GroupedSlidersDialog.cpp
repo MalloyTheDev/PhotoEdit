@@ -1,5 +1,7 @@
 #include "GroupedSlidersDialog.hpp"
 
+#include "EffectDialog.hpp"  // effectRefusal
+
 #include "pe/core/Command.hpp"
 #include "pe/core/Document.hpp"
 
@@ -189,8 +191,11 @@ void GroupedSlidersDialog::commit() {
             factory_(values_, flagChk_ != nullptr && flagChk_->isChecked());
         if (cmd) {
             doc_->history().push(std::move(cmd));
-        } else if (onPreview_) {
-            onPreview_();
+        } else {
+            // Same reasoning as EffectDialog: OK closing with nothing applied and nothing
+            // said reads as the feature being broken.
+            emit refused(effectRefusal(doc_, windowTitle()));
+            if (onPreview_) onPreview_();
         }
     }
     accept();

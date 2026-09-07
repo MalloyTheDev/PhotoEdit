@@ -1,5 +1,7 @@
 #pragma once
 
+#include "pe/core/Refusal.hpp"
+
 #include <QDialog>
 #include <QString>
 #include <QTimer>
@@ -29,6 +31,10 @@ namespace pe::app {
 // commits one EditAdjustmentCommand, Cancel/close reverts.
 class GroupedSlidersDialog : public QDialog {
     Q_OBJECT
+
+signals:
+    // Accepted but produced no command. Same contract as EffectDialog::refused.
+    void refused(const pe::Refusal& r);
 
 public:
     struct SliderSpec {

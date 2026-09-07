@@ -19,12 +19,6 @@ namespace pe {
 
 namespace {
 
-// Max content area a destructive filter rasterizes at once. Tighter than the
-// compositor's 8-bit cap because filters allocate several full-region FLOAT
-// buffers (premultiplied src, tmp, dst, blurred) — ~16 bytes/px each. 16 MP keeps
-// transient memory ~1 GB. Larger regions need tile-streaming (a later increment).
-constexpr int64_t kMaxFilterPixels = 16'000'000;
-
 inline std::size_t idx(int x, int y, int w) noexcept {
     return static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x);
 }

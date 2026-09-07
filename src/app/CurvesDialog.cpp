@@ -1,5 +1,7 @@
 #include "CurvesDialog.hpp"
 
+#include "EffectDialog.hpp"  // effectRefusal
+
 #include "CurveEditorWidget.hpp"
 
 #include "pe/core/Command.hpp"
@@ -96,8 +98,9 @@ void CurvesDialog::commit() {
         std::unique_ptr<pe::Command> cmd = factory_(editor_->points());
         if (cmd) {
             doc_->history().push(std::move(cmd));
-        } else if (onPreview_) {
-            onPreview_();
+        } else {
+            emit refused(effectRefusal(doc_, windowTitle()));
+            if (onPreview_) onPreview_();
         }
     }
     accept();
