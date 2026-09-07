@@ -2,6 +2,7 @@
 
 #include "pe/core/Document.hpp"
 #include "pe/core/PaintToolController.hpp"
+#include "pe/core/Refusal.hpp"
 #include "pe/core/ViewTransform.hpp"
 
 #include <algorithm>
@@ -108,6 +109,10 @@ signals:
     // Mask-edit was exited because a non-Brush tool became active (only the Brush paints masks).
     // MainWindow relays it so the Layers panel drops the focus ring; keeps the ring honest.
     void maskEditTargetCleared();
+    // A canvas gesture declined for a structural reason. Distinct from toolMessage, which
+    // is a transient hint: this is the answer to "why did nothing happen", and MainWindow
+    // records it as well as showing it.
+    void refused(const pe::Refusal& r);
 
 public:
     // View navigation (also driven by the View menu).

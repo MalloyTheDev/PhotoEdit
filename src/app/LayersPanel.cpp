@@ -488,10 +488,28 @@ void LayersPanel::updateButtons() {
                          a->mask() == nullptr);  // add a mask to a not-yet-masked layer
 }
 
+std::string LayersPanel::describeSelectionForRefusal() const {
+    if (doc_ == nullptr) return "no document";
+    const pe::Layer* l = doc_->findLayer(doc_->activeLayer());
+    const bool topLevel = l != nullptr && doc_->topLevelIndexOf(l->id()) != pe::GroupLayer::npos;
+    return "active layer " + (l == nullptr ? std::string("none") : l->name()) +
+           (l == nullptr                        ? ""
+            : l->kind() == pe::LayerKind::Group ? " (group)"
+                                                : " (not a group)") +
+           (topLevel ? ", top level" : ", nested") + "; " + std::to_string(doc_->topLevelCount()) +
+           " top-level layer(s); " + std::to_string(selectedTopLevelIds().size()) + " selected";
+}
+
 void LayersPanel::groupSelected() {
     if (doc_ == nullptr) return;
     std::vector<pe::LayerId> ids = selectedTopLevelIds();
-    if (ids.empty()) return;
+    if (ids.empty()) {
+        emit refused(pe::refuse("layer.group", pe::RefusalCode::LayerNotTopLevel, "Group Layers",
+                                "Select one or more top-level layers to group. Layers already "
+                                "inside a group cannot be grouped again.",
+                                describeSelectionForRefusal()));
+        return;
+    }
     // GroupLayersCommand validates the ids are distinct top-level siblings (which the
     // filter above guarantees) and sets the new group active, so the rebuild that the
     // resulting LayerStructure change triggers re-selects the group for us.
@@ -504,7 +522,17 @@ void LayersPanel::ungroupSelected() {
     const pe::Layer* l = doc_->findLayer(id);
     if (l == nullptr || l->kind() != pe::LayerKind::Group ||
         doc_->topLevelIndexOf(id) == pe::GroupLayer::npos) {
-        return;  // only top-level groups dissolve in this version
+        // Only top-level groups dissolve in this version.
+        emit refused(pe::refuse("layer.ungroup",
+                                l != nullptr && l->kind() == pe::LayerKind::Group
+                                    ? pe::RefusalCode::LayerNotTopLevel
+                                    : pe::RefusalCode::LayerNotGroup,
+                                "Ungroup Layers",
+                                l != nullptr && l->kind() == pe::LayerKind::Group
+                                    ? "Only a top-level group can be ungrouped."
+                                    : "Select a group to ungroup.",
+                                describeSelectionForRefusal()));
+        return;
     }
     // The command clears the active layer when the dissolved group was active; pick the
     // group's topmost child as the new active so the panel doesn't end up with nothing
@@ -680,15 +708,34 @@ void LayersPanel::onDuplicate() {
     const pe::LayerId id = doc_->activeLayer();
     // DuplicateLayerCommand clones a top-level layer only; skip otherwise so no phantom
     // (no-op) undo entry is recorded.
-    if (doc_->topLevelIndexOf(id) == pe::GroupLayer::npos) return;
+    if (doc_->topLevelIndexOf(id) == pe::GroupLayer::npos) {
+        emit refused(pe::refuse("layer.duplicate", pe::RefusalCode::LayerNotTopLevel,
+                                "Duplicate Layer",
+                                "Only a top-level layer can be duplicated. Move it out of its "
+                                "group first.",
+                                describeSelectionForRefusal()));
+        return;
+    }
     push(std::make_unique<pe::DuplicateLayerCommand>(id));
 }
 
 void LayersPanel::onDelete() {
-    if (doc_ == nullptr || doc_->topLevelCount() <= 1) return;
+    if (doc_ == nullptr) return;
+    if (doc_->topLevelCount() <= 1) {
+        emit refused(pe::refuse("layer.delete", pe::RefusalCode::NoEffect, "Delete Layer",
+                                "A document must keep at least one layer.",
+                                describeSelectionForRefusal()));
+        return;
+    }
     const pe::LayerId id = doc_->activeLayer();
-    // RemoveLayerCommand removes a top-level layer only; skip otherwise (no phantom entry).
-    if (doc_->topLevelIndexOf(id) == pe::GroupLayer::npos) return;
+    // RemoveLayerCommand removes a top-level layer only.
+    if (doc_->topLevelIndexOf(id) == pe::GroupLayer::npos) {
+        emit refused(pe::refuse("layer.delete", pe::RefusalCode::LayerNotTopLevel, "Delete Layer",
+                                "Only a top-level layer can be deleted here. Move it out of its "
+                                "group first.",
+                                describeSelectionForRefusal()));
+        return;
+    }
     push(std::make_unique<pe::RemoveLayerCommand>(id));
 }
 

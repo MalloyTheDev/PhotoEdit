@@ -850,7 +850,18 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         // clicks are ignored, like the other click tools, so text can't land outside the image.
         const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
         const pe::Point p{static_cast<int>(std::lround(d.x)), static_cast<int>(std::lround(d.y))};
-        if (doc_->canvasBounds().contains(p)) emit textRequested(QPointF(d.x, d.y));
+        if (doc_->canvasBounds().contains(p)) {
+            emit textRequested(QPointF(d.x, d.y));
+        } else {
+            // A click on the pasteboard used to be ignored in silence, which reads as the
+            // Type tool being broken rather than as the click being off the image.
+            emit refused(pe::refuse("tool.type.place", pe::RefusalCode::PointOutsideCanvas,
+                                    "Type tool click", "Click inside the image to place text.",
+                                    "click at (" + std::to_string(p.x) + ", " +
+                                        std::to_string(p.y) + "); canvas is " +
+                                        std::to_string(doc_->canvasSize().width) + "x" +
+                                        std::to_string(doc_->canvasSize().height)));
+        }
         return;
     }
     if (toolMode_ == Tool::Clone) {

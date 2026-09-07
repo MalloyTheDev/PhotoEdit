@@ -94,8 +94,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     canvas_ = new CanvasView(this);
     connect(canvas_, &CanvasView::colorPicked, this, &MainWindow::onColorPicked);
-    connect(canvas_, &CanvasView::toolMessage, this,
-            [this](const QString& msg) { statusBar()->showMessage(msg, 4000); });
+    connect(canvas_, &CanvasView::toolMessage, this, [this](const QString& msg) {
+        statusBar()->showMessage(msg, 4000);
+        connect(canvas_, &CanvasView::refused, this, &MainWindow::reportRefusal);
+    });
     connect(canvas_, &CanvasView::textRequested, this, &MainWindow::onAddText);
 
     buildMenuBar();
@@ -319,10 +321,20 @@ void MainWindow::buildMenuBar() {
         const auto addMask = [this](pe::AddLayerMaskCommand::Init init) {
             if (doc_ == nullptr) return;
             const pe::Layer* l = doc_->findLayer(doc_->activeLayer());
-            if (l != nullptr && l->mask() == nullptr) {  // only a not-yet-masked layer
-                doc_->history().push(
-                    std::make_unique<pe::AddLayerMaskCommand>(doc_->activeLayer(), init));
+            if (refuseIf(l == nullptr, "layer.mask.add", pe::RefusalCode::NoActiveLayer,
+                         "Layer > Layer Mask",
+                         QStringLiteral("Select a layer to add a mask to."))) {
+                return;
             }
+            if (refuseIf(l->mask() != nullptr, "layer.mask.add",
+                         pe::RefusalCode::LayerAlreadyHasMask, "Layer > Layer Mask",
+                         QStringLiteral("\"%1\" already has a mask. Delete it first to add a "
+                                        "different one.")
+                             .arg(QString::fromStdString(l->name())))) {
+                return;
+            }
+            doc_->history().push(
+                std::make_unique<pe::AddLayerMaskCommand>(doc_->activeLayer(), init));
         };
         maskMenu->addAction(QStringLiteral("Reveal All"), this,
                             [addMask] { addMask(pe::AddLayerMaskCommand::Init::RevealAll); });
@@ -334,18 +346,35 @@ void MainWindow::buildMenuBar() {
         maskMenu->addAction(QStringLiteral("Toggle Mask Enabled"), this, [this] {
             if (doc_ == nullptr) return;
             const pe::Layer* l = doc_->findLayer(doc_->activeLayer());
-            if (l != nullptr && l->mask() != nullptr) {
-                doc_->history().push(std::make_unique<pe::SetMaskEnabledCommand>(
-                    doc_->activeLayer(), !l->mask()->enabled()));
+            if (refuseIf(l == nullptr, "layer.mask.toggle", pe::RefusalCode::NoActiveLayer,
+                         "Layer > Layer Mask > Toggle Mask Enabled",
+                         QStringLiteral("Select a layer first."))) {
+                return;
             }
+            if (refuseIf(l->mask() == nullptr, "layer.mask.toggle", pe::RefusalCode::LayerHasNoMask,
+                         "Layer > Layer Mask > Toggle Mask Enabled",
+                         QStringLiteral("\"%1\" has no mask to enable or disable.")
+                             .arg(QString::fromStdString(l->name())))) {
+                return;
+            }
+            doc_->history().push(std::make_unique<pe::SetMaskEnabledCommand>(
+                doc_->activeLayer(), !l->mask()->enabled()));
         });
         maskMenu->addAction(QStringLiteral("Delete Mask"), this, [this] {
             if (doc_ == nullptr) return;
             const pe::Layer* l = doc_->findLayer(doc_->activeLayer());
-            if (l != nullptr && l->mask() != nullptr) {
-                doc_->history().push(
-                    std::make_unique<pe::RemoveLayerMaskCommand>(doc_->activeLayer()));
+            if (refuseIf(l == nullptr, "layer.mask.delete", pe::RefusalCode::NoActiveLayer,
+                         "Layer > Layer Mask > Delete Mask",
+                         QStringLiteral("Select a layer first."))) {
+                return;
             }
+            if (refuseIf(l->mask() == nullptr, "layer.mask.delete", pe::RefusalCode::LayerHasNoMask,
+                         "Layer > Layer Mask > Delete Mask",
+                         QStringLiteral("\"%1\" has no mask to delete.")
+                             .arg(QString::fromStdString(l->name())))) {
+                return;
+            }
+            doc_->history().push(std::make_unique<pe::RemoveLayerMaskCommand>(doc_->activeLayer()));
         });
 
         // New Adjustment Layer: a non-destructive layer that transforms the composite beneath it at
@@ -418,12 +447,14 @@ void MainWindow::buildMenuBar() {
         layerMenu->addAction(QStringLiteral("Edit Adjustment..."), this, [this] {
             if (doc_ == nullptr) return;
             const pe::Layer* a = doc_->findLayer(doc_->activeLayer());
-            if (a != nullptr && a->isAdjustment()) {
-                editAdjustmentLayer(doc_->activeLayer());
-            } else {
-                statusBar()->showMessage(QStringLiteral("Select an adjustment layer to edit."),
-                                         4000);
+            if (refuseIf(a == nullptr || !a->isAdjustment(), "layer.adjustment.edit",
+                         a == nullptr ? pe::RefusalCode::NoActiveLayer
+                                      : pe::RefusalCode::LayerNotAdjustment,
+                         "Layer > Edit Adjustment...",
+                         QStringLiteral("Select an adjustment layer to edit."))) {
+                return;
             }
+            editAdjustmentLayer(doc_->activeLayer());
         });
     }
     auto* selMenu = menuBar()->addMenu(QStringLiteral("&Select"));
@@ -459,37 +490,28 @@ void MainWindow::buildMenuBar() {
     // Edge refinements. Each prompts for an amount, applies it to a copy of the active selection,
     // and pushes the result as one undo step — but only when it actually changed the selection, so
     // a no-op (e.g. a region over the working cap) leaves no phantom undo entry.
-    const auto refineSelection = [this](auto&& apply) {
-        if (doc_ == nullptr || !doc_->selection().active()) return;
-        Selection target = doc_->selection();
-        apply(target);
-        if (!(target == doc_->selection())) {
-            doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(target)));
-        }
-    };
-    selMenu->addAction(QStringLiteral("Grow..."), this, [this, refineSelection]() {
+    // The prompt is UI; the operation is not. Splitting them keeps the refusal path
+    // reachable from a test without having to dismiss a modal dialog.
+    selMenu->addAction(QStringLiteral("Grow..."), this, [this]() {
         bool ok = false;
         const int px =
             QInputDialog::getInt(this, QStringLiteral("Grow Selection"),
                                  QStringLiteral("Expand by (pixels):"), 4, 1, 1000, 1, &ok);
-        if (ok) refineSelection([px](Selection& s) { s.grow(px); });
+        if (ok) growSelection(px);
     });
-    selMenu->addAction(QStringLiteral("Shrink..."), this, [this, refineSelection]() {
+    selMenu->addAction(QStringLiteral("Shrink..."), this, [this]() {
         bool ok = false;
         const int px =
             QInputDialog::getInt(this, QStringLiteral("Shrink Selection"),
                                  QStringLiteral("Contract by (pixels):"), 4, 1, 1000, 1, &ok);
-        if (ok) refineSelection([px](Selection& s) { s.shrink(px); });
+        if (ok) shrinkSelection(px);
     });
-    selMenu->addAction(QStringLiteral("Feather..."), this, [this, refineSelection]() {
+    selMenu->addAction(QStringLiteral("Feather..."), this, [this]() {
         bool ok = false;
         const double r =
             QInputDialog::getDouble(this, QStringLiteral("Feather Selection"),
                                     QStringLiteral("Radius (pixels):"), 4.0, 0.1, 250.0, 1, &ok);
-        if (!ok) return;
-        const auto rad = static_cast<float>(r);
-        const Rect canvas = doc_->canvasBounds();
-        refineSelection([rad, canvas](Selection& s) { s.feather(rad, canvas); });
+        if (ok) featherSelection(static_cast<float>(r));
     });
     auto* filterMenu = menuBar()->addMenu(QStringLiteral("F&ilter"));
     docMenus_.push_back(filterMenu);
@@ -611,6 +633,79 @@ void MainWindow::clearCursorPos() {
     // Placeholder rather than an empty string so the readout does not change width
     // as the pointer crosses the canvas edge.
     if (posLabel_ != nullptr) posLabel_->setText(QStringLiteral("X -  Y -"));
+}
+
+void MainWindow::refineSelection(const char* action,
+                                 const std::function<void(pe::Selection&)>& apply) {
+    if (doc_ == nullptr) return;
+    if (refuseIf(!doc_->selection().active(), "select.refine", pe::RefusalCode::NoSelection, action,
+                 QStringLiteral("There is no selection to refine. Select something first."))) {
+        return;
+    }
+    pe::Selection target = doc_->selection();
+    apply(target);
+    // Refusing a no-op matters as much as refusing an impossible one: pushing it would add
+    // a history entry the user then has to undo, and saying nothing leaves them believing
+    // the amount they typed was too small to see.
+    if (refuseIf(target == doc_->selection(), "select.refine", pe::RefusalCode::NoEffect, action,
+                 QStringLiteral("That left the selection unchanged. Try a larger amount."))) {
+        return;
+    }
+    doc_->history().push(std::make_unique<pe::SetSelectionCommand>(std::move(target)));
+}
+
+void MainWindow::growSelection(int px) {
+    refineSelection("Select > Grow...", [px](pe::Selection& s) { s.grow(px); });
+}
+
+void MainWindow::shrinkSelection(int px) {
+    refineSelection("Select > Shrink...", [px](pe::Selection& s) { s.shrink(px); });
+}
+
+void MainWindow::featherSelection(float radius) {
+    if (doc_ == nullptr) return;
+    const pe::Rect canvas = doc_->canvasBounds();
+    refineSelection("Select > Feather...",
+                    [radius, canvas](pe::Selection& s) { s.feather(radius, canvas); });
+}
+
+void MainWindow::reportRefusal(const pe::Refusal& r) {
+    if (!r.isRefusal()) return;
+    refusals_.push_back(r);
+    // Shown for longer than an ordinary transient message: a refusal is the answer to
+    // "why did nothing happen", and the user has to read it to get that answer.
+    statusBar()->showMessage(QString::fromStdString(r.explanation), 6000);
+}
+
+bool MainWindow::refuseIf(bool condition, const char* operation, pe::RefusalCode code,
+                          const char* action, const QString& explanation) {
+    if (!condition) return false;
+    reportRefusal(pe::refuse(operation, code, action, explanation.toStdString(),
+                             describeState().toStdString()));
+    return true;
+}
+
+QString MainWindow::describeState() const {
+    // The context field: enough to diagnose a refusal from a report, without the reporter
+    // having to reproduce it.
+    if (doc_ == nullptr) return QStringLiteral("no document");
+    const pe::Layer* active = doc_->findLayer(doc_->activeLayer());
+    const QString layer =
+        active == nullptr
+            ? QStringLiteral("none")
+            : QStringLiteral("%1 (%2%3)")
+                  .arg(QString::fromStdString(active->name()))
+                  .arg(active->kind() == pe::LayerKind::Group   ? QStringLiteral("group")
+                       : active->isAdjustment()                 ? QStringLiteral("adjustment")
+                       : active->kind() == pe::LayerKind::Pixel ? QStringLiteral("pixel")
+                                                                : QStringLiteral("other"))
+                  .arg(active->mask() != nullptr ? QStringLiteral(", masked") : QString());
+    return QStringLiteral("canvas %1x%2; active layer %3; selection %4; %5 undo step(s)")
+        .arg(doc_->canvasSize().width)
+        .arg(doc_->canvasSize().height)
+        .arg(layer)
+        .arg(doc_->selection().active() ? QStringLiteral("active") : QStringLiteral("none"))
+        .arg(doc_->history().undoDepth());
 }
 
 void MainWindow::updateActionStates() {
@@ -1560,17 +1655,33 @@ void MainWindow::exportDocumentAs() {
 
 void MainWindow::undo() {
     if (doc_ == nullptr) return;
+    if (refuseIf(canvas_ != nullptr && canvas_->tool().isStroking(), "edit.undo",
+                 pe::RefusalCode::StrokeInProgress, "Edit > Undo",
+                 QStringLiteral("Finish the stroke before undoing.")) ||
+        refuseIf(canvas_ != nullptr && canvas_->isTransforming(), "edit.undo",
+                 pe::RefusalCode::TransformInProgress, "Edit > Undo",
+                 QStringLiteral("Press Enter to apply the transform, or Esc to cancel it, "
+                                "before undoing."))) {
+        return;
+    }
     // A live brush stroke OR Free Transform applies an uncommitted preview straight to the tiles
     // (outside history); mutating history underneath it would desync the preview's whole-tile
     // snapshots (History::undo mutates the tiles, then the canvas reverts a now-stale preview over
     // them). Ignore undo/redo until the stroke/transform is committed (Esc cancels a transform).
-    if (canvas_ != nullptr && (canvas_->tool().isStroking() || canvas_->isTransforming())) return;
     doc_->history().undo();  // notifies -> canvas refreshes
 }
 
 void MainWindow::redo() {
     if (doc_ == nullptr) return;
-    if (canvas_ != nullptr && (canvas_->tool().isStroking() || canvas_->isTransforming())) return;
+    if (refuseIf(canvas_ != nullptr && canvas_->tool().isStroking(), "edit.redo",
+                 pe::RefusalCode::StrokeInProgress, "Edit > Redo",
+                 QStringLiteral("Finish the stroke before redoing.")) ||
+        refuseIf(canvas_ != nullptr && canvas_->isTransforming(), "edit.redo",
+                 pe::RefusalCode::TransformInProgress, "Edit > Redo",
+                 QStringLiteral("Press Enter to apply the transform, or Esc to cancel it, "
+                                "before redoing."))) {
+        return;
+    }
     doc_->history().redo();  // notifies -> canvas refreshes
 }
 
@@ -1671,6 +1782,7 @@ void MainWindow::buildDockPanels() {
 
     layers_ = new LayersPanel();
     connect(layers_, &LayersPanel::editAdjustmentRequested, this, &MainWindow::editAdjustmentLayer);
+    connect(layers_, &LayersPanel::refused, this, &MainWindow::reportRefusal);
     connect(layers_, &LayersPanel::editTextRequested, this, &MainWindow::editTextLayer);
     // Clicking a mask thumbnail targets it for brush painting; route that to the canvas so the
     // Brush paints the active layer's mask (black hides, white reveals) until the target is

@@ -9,8 +9,13 @@
 #include <QEventLoop>
 #include <QSlider>
 #include <QThread>
+#include "CanvasView.hpp"
 #include "EffectDialog.hpp"
 #include "MainWindow.hpp"
+#include "pe/core/Commands.hpp"
+#include "pe/core/PixelLayer.hpp"
+#include "pe/core/Refusal.hpp"
+#include "pe/core/Selection.hpp"
 #include "pe_test.hpp"
 
 #include <QAction>
@@ -564,4 +569,194 @@ PE_TEST(effectdialog_throttles_the_preview_during_a_drag) {
     QThread::msleep(60);
     QCoreApplication::processEvents(QEventLoop::AllEvents, 200);
     PE_CHECK(dlg.previewRebuildCount() > beforeTrailing);
+}
+
+namespace {
+
+// Find a menu action by its visible text, searching submenus. Tests drive the real
+// QActions rather than calling handlers directly, so they exercise the whole path the
+// user does: action triggered, operation refused, refusal emitted, shell renders it.
+QAction* findAction(QWidget* root, const QString& text) {
+    for (QAction* a : root->actions()) {
+        if (a == nullptr) continue;
+        if (a->text() == text) return a;
+        if (a->menu() != nullptr) {
+            if (QAction* found = findAction(a->menu(), text)) return found;
+        }
+    }
+    return nullptr;
+}
+
+std::unique_ptr<pe::Document> docWithPixelLayer() {
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{10, 20, 30, 255});
+    return doc;
+}
+
+}  // namespace
+
+PE_TEST(mainwindow_refuses_a_mask_delete_with_no_mask_and_changes_nothing) {
+    // The full path: an action the user can reach is triggered, the operation declines, a
+    // structured refusal is recorded, and the document is untouched. Asserting on the
+    // refusal CODE rather than the status-bar wording means the test survives rephrasing
+    // and cannot mistake an unrelated transient message for a refusal.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    const std::size_t before = w.document()->history().undoDepth();
+    w.clearRefusals();
+
+    QAction* del = findAction(w.menuBar(), QStringLiteral("Delete Mask"));
+    PE_CHECK(del != nullptr);
+    del->trigger();
+
+    PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(1));
+    PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::LayerHasNoMask);
+    PE_CHECK_EQ(w.document()->history().undoDepth(), before);  // state unchanged
+}
+
+PE_TEST(mainwindow_refusal_carries_the_fields_a_report_needs) {
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    w.clearRefusals();
+    QAction* toggle = findAction(w.menuBar(), QStringLiteral("Toggle Mask Enabled"));
+    PE_CHECK(toggle != nullptr);
+    toggle->trigger();
+
+    PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(1));
+    // Bail rather than indexing an empty vector: a test that crashes on its own failure
+    // takes every later test's result with it.
+    if (w.refusals().empty()) return;
+    const pe::Refusal& r = w.refusals().front();
+    PE_CHECK(r.isRefusal());
+    PE_CHECK(!r.operation.empty());    // which operation
+    PE_CHECK(!r.action.empty());       // which affordance reached it
+    PE_CHECK(!r.explanation.empty());  // what the user should do
+    PE_CHECK(!r.context.empty());      // enough to diagnose it
+    PE_CHECK(r.context.find("active layer") != std::string::npos);
+    PE_CHECK(r.category == pe::RefusalCategory::WrongTarget);
+    PE_CHECK(!r.retryMeaningful);  // repeating it unchanged cannot help
+    PE_CHECK(r.fixableByState);    // but adding a mask would
+}
+
+PE_TEST(mainwindow_refuses_a_selection_refine_with_no_selection) {
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    w.clearRefusals();
+    PE_CHECK(!w.document()->selection().active());
+
+    // Grow prompts for an amount, so drive the guard directly through the same public
+    // entry the action uses rather than trying to dismiss a modal dialog in a test.
+    w.growSelection(4);
+    PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(1));
+    PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::NoSelection);
+    if (w.refusals().empty()) return;
+    PE_CHECK(w.refusals().front().category == pe::RefusalCategory::NoTarget);
+}
+
+PE_TEST(mainwindow_refuses_a_selection_refine_that_would_change_nothing) {
+    // A no-op refinement is refused rather than pushed: committing it would add a history
+    // entry the user has to undo, and silence would leave them thinking the amount they
+    // typed was too small to see.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    pe::Selection sel;
+    sel.selectRect(pe::Rect{8, 8, 16, 16});
+    w.document()->history().push(std::make_unique<pe::SetSelectionCommand>(std::move(sel)));
+    const std::size_t before = w.document()->history().undoDepth();
+    w.clearRefusals();
+
+    w.growSelection(0);  // a zero-pixel grow cannot change anything
+    PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(1));
+    PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::NoEffect);
+    PE_CHECK_EQ(w.document()->history().undoDepth(), before);  // no phantom undo entry
+}
+
+PE_TEST(mainwindow_refuses_undo_during_a_live_stroke_and_says_it_is_retryable) {
+    // The one class of refusal where repeating the action later DOES help, which is why
+    // retryMeaningful is a field rather than a constant.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    auto* doc = w.document();
+    doc->history().push(std::make_unique<pe::AddLayerCommand>(
+        std::make_unique<pe::PixelLayer>("Second"), doc->topLevelCount()));
+    const std::size_t before = doc->history().undoDepth();
+
+    PE_CHECK(w.canvas()->tool().begin(*doc, pe::StrokePoint{pe::Vec2{8.0f, 8.0f}, 1.0f}, nullptr));
+    w.clearRefusals();
+    w.undo();
+
+    PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(1));
+    PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::StrokeInProgress);
+    if (!w.refusals().empty()) {
+        PE_CHECK(w.refusals().front().category == pe::RefusalCategory::Busy);
+        PE_CHECK(w.refusals().front().retryMeaningful);
+    }
+    PE_CHECK_EQ(doc->history().undoDepth(), before);  // history untouched mid-stroke
+    w.canvas()->tool().cancel(*doc);
+}
+
+PE_TEST(mainwindow_an_accepted_operation_emits_no_refusal) {
+    // The guard against the opposite failure. Without this, a shell-side change that
+    // reported a refusal unconditionally would look like an improvement: every action
+    // would explain itself, and every action would also claim to have been rejected.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    auto* doc = w.document();
+    w.clearRefusals();
+
+    // Adding a mask to a layer that has none is valid and must go through silently.
+    QAction* reveal = findAction(w.menuBar(), QStringLiteral("Reveal All"));
+    PE_CHECK(reveal != nullptr);
+    reveal->trigger();
+    PE_CHECK(doc->findLayer(doc->activeLayer())->mask() != nullptr);  // it really happened
+    PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(0));
+
+    // So is toggling that mask, and undoing afterwards.
+    QAction* toggle = findAction(w.menuBar(), QStringLiteral("Toggle Mask Enabled"));
+    PE_CHECK(toggle != nullptr);
+    toggle->trigger();
+    PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(0));
+    w.undo();
+    PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(0));
+
+    // And a refinement that really changes the selection.
+    pe::Selection sel;
+    sel.selectRect(pe::Rect{8, 8, 16, 16});
+    doc->history().push(std::make_unique<pe::SetSelectionCommand>(std::move(sel)));
+    w.growSelection(3);
+    PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(0));
+}
+
+PE_TEST(refusal_code_category_and_retry_cannot_disagree) {
+    // pe::refuse derives the category and the retry semantics from the code, so a caller
+    // cannot file one under the wrong class. Checked over every code rather than a sample,
+    // since the mapping is the thing a new code is most likely to get wrong.
+    const pe::RefusalCode codes[] = {
+        pe::RefusalCode::NoDocument,
+        pe::RefusalCode::NoActiveLayer,
+        pe::RefusalCode::NoSelection,
+        pe::RefusalCode::LayerNotPixel,
+        pe::RefusalCode::LayerHasNoMask,
+        pe::RefusalCode::LayerAlreadyHasMask,
+        pe::RefusalCode::LayerNotAdjustment,
+        pe::RefusalCode::LayerNotText,
+        pe::RefusalCode::LayerNotTopLevel,
+        pe::RefusalCode::LayerNotGroup,
+        pe::RefusalCode::NoEffect,
+        pe::RefusalCode::StrokeInProgress,
+        pe::RefusalCode::TransformInProgress,
+        pe::RefusalCode::PointOutsideCanvas,
+        pe::RefusalCode::OverSizeBudget,
+        pe::RefusalCode::Unsupported,
+    };
+    for (const pe::RefusalCode c : codes) {
+        const pe::Refusal r = pe::refuse("t", c, "a", "e");
+        PE_CHECK(r.isRefusal());
+        PE_CHECK(r.category == pe::categoryOf(c));
+        PE_CHECK_EQ(r.retryMeaningful, r.category == pe::RefusalCategory::Busy);
+        PE_CHECK_EQ(r.fixableByState, r.category != pe::RefusalCategory::Unsupported);
+    }
+    // None is not a refusal, so a default-constructed value cannot be mistaken for one.
+    PE_CHECK(!pe::Refusal{}.isRefusal());
 }

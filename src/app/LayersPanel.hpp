@@ -1,5 +1,8 @@
 #pragma once
 
+#include "pe/core/Refusal.hpp"
+
+#include <string>
 #include "pe/core/Document.hpp"
 
 #include <QWidget>
@@ -50,6 +53,8 @@ public:
     // Group the multi-selected top-level layers into a new group; dissolve the active
     // top-level group. Both are safe no-ops when the selection doesn't qualify.
     // MainWindow wires the Layer▸Group (Ctrl+G) / Ungroup (Ctrl+Shift+G) actions here.
+    // The context field for a panel refusal: what the selection actually was.
+    [[nodiscard]] std::string describeSelectionForRefusal() const;
     void groupSelected();
     void ungroupSelected();
 
@@ -59,6 +64,10 @@ public:
     void clearMaskTarget();
 
 signals:
+    // A panel operation declined. MainWindow renders it; the panel does not own a status
+    // bar and, more to the point, every refusal in the shell should go through one place.
+    void refused(const pe::Refusal& r);
+
     // Emitted when the user double-clicks an adjustment-layer row; MainWindow opens the
     // parameter dialog. (The panel owns the selection but not the adjustment dialogs.)
     void editAdjustmentRequested(pe::LayerId id);

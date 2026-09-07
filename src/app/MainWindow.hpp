@@ -5,10 +5,13 @@
 #include "pe/core/Document.hpp"  // pe::DocumentObserver (base class)
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Layer.hpp"  // pe::LayerId
+#include "pe/core/Refusal.hpp"
+#include "pe/core/Selection.hpp"
 
 #include <QMainWindow>
 #include <QString>
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -108,8 +111,6 @@ private:
     bool saveDocument();      // saves to the current path, or prompts if none
     bool saveDocumentAs();    // always prompts
     void exportDocumentAs();  // flatten + encode to a raster format with per-format options
-    void undo();
-    void redo();
     void onAddText(const QPointF& docPos);  // Type tool: prompt + rasterize + stamp text
     // Open the live-preview parameter dialog for an adjustment layer (double-click in the Layers
     // panel, or Layer▸Edit Adjustment). Commits one EditAdjustmentCommand on OK; a no-op for a
@@ -119,8 +120,47 @@ private:
     // model; commits one EditTextCommand on OK. A no-op for a non-text layer.
     void editTextLayer(pe::LayerId id);
     bool writeTo(const QString& path);
+
+public:
+    // Record and show a refused operation. Every refusal in the shell goes through here,
+    // so there is one place that decides how a refusal is presented and one place a test
+    // can look. See pe::Refusal for why this carries structure rather than a message.
+    // The window's own operations, reachable from the menus and the shortcuts. Public
+    // because that is what they are, not merely so tests can call them: a test drives the
+    // same entry point the user does rather than a private helper behind it.
+    void undo();
+    void redo();
     void setDocument(std::unique_ptr<pe::Document> doc, QString path);
+
+    void reportRefusal(const pe::Refusal& r);
+
+    // Selection refinements, separated from the dialogs that prompt for their amounts so
+    // the refusal path is reachable without a modal.
+    void growSelection(int px);
+    void shrinkSelection(int px);
+    void featherSelection(float radius);
+
+    // The open document, or null. Read-only borrow: MainWindow owns it.
+    [[nodiscard]] pe::Document* document() const noexcept { return doc_.get(); }
+    [[nodiscard]] CanvasView* canvas() const noexcept { return canvas_; }
+
+    // The refusals seen so far, newest last. For tests: an assertion on a status-bar
+    // string would break on any wording change, and could not tell a refusal apart from
+    // any other transient message.
+    [[nodiscard]] const std::vector<pe::Refusal>& refusals() const noexcept { return refusals_; }
+    [[nodiscard]] pe::RefusalCode lastRefusalCode() const noexcept {
+        return refusals_.empty() ? pe::RefusalCode::None : refusals_.back().code;
+    }
+    void clearRefusals() { refusals_.clear(); }
+
+private:
     void refreshTitle();
+    // Refuse `operation` and return false, so a guard reads as one expression:
+    //     if (!requireActiveLayer(...)) return;
+    [[nodiscard]] bool refuseIf(bool condition, const char* operation, pe::RefusalCode code,
+                                const char* action, const QString& explanation);
+    [[nodiscard]] QString describeState() const;  // the context field: what was true
+    void refineSelection(const char* action, const std::function<void(pe::Selection&)>& apply);
     void onColorPicked(const QColor& c);
 
     std::unique_ptr<pe::Document> doc_;
@@ -153,6 +193,7 @@ private:
 
     // Menus and actions that need an open document. Held so updateActionStates()
     // can gate them in one place rather than each call site guarding itself silently.
+    std::vector<pe::Refusal> refusals_;  // see refusals()
     std::vector<QMenu*> docMenus_;
     std::vector<QAction*> docActions_;
     QAction* undoAct_ = nullptr;
