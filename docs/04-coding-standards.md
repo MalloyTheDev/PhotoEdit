@@ -89,6 +89,19 @@ lane), and code review.
   references live in `tests/golden/`; regenerate with `PE_GOLDEN_UPDATE=1` and
   review the images before committing them. Pair every golden with a structural
   assertion, so a reference captured from a bug cannot silently become the spec.
+- **Tiled execution must be tested across a tile boundary.** Storage is tiled at
+  `kTileSize`, so a test on a canvas that fits in one tile validates the arithmetic
+  and nothing else: not tile adjacency, halo sourcing, cache identity, eviction, or
+  cross-tile spatial ownership. Any test intended to validate tiled semantics must
+  force at least one operation to cross a tile boundary, and any cache test must
+  exercise more than one distinct cache key. This is not hypothetical: forcing every
+  tile lookup in `Brush.cpp` to resolve tile (0,0) once left a 512-case suite green,
+  and a byte-identical parity test for the incremental blur passed on a single-tile
+  canvas while both its halo source and its cache key were broken.
+- **Report where an image changed, not only how much.** `tests/pixeldiff.hpp` gives
+  the changed-pixel bounds; a bounded operation should assert they sit inside its
+  mathematically permitted influence box. An implementation can be numerically
+  plausible and still touch pixels it had no business touching.
 - Tests must be deterministic and not depend on a GPU, display, or network.
 
 ## Formatting
