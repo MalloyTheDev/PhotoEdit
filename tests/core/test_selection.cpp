@@ -407,3 +407,42 @@ PE_TEST(selection_invert_twice_from_inactive_reselects_everything) {
     PE_CHECK_NEAR(s.coverage(5, 5), 1.0f);
     PE_CHECK_NEAR(s.coverage(19, 19), 1.0f);
 }
+
+PE_TEST(selection_feather_preserves_off_canvas_coverage) {
+    // feather clamps its working region to the canvas on purpose, so a canvas-filling
+    // selection is not faded at the border. But it then handed that clamped region to
+    // loadMask, which clears every tile first, so any coverage outside the canvas was
+    // destroyed rather than merely left alone. grow and shrink deliberately preserve it
+    // (Selection.hpp says so), and a selection can hold off-canvas coverage: fillRect
+    // does not clamp, and CropCommand shifts selections across the origin.
+    const Rect canvas{0, 0, 64, 64};
+    Selection s;
+    s.selectRect(Rect{-20, -20, 30, 30});  // straddles the canvas origin
+    PE_CHECK_EQ(static_cast<int>(s.value(-10, -10)), 255);
+    PE_CHECK_EQ(static_cast<int>(s.value(5, 5)), 255);
+
+    s.feather(2.0f, canvas);
+    PE_CHECK(s.active());
+
+    // Well outside the canvas and well inside the original rect: untouched by a blur
+    // whose region stops at the canvas edge, so it must still be fully selected.
+    PE_CHECK_EQ(static_cast<int>(s.value(-18, -18)), 255);
+    PE_CHECK_EQ(static_cast<int>(s.value(-15, -15)), 255);
+    // The on-canvas part still got feathered.
+    const int inside = static_cast<int>(s.value(3, 3));
+    PE_CHECK(inside > 0);
+}
+
+PE_TEST(selection_grow_and_feather_agree_about_off_canvas) {
+    // The three refinements should not disagree about whether the exterior exists.
+    const Rect canvas{0, 0, 64, 64};
+    Selection a;
+    a.selectRect(Rect{-10, 20, 40, 20});
+    a.grow(2);
+    PE_CHECK(a.value(-11, 30) > 0);  // grow reaches further off-canvas
+
+    Selection b;
+    b.selectRect(Rect{-10, 20, 40, 20});
+    b.feather(2.0f, canvas);
+    PE_CHECK_EQ(static_cast<int>(b.value(-8, 30)), 255);  // feather leaves it alone
+}

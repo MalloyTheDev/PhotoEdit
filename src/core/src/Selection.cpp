@@ -118,6 +118,22 @@ PixelBuffer Selection::toMask(Rect bounds) const {
     return out;
 }
 
+void Selection::writeMaskRegion(const PixelBuffer& mask, int originX, int originY) {
+    // Replace coverage INSIDE the mask's region and leave everything outside it alone.
+    // loadMask clears every tile first, which is right when the region provably covers the
+    // whole selection (grow and shrink expand tightBounds, which is exact over non-zero
+    // coverage) but destroys coverage when it does not. feather clamps its region to the
+    // canvas on purpose, so it is the one caller whose region can be smaller.
+    const Rect region{originX, originY, mask.width(), mask.height()};
+    if (mask.isEmpty() || rejectFill(region)) return;
+    for (int y = 0; y < mask.height(); ++y) {
+        for (int x = 0; x < mask.width(); ++x) {
+            setValue(originX + x, originY + y, mask.at(x, y).r);
+        }
+    }
+    dropEmptyTiles();  // keep selectedBounds tight (don't retain all-zero tiles)
+}
+
 void Selection::loadMask(const PixelBuffer& mask, int originX, int originY) {
     tiles_.clear();
     // Apply the same caps as the fill paths: empty, out-of-range origin (so originX+x
@@ -450,7 +466,10 @@ void Selection::feather(float radius, Rect canvas) {
     PixelBuffer mask = toMask(region);
     if (mask.isEmpty()) return;
     gaussianMask(mask, sigma);
-    loadMask(mask, region.left(), region.top());
+    // NOT loadMask: `region` is clamped to the canvas, so anything selected outside the
+    // canvas is not in `mask` and clearing first would delete it. grow/shrink can clear
+    // because their region is unclamped and therefore covers the whole selection.
+    writeMaskRegion(mask, region.left(), region.top());
     if (tiles_.empty()) selectNone();
 }
 

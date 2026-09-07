@@ -101,6 +101,10 @@ private:
 
     [[nodiscard]] uint8_t stored(int x, int y) const noexcept;  // 0 if absent
     void setValue(int x, int y, uint8_t v);
+    // Replace coverage inside the mask's region, leaving coverage outside it untouched.
+    // loadMask() clears everything first, which is only safe when the region provably
+    // covers the whole selection.
+    void writeMaskRegion(const PixelBuffer& mask, int originX, int originY);
     void fillRect(Rect r, uint8_t v);
     void dropEmptyTiles();  // erase all-zero tiles (keeps selectedBounds tight)
 
