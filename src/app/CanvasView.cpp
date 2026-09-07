@@ -797,12 +797,23 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
     if (toolMode_ == Tool::Wand) {
         const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
         const pe::PixelBuffer buf = doc_->compositeImage();  // sample the composited canvas
-        if (!buf.isEmpty()) {
-            pe::Selection sel =
-                pe::magicWandSelection(buf, static_cast<int>(std::lround(d.x)),
-                                       static_cast<int>(std::lround(d.y)), wandTolerance_);
-            if (sel.active())
-                doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(sel)));
+        if (buf.isEmpty()) {
+            // compositeImage() returns nothing above kMaxCompositeImagePixels, so on a
+            // canvas past that cap the wand used to select nothing and say nothing.
+            emit toolMessage(
+                QStringLiteral("Magic Wand needs to flatten the image, and this one is over "
+                               "the %1 megapixel limit.")
+                    .arg(pe::kMaxCompositeImagePixels / 1'000'000));
+            return;
+        }
+        pe::Selection sel =
+            pe::magicWandSelection(buf, static_cast<int>(std::lround(d.x)),
+                                   static_cast<int>(std::lround(d.y)), wandTolerance_);
+        if (sel.active()) {
+            doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(sel)));
+        } else if (doc_->canvasBounds().contains(pe::Point{static_cast<int>(std::lround(d.x)),
+                                                           static_cast<int>(std::lround(d.y))})) {
+            emit toolMessage(QStringLiteral("Magic Wand selected nothing at that point."));
         }
         return;
     }

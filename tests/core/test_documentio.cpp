@@ -1,3 +1,4 @@
+#include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/PixelLayer.hpp"
@@ -295,4 +296,29 @@ PE_TEST(documentio_save_replaces_the_destination_rather_than_writing_into_it) {
     PE_CHECK_EQ(countLeftoverTemps(dir), static_cast<std::size_t>(0));
 
     std::filesystem::remove_all(dir, ec);
+}
+
+PE_TEST(export_over_the_composite_cap_fails_instead_of_writing_an_empty_raster) {
+    // compositeImage() returns nothing above kMaxCompositeImagePixels, and every raster
+    // format flattens through it. The encoders must refuse rather than emit a valid but
+    // empty image, because saveDocument() only knows the export failed if the byte
+    // vector comes back empty. The project's stated target document size is 30000 square,
+    // which is about 14 times this cap, so this is the ordinary case at that size and
+    // not an exotic one.
+    const int64_t side = 9000;  // 81 MP, over the 64 MP cap
+    PE_CHECK(side * side > kMaxCompositeImagePixels);
+    auto doc = Document::createBlank(Size{static_cast<int>(side), static_cast<int>(side)});
+    PE_CHECK(doc != nullptr);
+    PE_CHECK(doc->compositeImage().isEmpty());
+
+    for (const ImageFormat fmt :
+         {ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Tiff, ImageFormat::WebP}) {
+        // A codec not built into this binary also returns empty, which is the same
+        // contract, so this holds in every lane.
+        PE_CHECK(exportDocument(*doc, fmt).empty());
+    }
+
+    // The native format serializes tiles directly and so has no such limit. It is the
+    // route out that the app's failure message points the user at.
+    PE_CHECK(!exportDocument(*doc, ImageFormat::Native).empty());
 }

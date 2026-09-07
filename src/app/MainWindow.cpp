@@ -19,6 +19,7 @@
 #include "pe/core/Brush.hpp"  // pe::PaintCommand (effect-dialog command factories)
 #include "pe/core/Color.hpp"
 #include "pe/core/Commands.hpp"
+#include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Filter.hpp"
@@ -1028,6 +1029,32 @@ void MainWindow::openDocument() {
     statusBar()->showMessage(QStringLiteral("Opened %1").arg(path), 3000);
 }
 
+QString saveFailureReason(const pe::Document* doc, const QString& path) {
+    // The native .pedoc format serializes tiles directly, so it has no flatten limit and
+    // is the way out of the oversize case.
+    const pe::ImageFormat fmt = pe::formatFromExtension(path.toStdString());
+    const pe::Size canvas = doc != nullptr ? doc->canvasSize() : pe::Size{0, 0};
+    const int64_t area = static_cast<int64_t>(canvas.width) * canvas.height;
+    if (fmt != pe::ImageFormat::Native && fmt != pe::ImageFormat::Unknown &&
+        area > pe::kMaxCompositeImagePixels) {
+        return QStringLiteral(
+                   "\"%1\" is %2 x %3 (%4 megapixels). Flattening to a raster format is "
+                   "limited to %5 megapixels.\n\nSave as .pedoc to keep the full document.")
+            .arg(path)
+            .arg(canvas.width)
+            .arg(canvas.height)
+            .arg(area / 1'000'000)
+            .arg(pe::kMaxCompositeImagePixels / 1'000'000);
+    }
+    if (fmt == pe::ImageFormat::Unknown) {
+        return QStringLiteral("\"%1\" has no extension this build can write.").arg(path);
+    }
+    return QStringLiteral(
+               "Could not write \"%1\". Check that the folder exists and is "
+               "writable, and that there is enough free space.")
+        .arg(path);
+}
+
 bool MainWindow::saveDocument() {
     if (currentPath_.isEmpty()) return saveDocumentAs();
     return writeTo(currentPath_);
@@ -1045,7 +1072,7 @@ bool MainWindow::writeTo(const QString& path) {
     if (doc_ == nullptr) return false;
     if (!pe::saveDocument(*doc_, path.toStdString())) {
         QMessageBox::warning(this, QStringLiteral("Save failed"),
-                             QStringLiteral("Could not save \"%1\".").arg(path));
+                             saveFailureReason(doc_.get(), path));
         return false;
     }
     // Tell history the on-disk state now matches; this clears the dirty flag

@@ -33,6 +33,16 @@ class PropertiesPanel;
 // shows the active document on a CanvasView. Color, Properties, Layers and History are
 // real panels; Swatches, Gradients, Patterns, Adjustments, Libraries, Channels and
 // Paths are still placeholders. See docs/systems/24-ui-workspace.md.
+// Why pe::saveDocument() refused, phrased for a dialog. Three cases the app can tell
+// apart: a canvas too large to flatten to a raster format (every raster format goes
+// through compositeImage(), which returns nothing above kMaxCompositeImagePixels, so
+// such a save can never succeed and "Could not save" sends the user to check disk
+// permissions instead), an extension this build cannot write, and an IO failure.
+//
+// A free function rather than a member because it is a pure function of the document
+// and the path, which also makes it testable without opening up MainWindow.
+[[nodiscard]] QString saveFailureReason(const pe::Document* doc, const QString& path);
+
 class MainWindow : public QMainWindow, public pe::DocumentObserver {
     Q_OBJECT
 

@@ -490,3 +490,27 @@ PE_TEST(mainwindow_undo_and_redo_track_the_history) {
     undo->trigger();
     PE_CHECK(redo->isEnabled());  // and now there is something to redo
 }
+
+PE_TEST(mainwindow_save_failure_names_the_flatten_limit) {
+    // "Could not save" sent the user looking at disk permissions when the real cause was
+    // that the canvas is too large to flatten. Every raster format goes through
+    // compositeImage(), which returns nothing above kMaxCompositeImagePixels, so on a
+    // canvas past that cap a raster save can never succeed and the message has to say so.
+    auto doc = pe::Document::createBlank(pe::Size{9000, 9000});  // 81 MP, over the cap
+    PE_CHECK(doc != nullptr);
+
+    const QString png = pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/big.png"));
+    PE_CHECK(png.contains(QStringLiteral("megapixel")));
+    PE_CHECK(png.contains(QStringLiteral("9000")));
+    PE_CHECK(png.contains(QStringLiteral(".pedoc")));  // and where to go instead
+
+    // The native format has no such limit, so its failure must not blame the size.
+    const QString native =
+        pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/big.pedoc"));
+    PE_CHECK(!native.contains(QStringLiteral("megapixel")));
+
+    // An extension this build cannot write is its own distinct case.
+    const QString unknown = pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/big.xyz"));
+    PE_CHECK(!unknown.contains(QStringLiteral("megapixel")));
+    PE_CHECK(unknown != native);
+}
