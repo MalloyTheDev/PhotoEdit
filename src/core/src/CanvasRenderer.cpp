@@ -10,6 +10,38 @@
 namespace pe {
 
 namespace {
+
+// The largest power-of-two downscale that keeps `region` within `cap` output pixels.
+//
+// A power of two that also divides kTileSize is what makes the cached scaled composite
+// updatable one tile at a time: with a tile-aligned region, every output pixel is the
+// average of an s x s block lying entirely inside ONE tile, so no output pixel depends on
+// two tiles and a tile can be rewritten without touching its neighbours. An arbitrary
+// scale factor would let a block straddle a tile edge, and then an incremental update
+// would need the neighbour's old contribution to subtract, which is the tile cache again.
+//
+// s never needs to exceed kTileSize for any representable canvas: reaching that would take
+// a region of more than 65,536 times the cap, which is past kMaxCanvasDimension squared.
+int scaledFactorFor(Rect alignedRegion, int64_t cap) {
+    int s = 1;
+    while (s < kTileSize) {
+        const int64_t ow = alignedRegion.width / s;
+        const int64_t oh = alignedRegion.height / s;
+        if (ow * oh <= cap) break;
+        s *= 2;
+    }
+    return s;
+}
+
+// Grow a rect out to whole tiles. See scaledFactorFor for why alignment matters.
+Rect tileAligned(Rect r) {
+    const TileSpan span = tilesForRect(r);
+    const int x = span.colBegin * kTileSize;
+    const int y = span.rowBegin * kTileSize;
+    return Rect{x, y, (span.colEnd - span.colBegin) * kTileSize,
+                (span.rowEnd - span.rowBegin) * kTileSize};
+}
+
 // A single invalidate() spanning more tiles than this drops the whole cache
 // instead of iterating (bounds invalidate cost on document-wide changes).
 constexpr int64_t kMaxInvalidateTiles = 16384;
@@ -44,6 +76,9 @@ void CanvasRenderer::invalidate(Rect docRect) {
             const Key key = keyOf(TileCoord{col, row});
             // Only track cached tiles; an absent tile recomposites on miss anyway.
             if (index_.find(key) != index_.end()) dirty_.insert(key);
+            // The retained scaled composite has no per-tile miss to fall back on, so it
+            // needs the mark whether or not the full-res tile happens to be cached.
+            if (scaledValid_) scaledDirty_.insert(key);
         }
     }
 }
@@ -52,6 +87,9 @@ void CanvasRenderer::invalidateAll() noexcept {
     lru_.clear();
     index_.clear();
     dirty_.clear();
+    // Unknown extent, so the retained scaled composite cannot be patched: drop it.
+    scaledValid_ = false;
+    scaledDirty_.clear();
 }
 
 void CanvasRenderer::evictToBudget() noexcept {
@@ -138,6 +176,94 @@ PixelBuffer CanvasRenderer::renderRegion(Rect docRect) {
         }
     }
     return out;
+}
+
+void CanvasRenderer::writeScaledTile(TileCoord c) {
+    const int s = scaledScale_;
+    const int block = kTileSize / s;  // output pixels this tile owns, per side
+    const int ox0 = (c.col * kTileSize - scaledRegion_.x) / s;
+    const int oy0 = (c.row * kTileSize - scaledRegion_.y) / s;
+    if (ox0 < 0 || oy0 < 0 || ox0 + block > scaledCache_.width() ||
+        oy0 + block > scaledCache_.height()) {
+        return;  // outside the cached region
+    }
+    compositeTileUncached(c);  // float result in scratch_, deliberately not cached
+    for (int by = 0; by < block; ++by) {
+        for (int bx = 0; bx < block; ++bx) {
+            // Average in PREMULTIPLIED float: averaging straight alpha across transparent
+            // pixels biases the colour toward black. Same reasoning as renderRegionScaled.
+            double sr = 0.0;
+            double sg = 0.0;
+            double sb = 0.0;
+            double sa = 0.0;
+            for (int y = 0; y < s; ++y) {
+                const std::size_t row =
+                    static_cast<std::size_t>(by * s + y) * static_cast<std::size_t>(kTileSize);
+                for (int x = 0; x < s; ++x) {
+                    const Rgbaf& p = scratch_[row + static_cast<std::size_t>(bx * s + x)];
+                    sr += static_cast<double>(p.r) * p.a;
+                    sg += static_cast<double>(p.g) * p.a;
+                    sb += static_cast<double>(p.b) * p.a;
+                    sa += p.a;
+                }
+            }
+            const double n = static_cast<double>(s) * static_cast<double>(s);
+            Rgbaf px{};
+            px.a = static_cast<float>(sa / n);
+            if (sa > 0.0) {  // un-premultiply back to straight alpha
+                px.r = static_cast<float>(sr / sa);
+                px.g = static_cast<float>(sg / sa);
+                px.b = static_cast<float>(sb / sa);
+            }
+            scaledCache_.set(ox0 + bx, oy0 + by, toRgba8(px));
+        }
+    }
+}
+
+const PixelBuffer& CanvasRenderer::renderRegionScaledCached(Rect docRegion, int maxOutputPixels,
+                                                            Rect& outRegion) {
+    const Rect aligned = tileAligned(docRegion);
+    outRegion = aligned;
+    if (aligned.isEmpty() || maxOutputPixels <= 0) {
+        scaledValid_ = false;
+        scaledCache_ = PixelBuffer{};
+        return scaledCache_;
+    }
+    const int64_t cap = std::min<int64_t>(maxOutputPixels, kMaxCompositeImagePixels);
+    const int s = scaledFactorFor(aligned, cap);
+
+    const TileSpan span = tilesForRect(aligned);
+    const bool sameShape =
+        scaledValid_ && scaledRegion_ == aligned && scaledScale_ == s && scaledCap_ == cap;
+    if (!sameShape) {
+        // Shape changed (pan, zoom, resize, first paint): rebuild every tile once.
+        scaledRegion_ = aligned;
+        scaledScale_ = s;
+        scaledCap_ = static_cast<int>(cap);
+        scaledCache_ = PixelBuffer(aligned.width / s, aligned.height / s, Rgba8{});
+        scaledDirty_.clear();
+        scaledValid_ = true;
+        for (int row = span.rowBegin; row < span.rowEnd; ++row) {
+            for (int col = span.colBegin; col < span.colEnd; ++col) {
+                writeScaledTile(TileCoord{col, row});
+            }
+        }
+        return scaledCache_;
+    }
+
+    // Same shape: rewrite only the tiles a document change marked. This is what makes
+    // painting at a zoomed-out view cost the dabs rather than the whole visible span.
+    if (!scaledDirty_.empty()) {
+        for (const Key& k : scaledDirty_) {
+            if (k.first < span.colBegin || k.first >= span.colEnd || k.second < span.rowBegin ||
+                k.second >= span.rowEnd) {
+                continue;  // outside what the buffer covers
+            }
+            writeScaledTile(TileCoord{k.first, k.second});
+        }
+        scaledDirty_.clear();
+    }
+    return scaledCache_;
 }
 
 PixelBuffer CanvasRenderer::renderRegionScaled(Rect docRegion, int maxOutputPixels) {

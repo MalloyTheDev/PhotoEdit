@@ -1,6 +1,9 @@
+#include <cmath>
+#include <cstdint>
 #include "pe/core/CanvasRenderer.hpp"
 #include "pe/core/Commands.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/PixelLayer.hpp"
 #include "pe/core/SolidColorLayer.hpp"
 #include "pe_test.hpp"
 
@@ -238,4 +241,208 @@ PE_TEST(renderer_rejects_far_offset_origin_without_overflow) {
     PE_CHECK(r.renderRegionScaled(farY, 4096).isEmpty());
     // A normal region still renders (guard didn't over-reject).
     PE_CHECK(!r.renderRegion(doc->canvasBounds()).isEmpty());
+}
+
+namespace {
+
+// A document several tiles across with per-tile colour, so a wrong tile, a wrong block
+// offset or a stale block is visible rather than averaged away. Per the standing rule,
+// every case here spans more than one tile.
+std::unique_ptr<Document> tiledDoc(int cols, int rows) {
+    auto doc = Document::createBlank(Size{cols * kTileSize, rows * kTileSize});
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            pl->tiles().fillRect(Rect{c * kTileSize, r * kTileSize, kTileSize, kTileSize},
+                                 Rgba8{static_cast<std::uint8_t>(20 + 40 * c),
+                                       static_cast<std::uint8_t>(20 + 40 * r), 180, 255});
+        }
+    }
+    return doc;
+}
+
+bool sameBuffer(const PixelBuffer& a, const PixelBuffer& b) {
+    if (a.width() != b.width() || a.height() != b.height()) return false;
+    for (int y = 0; y < a.height(); ++y) {
+        for (int x = 0; x < a.width(); ++x) {
+            if (!(a.at(x, y) == b.at(x, y))) return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+PE_TEST(scaledcache_incremental_update_equals_a_full_rebuild) {
+    // The property the whole design rests on: patching only the tiles that changed must
+    // land on exactly what rebuilding everything would. If it does not, a zoomed-out view
+    // shows stale pixels that no repaint corrects, which is worse than being slow.
+    auto doc = tiledDoc(4, 3);
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    const Rect all{0, 0, 4 * kTileSize, 3 * kTileSize};
+    const int cap = 4096;  // forces a real downscale over this region
+
+    CanvasRenderer r(*doc);
+    Rect cov{};
+    (void)r.renderRegionScaledCached(all, cap, cov);
+
+    // Change two tiles, one of them not adjacent to the other.
+    pl->tiles().fillRect(Rect{kTileSize + 10, 10, 60, 60}, Rgba8{255, 0, 0, 255});
+    r.invalidate(Rect{kTileSize + 10, 10, 60, 60});
+    pl->tiles().fillRect(Rect{3 * kTileSize + 5, 2 * kTileSize + 5, 40, 40}, Rgba8{0, 255, 0, 255});
+    r.invalidate(Rect{3 * kTileSize + 5, 2 * kTileSize + 5, 40, 40});
+
+    const PixelBuffer patched = r.renderRegionScaledCached(all, cap, cov);  // incremental
+
+    CanvasRenderer fresh(*doc);  // same document, nothing cached
+    Rect cov2{};
+    const PixelBuffer rebuilt = fresh.renderRegionScaledCached(all, cap, cov2);
+
+    PE_CHECK(cov == cov2);
+    PE_CHECK(sameBuffer(patched, rebuilt));
+}
+
+PE_TEST(scaledcache_covers_the_tile_aligned_region_it_reports) {
+    // The buffer covers a region grown to whole tiles, and the caller has to draw it to
+    // THAT rect. Reporting one rect and covering another would shift the whole image.
+    auto doc = tiledDoc(3, 2);
+    CanvasRenderer r(*doc);
+    Rect cov{};
+    // A request deliberately off the tile grid.
+    const Rect want{37, 91, 2 * kTileSize, kTileSize + 40};
+    const PixelBuffer buf = r.renderRegionScaledCached(want, 4096, cov);
+
+    PE_CHECK(cov.x % kTileSize == 0);
+    PE_CHECK(cov.y % kTileSize == 0);
+    PE_CHECK(cov.width % kTileSize == 0);
+    PE_CHECK(cov.height % kTileSize == 0);
+    PE_CHECK(cov.left() <= want.left() && cov.top() <= want.top());
+    PE_CHECK(cov.right() >= want.right() && cov.bottom() >= want.bottom());
+    PE_CHECK(!buf.isEmpty());
+    // The buffer's own extent has to agree with the region and the scale it chose, or the
+    // stretch the caller applies is wrong.
+    PE_CHECK_EQ(cov.width % buf.width(), 0);
+    PE_CHECK_EQ(cov.height % buf.height(), 0);
+    PE_CHECK_EQ(cov.width / buf.width(), cov.height / buf.height());
+}
+
+PE_TEST(scaledcache_reuses_the_buffer_when_nothing_changed) {
+    // The point of retaining it: a repaint that changes neither the region nor the document
+    // must not recomposite. recompositeCount is the engine's own counter, so this measures
+    // work done rather than wall clock.
+    auto doc = tiledDoc(4, 3);
+    const Rect all{0, 0, 4 * kTileSize, 3 * kTileSize};
+    CanvasRenderer r(*doc);
+    Rect cov{};
+    (void)r.renderRegionScaledCached(all, 4096, cov);
+    const std::uint64_t afterFirst = r.recompositeCount();
+    PE_CHECK(afterFirst > 0);
+
+    for (int i = 0; i < 5; ++i) (void)r.renderRegionScaledCached(all, 4096, cov);
+    PE_CHECK_EQ(r.recompositeCount(), afterFirst);  // five repaints, no work
+}
+
+PE_TEST(scaledcache_repaints_only_the_tiles_that_changed) {
+    // And the interactive property: one dab must cost one tile, not the visible span.
+    auto doc = tiledDoc(4, 3);
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    const Rect all{0, 0, 4 * kTileSize, 3 * kTileSize};
+    CanvasRenderer r(*doc);
+    Rect cov{};
+    (void)r.renderRegionScaledCached(all, 4096, cov);
+    const std::uint64_t afterFirst = r.recompositeCount();
+
+    pl->tiles().fillRect(Rect{20, 20, 8, 8}, Rgba8{255, 255, 0, 255});
+    r.invalidate(Rect{20, 20, 8, 8});
+    (void)r.renderRegionScaledCached(all, 4096, cov);
+
+    // Exactly one tile recomposited, out of the twelve the region spans.
+    PE_CHECK_EQ(r.recompositeCount() - afterFirst, static_cast<std::uint64_t>(1));
+}
+
+PE_TEST(scaledcache_rebuilds_when_the_region_or_scale_moves) {
+    // Panning or zooming changes the shape, and a buffer built for one shape cannot be
+    // patched into another. It has to rebuild rather than return the wrong pixels.
+    auto doc = tiledDoc(4, 3);
+    const Rect a{0, 0, 4 * kTileSize, 3 * kTileSize};
+    const Rect b{kTileSize, 0, 3 * kTileSize, 3 * kTileSize};
+    CanvasRenderer r(*doc);
+    Rect cov{};
+    const PixelBuffer first = r.renderRegionScaledCached(a, 4096, cov);
+    const Rect covA = cov;
+    const PixelBuffer second = r.renderRegionScaledCached(b, 4096, cov);
+    PE_CHECK(!(cov == covA));
+
+    CanvasRenderer fresh(*doc);
+    Rect cov2{};
+    const PixelBuffer freshB = fresh.renderRegionScaledCached(b, 4096, cov2);
+    PE_CHECK(cov == cov2);
+    PE_CHECK(sameBuffer(second, freshB));
+}
+
+PE_TEST(scaledcache_is_dropped_by_a_whole_document_invalidation) {
+    // invalidateAll has no extent to patch from, so the retained buffer must go rather than
+    // be served stale.
+    auto doc = tiledDoc(3, 2);
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    const Rect all{0, 0, 3 * kTileSize, 2 * kTileSize};
+    CanvasRenderer r(*doc);
+    Rect cov{};
+    (void)r.renderRegionScaledCached(all, 4096, cov);
+
+    pl->tiles().fillRect(all, Rgba8{7, 7, 7, 255});
+    r.invalidateAll();
+    const PixelBuffer after = r.renderRegionScaledCached(all, 4096, cov);
+
+    CanvasRenderer fresh(*doc);
+    Rect cov2{};
+    const PixelBuffer rebuilt = fresh.renderRegionScaledCached(all, 4096, cov2);
+    PE_CHECK(sameBuffer(after, rebuilt));
+}
+
+PE_TEST(scaledcache_matches_a_box_average_of_the_full_resolution_composite) {
+    // Exactness, not merely self-consistency: each output pixel must be the premultiplied
+    // box average of the block it covers in the full-resolution composite. Without this the
+    // incremental path could be internally consistent and still wrong.
+    auto doc = tiledDoc(2, 2);
+    const Rect all{0, 0, 2 * kTileSize, 2 * kTileSize};
+    CanvasRenderer r(*doc);
+    Rect cov{};
+    const PixelBuffer scaled = r.renderRegionScaledCached(all, 1024, cov);
+    PE_CHECK(cov == all);
+    const int s = all.width / scaled.width();
+    PE_CHECK(s > 1);
+
+    CanvasRenderer fullRes(*doc);
+    const PixelBuffer full = fullRes.renderRegion(all);
+    PE_CHECK(!full.isEmpty());
+
+    for (int oy = 0; oy < scaled.height(); ++oy) {
+        for (int ox = 0; ox < scaled.width(); ++ox) {
+            double sr = 0.0;
+            double sg = 0.0;
+            double sb = 0.0;
+            double sa = 0.0;
+            for (int y = 0; y < s; ++y) {
+                for (int x = 0; x < s; ++x) {
+                    const Rgba8 p = full.at(ox * s + x, oy * s + y);
+                    const double a = p.a / 255.0;
+                    sr += (p.r / 255.0) * a;
+                    sg += (p.g / 255.0) * a;
+                    sb += (p.b / 255.0) * a;
+                    sa += a;
+                }
+            }
+            const double n = static_cast<double>(s) * s;
+            const Rgba8 got = scaled.at(ox, oy);
+            PE_CHECK(std::abs(static_cast<int>(got.a) -
+                              static_cast<int>(std::lround(sa / n * 255.0))) <= 1);
+            if (sa > 0.0) {
+                PE_CHECK(std::abs(static_cast<int>(got.r) -
+                                  static_cast<int>(std::lround(sr / sa * 255.0))) <= 1);
+                PE_CHECK(std::abs(static_cast<int>(got.g) -
+                                  static_cast<int>(std::lround(sg / sa * 255.0))) <= 1);
+            }
+        }
+    }
 }

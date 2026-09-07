@@ -518,15 +518,22 @@ void CanvasView::paintEvent(QPaintEvent*) {
     const pe::Rect canvas{0, 0, cs.width, cs.height};
     const pe::Rect vis = view_.visibleDocRect(pe::Size{width(), height()}).intersected(canvas);
     if (!vis.isEmpty()) {
+        // Branch on the VIEWPORT, not the engine's 64 MP composite cap. The old test meant a
+        // repaint at 12% zoom on an 8000 square document allocated and filled a 64 MP buffer
+        // to draw 1.6 MP of screen: 195 ms, and 2.8 seconds cold, while zooming out FURTHER
+        // got cheaper. The curve was inverted.
+        //
+        // Even with every tile cached, the full-resolution path still assembles an output
+        // buffer the size of the visible region, so its cost is O(visible area) whatever the
+        // cache does. That is why the test is the ratio and not whether the tiles fit.
+        const std::int64_t viewportPx =
+            std::max<std::int64_t>(1, static_cast<std::int64_t>(width()) * height());
         const std::int64_t visArea =
             static_cast<std::int64_t>(vis.width) * static_cast<std::int64_t>(vis.height);
-        if (visArea <= pe::kMaxCompositeImagePixels) {
-            // Keep the cache at least as large as the visible tile span (plus a one-viewport pan
-            // margin) so no visible tile evicts another mid-frame — otherwise a zoomed-out view
-            // spanning more than the default budget would recomposite every tile every paint.
-            const std::size_t visTiles = static_cast<std::size_t>(pe::tilesForRect(vis).count());
-            renderer_->setCacheBudgetTiles(
-                std::max<std::size_t>(pe::kDefaultDisplayCacheTiles, visTiles * 2 + 16));
+        if (visArea <= viewportPx) {
+            // Fits the cache, so the full-resolution path is both exact and incremental: it
+            // recomposites only the tiles that actually changed, which is what keeps
+            // painting cheap. This is the interactive case and it must stay on this path.
             const pe::PixelBuffer buf = renderer_->renderRegion(vis);  // alive through drawImage
             if (!buf.isEmpty()) {
                 const QImage img(reinterpret_cast<const uchar*>(buf.data()), buf.width(),
@@ -534,16 +541,28 @@ void CanvasView::paintEvent(QPaintEvent*) {
                 painter.drawImage(QPointF(vis.x, vis.y), img);
             }
         } else {
-            // Over the composite budget: a cache-bypassing downscale bounded to the viewport's
-            // pixel count (no point compositing finer than the screen shows), drawn stretched to
-            // the visible doc rect. SmoothPixmapTransform (set above for zoom<1) smooths the
-            // upscale.
-            const int cap = std::max(1, width() * height());
-            const pe::PixelBuffer buf = renderer_->renderRegionScaled(vis, cap);
+            // More visible tiles than the cache can hold. The full-res path would recomposite
+            // all of them every frame anyway (they evict each other) AND allocate a buffer far
+            // larger than the screen, so composite to about the viewport's pixel count instead
+            // and stretch. Cost is then bounded by the window rather than the document.
+            //
+            // Cached, so a repaint that changes neither the region nor the document is free:
+            // a resize, or another window uncovering the canvas, no longer recomposites.
+            // Four times the viewport, not one: the scale factor is a power of two, so a
+            // cap of exactly one viewport would round s UP to the next power and composite
+            // as much as twice coarser than the screen shows, which looks soft. At 4x, s
+            // lands strictly below 1/zoom, so the composite is always at least as fine as
+            // the display. The buffer stays bounded (about 25 MB at a 1600x1000 viewport).
+            const int cap = static_cast<int>(std::min<std::int64_t>(viewportPx * 4, 1 << 26));
+            pe::Rect covered{};
+            const pe::PixelBuffer& buf = renderer_->renderRegionScaledCached(vis, cap, covered);
             if (!buf.isEmpty()) {
                 const QImage img(reinterpret_cast<const uchar*>(buf.data()), buf.width(),
                                  buf.height(), buf.width() * 4, QImage::Format_RGBA8888);
-                painter.drawImage(QRectF(vis.x, vis.y, vis.width, vis.height), img,
+                // Drawn to the TILE-ALIGNED rect the buffer actually covers, which is at
+                // least `vis`; the overhang lies off-screen or over the pasteboard, where it
+                // composites to transparent.
+                painter.drawImage(QRectF(covered.x, covered.y, covered.width, covered.height), img,
                                   QRectF(img.rect()));
             }
         }

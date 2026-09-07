@@ -79,6 +79,31 @@ public:
     [[nodiscard]] PixelBuffer renderRegionScaled(
         Rect docRegion, int maxOutputPixels = kDefaultDisplayMaxOutputPixels);
 
+    // A retained, INCREMENTALLY updated scaled composite of `docRegion`, for a view zoomed
+    // out far enough that the visible span cannot fit the tile cache.
+    //
+    // The plain scaled path bypasses the LRU and so recomposites every visible tile on
+    // every call. That is unavoidable for a one-off, but it made two things bad: a static
+    // zoomed-out view paid full price for a window resize or an uncover (13,924 tiles
+    // through the whole layer stack on a 30,000 square document), and painting at that
+    // zoom paid it once per dab.
+    //
+    // This keeps the result and rewrites only the tiles that changed. It is exact rather
+    // than approximate because the region is grown to whole tiles and the downscale factor
+    // is a power of two dividing kTileSize, so every output pixel averages a block lying
+    // entirely within one tile and no output pixel depends on two tiles.
+    //
+    // `outRegion` receives the tile-aligned region the returned buffer actually covers,
+    // which is at least `docRegion`; draw the buffer stretched to THAT rect, not the one
+    // passed in. The reference is valid until the next call or any invalidating operation.
+    // Returning a reference keeps a viewport-sized memcpy off the paint path.
+    [[nodiscard]] const PixelBuffer& renderRegionScaledCached(Rect docRegion, int maxOutputPixels,
+                                                              Rect& outRegion);
+
+    // The tile budget the LRU is holding to. A caller decides between the cached full-res
+    // path and the scaled one by asking whether the region it wants fits.
+    [[nodiscard]] std::size_t cacheBudgetTiles() const noexcept { return budgetTiles_; }
+
     void onDocumentChanged(const Document&, const DocumentChange&) override;
 
     // Diagnostics / tuning.
@@ -108,6 +133,17 @@ private:
     std::map<Key, LruList::iterator> index_;
     std::set<Key> dirty_;
     std::vector<Rgbaf> scratch_;  // reused per-tile composite buffer
+
+    // The retained scaled composite. `scaledDirty_` holds the tiles whose blocks are stale;
+    // a change marks tiles rather than dropping the whole buffer, which is what makes
+    // painting at a zoomed-out view cost the dabs rather than the viewport.
+    PixelBuffer scaledCache_;
+    Rect scaledRegion_{};  // tile-aligned; what scaledCache_ covers
+    int scaledScale_ = 0;  // power of two dividing kTileSize
+    int scaledCap_ = 0;
+    bool scaledValid_ = false;
+    std::set<Key> scaledDirty_;
+    void writeScaledTile(TileCoord c);  // recomposite one tile into its output block
     std::size_t budgetTiles_ = kDefaultDisplayCacheTiles;
     uint64_t recompositeCount_ = 0;
 };
