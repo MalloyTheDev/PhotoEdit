@@ -225,37 +225,22 @@ pe::Refusal effectRefusal(const pe::Document* doc, const QString& title) {
     if (doc == nullptr) {
         return pe::refuse(op, pe::RefusalCode::NoDocument, action, "Open an image first.");
     }
-    const pe::Layer* l = doc->findLayer(doc->activeLayer());
-    const std::string where = "active layer " + (l == nullptr ? std::string("none") : l->name());
-    if (l == nullptr) {
-        return pe::refuse(op, pe::RefusalCode::NoActiveLayer, action,
-                          "Select a layer to apply this to.", where);
+    // The ENGINE decides why: bakeRefusal lives beside the preconditions it mirrors and
+    // uses the same constants, so the reason cannot drift from the code that enforces it.
+    // The shell only supplies the operation id and the affordance, which the engine has no
+    // business knowing.
+    pe::Refusal r = pe::bakeRefusal(*doc, doc->activeLayer());
+    if (!r.isRefusal()) {
+        // Nothing about the document accounts for it, so say that rather than inventing a
+        // cause: a confident wrong explanation is worse than an honest vague one.
+        const pe::Layer* l = doc->findLayer(doc->activeLayer());
+        r = pe::refuse(op, pe::RefusalCode::NoEffect, action,
+                       "Those settings left the image unchanged.",
+                       "active layer " + (l == nullptr ? std::string("none") : l->name()));
     }
-    if (l->kind() != pe::LayerKind::Pixel) {
-        return pe::refuse(op, pe::RefusalCode::LayerNotPixel, action,
-                          "\"" + l->name() +
-                              "\" is not a pixel layer. Select a pixel layer, or add an "
-                              "adjustment layer instead.",
-                          where);
-    }
-    const pe::Rect content = static_cast<const pe::PixelLayer*>(l)->tiles().contentBounds();
-    if (content.isEmpty()) {
-        return pe::refuse(op, pe::RefusalCode::NoEffect, action,
-                          "\"" + l->name() + "\" is empty, so there is nothing to change.", where);
-    }
-    const std::int64_t area = static_cast<std::int64_t>(content.width) * content.height;
-    if (area > pe::kMaxFilterPixels) {
-        return pe::refuse(op, pe::RefusalCode::OverSizeBudget, action,
-                          "\"" + l->name() + "\" covers " + std::to_string(area / 1'000'000) +
-                              " megapixels. Applying this is limited to " +
-                              std::to_string(pe::kMaxFilterPixels / 1'000'000) +
-                              " megapixels; select a smaller region first.",
-                          where + ", content " + std::to_string(content.width) + "x" +
-                              std::to_string(content.height));
-    }
-    // Nothing about the document explains it, so say that rather than inventing a cause.
-    return pe::refuse(op, pe::RefusalCode::NoEffect, action,
-                      "Those settings left the image unchanged.", where);
+    r.operation = op;
+    r.action = action;
+    return r;
 }
 
 void EffectDialog::commit() {

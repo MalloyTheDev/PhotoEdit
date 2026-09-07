@@ -102,6 +102,12 @@ lane), and code review.
   the changed-pixel bounds; a bounded operation should assert they sit inside its
   mathematically permitted influence box. An implementation can be numerically
   plausible and still touch pixels it had no business touching.
+- **A test must fail by reporting, never by crashing.** Guard the step after a failed
+  assertion: indexing a container the assertion just proved empty aborts the binary,
+  so every later test's result is lost and the suite reads as green. Found the hard
+  way: a mutation that made refusals silent was detected by the right tests, and the
+  run still reported zero failures because the first of them dereferenced an empty
+  vector. A test that fails in the wrong way is indistinguishable from one that passes.
 - Tests must be deterministic and not depend on a GPU, display, or network.
 
 ## Formatting

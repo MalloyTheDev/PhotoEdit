@@ -757,7 +757,11 @@ PE_TEST(refusal_code_category_and_retry_cannot_disagree) {
         PE_CHECK(r.isRefusal());
         PE_CHECK(r.category == pe::categoryOf(c));
         PE_CHECK_EQ(r.retryMeaningful, r.category == pe::RefusalCategory::Busy);
-        PE_CHECK_EQ(r.fixableByState, r.category != pe::RefusalCategory::Unsupported);
+        // Over budget is not fixable by re-aiming at a different layer: it stays over
+        // budget. The over-budget message says retrying is pointless, and the flag has to
+        // agree with the sentence.
+        PE_CHECK_EQ(r.fixableByState, r.category != pe::RefusalCategory::Unsupported &&
+                                          r.category != pe::RefusalCategory::OverBudget);
     }
     // None is not a refusal, so a default-constructed value cannot be mistaken for one.
     PE_CHECK(!pe::Refusal{}.isRefusal());
@@ -820,5 +824,6 @@ PE_TEST(effect_refusal_reports_an_over_budget_layer) {
     PE_CHECK(r.category == pe::RefusalCategory::OverBudget);
     PE_CHECK(r.explanation.find("megapixel") != std::string::npos);
     PE_CHECK(!r.retryMeaningful);
+    PE_CHECK(!r.fixableByState);  // no choice of layer makes an over-budget region fit
     PE_CHECK(!r.context.empty());
 }

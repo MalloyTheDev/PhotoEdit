@@ -4,6 +4,7 @@
 #include "pe/core/Color.hpp"
 #include "pe/core/Geometry.hpp"
 #include "pe/core/Layer.hpp"
+#include "pe/core/Refusal.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -26,6 +27,21 @@ class PixelBuffer;
 // destructive filter and adjustment returns nullptr, and the shell can only tell the user
 // why if it can name the limit.
 inline constexpr std::int64_t kMaxFilterPixels = 16'000'000;
+
+// Why a destructive pixel edit on `layerId` would be refused, or a Refusal with code None
+// if it would proceed. bakePixelEdit and everything built on it (every filter, every
+// destructive adjustment, bucket and gradient fill, stamp, move, transform) share these
+// preconditions, and they return a bare nullptr, so a caller has no way to tell the cases
+// apart from the null alone.
+//
+// This puts the reasons in the engine, beside the code that enforces them and using the
+// same constants, so the two cannot drift. It is deliberately a PREDICATE rather than an
+// out-parameter on every entry point: threading a Refusal through two dozen call sites
+// would be a large mechanical change for the same answer. The remaining gap is honest and
+// worth stating: this re-evaluates the conditions rather than reporting the refusal from
+// the call that actually declined, so a future reason added inside bakePixelEditImpl (as
+// opposed to its preconditions) would not appear here until it is added here too.
+[[nodiscard]] Refusal bakeRefusal(const Document& doc, LayerId layerId);
 
 // Run an in-place per-pixel transform over a pixel layer's content as a reversible
 // tile-delta command (the shared machinery behind destructive filters and

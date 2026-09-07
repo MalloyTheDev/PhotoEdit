@@ -412,6 +412,44 @@ std::unique_ptr<PaintCommand> bakePixelEditImpl(
 }
 }  // namespace
 
+Refusal bakeRefusal(const Document& doc, LayerId layerId) {
+    // Mirrors bakePixelEditRegion's preconditions, in the same order, using the same
+    // constants. The region a filter passes is the layer's content bounds, so that is what
+    // is measured here.
+    const Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr) {
+        return refuse("bake", RefusalCode::NoActiveLayer, {}, "Select a layer to apply this to.");
+    }
+    const std::string named = "\"" + layer->name() + "\"";
+    if (layer->kind() != LayerKind::Pixel) {
+        return refuse("bake", RefusalCode::LayerNotPixel, {},
+                      named +
+                          " is not a pixel layer. Select a pixel layer, or add an adjustment "
+                          "layer instead.");
+    }
+    const Rect bb = static_cast<const PixelLayer*>(layer)->contentBounds();
+    if (bb.isEmpty()) {
+        return refuse("bake", RefusalCode::NoEffect, {},
+                      named + " is empty, so there is nothing to change.");
+    }
+    if (bb.width > kMaxCanvasDimension || bb.height > kMaxCanvasDimension ||
+        bb.x > kMaxCanvasDimension || bb.x < -kMaxCanvasDimension || bb.y > kMaxCanvasDimension ||
+        bb.y < -kMaxCanvasDimension) {
+        return refuse("bake", RefusalCode::OverSizeBudget, {},
+                      named + " extends beyond the coordinate range the engine can edit.");
+    }
+    const int64_t area = static_cast<int64_t>(bb.width) * static_cast<int64_t>(bb.height);
+    if (area > kMaxFilterPixels) {
+        return refuse("bake", RefusalCode::OverSizeBudget, {},
+                      named + " covers " + std::to_string(area / 1'000'000) +
+                          " megapixels. Applying this is limited to " +
+                          std::to_string(kMaxFilterPixels / 1'000'000) +
+                          " megapixels; select a smaller region first.",
+                      "content " + std::to_string(bb.width) + "x" + std::to_string(bb.height));
+    }
+    return Refusal{};  // nothing stops it
+}
+
 std::unique_ptr<PaintCommand> bakePixelEditRegion(
     Document& doc, LayerId layerId, std::string name, Rect region,
     const std::function<void(std::span<Rgbaf>, int, int)>& transform, const Selection* selection) {

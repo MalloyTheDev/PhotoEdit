@@ -1,7 +1,10 @@
+#include "pe/core/Adjustment.hpp"
+#include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/Filter.hpp"
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/Refusal.hpp"
 #include "pe/core/Selection.hpp"
 #include "pe_test.hpp"
 
@@ -552,5 +555,89 @@ PE_TEST(filter_gaussian_tiny_positive_sigma_is_safe) {
         // Well below one pixel of blur, so the result must still resemble the input
         // rather than collapsing to transparent black.
         for (std::size_t i = 0; i < src.size(); ++i) PE_CHECK_NEAR(dst[i].r, src[i].r);
+    }
+}
+
+PE_TEST(bake_refusal_agrees_with_what_the_bake_actually_does) {
+    // bakeRefusal re-evaluates the preconditions rather than reporting from the call that
+    // declined, so the risk it carries is DRIFT: the predicate saying one thing while the
+    // bake does another. This pins them together over every condition, which is the whole
+    // reason the predicate is trustworthy enough to explain a refusal to a user.
+    const auto noop = [](std::span<Rgbaf>, int, int) {};
+    const auto bakes = [&noop](Document& doc, LayerId id) {
+        return bakePixelEdit(doc, id, "Probe", noop, nullptr) != nullptr;
+    };
+    const auto refused = [](Document& doc, LayerId id) { return bakeRefusal(doc, id).isRefusal(); };
+
+    // No such layer.
+    {
+        auto doc = Document::createBlank(Size{32, 32});
+        PE_CHECK_EQ(bakes(*doc, kNoLayer), false);
+        PE_CHECK_EQ(refused(*doc, kNoLayer), true);
+        PE_CHECK(bakeRefusal(*doc, kNoLayer).code == RefusalCode::NoActiveLayer);
+    }
+    // Empty pixel layer: no content to edit.
+    {
+        auto doc = Document::createBlank(Size{32, 32});
+        const LayerId id = doc->activeLayer();
+        PE_CHECK_EQ(bakes(*doc, id), false);
+        PE_CHECK_EQ(refused(*doc, id), true);
+        PE_CHECK(bakeRefusal(*doc, id).code == RefusalCode::NoEffect);
+    }
+    // A pixel layer with content: both agree it can proceed.
+    {
+        auto doc = Document::createBlank(Size{32, 32});
+        const LayerId id = doc->activeLayer();
+        static_cast<PixelLayer*>(doc->findLayer(id))
+            ->tiles()
+            .fillRect(Rect{0, 0, 32, 32}, Rgba8{5, 6, 7, 255});
+        PE_CHECK_EQ(refused(*doc, id), false);
+        // A no-op transform produces no deltas, so the command is null for a reason the
+        // preconditions do not cover. That is exactly the residual gap bakeRefusal
+        // documents, and the shell handles it by saying the settings changed nothing
+        // rather than inventing a cause.
+        const bool wroteSomething = bakes(*doc, id);
+        PE_CHECK(!wroteSomething);
+    }
+    // A pixel layer whose content really changes: the bake succeeds and nothing refuses.
+    {
+        auto doc = Document::createBlank(Size{32, 32});
+        const LayerId id = doc->activeLayer();
+        static_cast<PixelLayer*>(doc->findLayer(id))
+            ->tiles()
+            .fillRect(Rect{0, 0, 32, 32}, Rgba8{5, 6, 7, 255});
+        auto cmd = bakePixelEdit(
+            *doc, id, "Probe",
+            [](std::span<Rgbaf> img, int, int) {
+                for (Rgbaf& p : img) p.r = 1.0f;
+            },
+            nullptr);
+        PE_CHECK(cmd != nullptr);
+        PE_CHECK_EQ(refused(*doc, id), false);
+    }
+    // Non-pixel active layer.
+    {
+        auto doc = Document::createBlank(Size{32, 32});
+        auto adj = std::make_unique<AdjustmentLayer>(std::make_unique<Invert>(), "Invert");
+        const LayerId adjId = adj->id();
+        doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(adj));
+        PE_CHECK_EQ(bakes(*doc, adjId), false);
+        PE_CHECK_EQ(refused(*doc, adjId), true);
+        PE_CHECK(bakeRefusal(*doc, adjId).code == RefusalCode::LayerNotPixel);
+    }
+    // Over the filter budget.
+    {
+        const int side = 5000;  // 25 MP, over the 16 MP cap
+        auto doc = Document::createBlank(Size{side, side});
+        const LayerId id = doc->activeLayer();
+        static_cast<PixelLayer*>(doc->findLayer(id))
+            ->tiles()
+            .fillRect(Rect{0, 0, side, side}, Rgba8{5, 6, 7, 255});
+        PE_CHECK_EQ(bakes(*doc, id), false);
+        PE_CHECK_EQ(refused(*doc, id), true);
+        const Refusal r = bakeRefusal(*doc, id);
+        PE_CHECK(r.code == RefusalCode::OverSizeBudget);
+        PE_CHECK(!r.fixableByState);  // no choice of layer makes it fit
+        PE_CHECK(!r.context.empty());
     }
 }

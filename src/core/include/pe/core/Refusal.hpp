@@ -91,8 +91,10 @@ struct Refusal {
     // caller can tell a transient refusal (an edit in flight) from a structural one.
     bool retryMeaningful = false;
 
-    // Would changing the selection, the active layer, or a setting make this valid? True
-    // for most refusals, and false when nothing the user can do would help.
+    // Would changing the selection, the active layer, or a setting make this valid?
+    // False when no choice of target helps: an unsupported format, and an over-budget
+    // operation, which stays over budget whichever layer is picked. The user's way out
+    // there is to reduce the work, not to re-aim it.
     bool fixableByState = true;
 
     [[nodiscard]] bool isRefusal() const noexcept { return code != RefusalCode::None; }
@@ -151,7 +153,8 @@ public:
                    .explanation = std::move(explanation),
                    .context = std::move(context),
                    .retryMeaningful = category == RefusalCategory::Busy,
-                   .fixableByState = category != RefusalCategory::Unsupported};
+                   .fixableByState = category != RefusalCategory::Unsupported &&
+                                     category != RefusalCategory::OverBudget};
 }
 
 }  // namespace pe
