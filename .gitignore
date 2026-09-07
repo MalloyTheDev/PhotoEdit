@@ -24,6 +24,10 @@ CMakeUserPresets.json
 # so they stay out of the repository.
 /run-*.bat
 
+# Golden-image failure artifacts: written next to the reference so the two can be
+# compared, but they are build output rather than fixtures.
+*.actual.png
+
 # OS
 Thumbs.db
 .DS_Store

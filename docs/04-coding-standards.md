@@ -85,7 +85,10 @@ lane), and code review.
 - Math kernels (blend, color conversion, transforms, filters) are validated
   against a simple reference implementation and/or known values.
 - Subsystems with visual output add **golden-image** tests (committed reference
-  PNGs compared within tolerance).
+  PNGs compared within tolerance). The harness is `tests/golden.hpp` and the
+  references live in `tests/golden/`; regenerate with `PE_GOLDEN_UPDATE=1` and
+  review the images before committing them. Pair every golden with a structural
+  assertion, so a reference captured from a bug cannot silently become the spec.
 - Tests must be deterministic and not depend on a GPU, display, or network.
 
 ## Formatting

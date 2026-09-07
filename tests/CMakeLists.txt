@@ -30,6 +30,7 @@ add_executable(pe_core_tests
     core/test_adjustment.cpp
     core/test_textlayer.cpp
     core/test_filter.cpp
+    core/test_golden.cpp
     core/test_filtertiling.cpp
     core/test_histogram.cpp
     core/test_channels.cpp
@@ -51,6 +52,11 @@ add_executable(pe_core_tests
 
 target_link_libraries(pe_core_tests PRIVATE PhotoEdit::Core)
 target_include_directories(pe_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# Golden references live in the SOURCE tree, not the build tree: they are committed
+# fixtures, and PE_GOLDEN_UPDATE rewrites them in place so a regeneration shows up as a
+# reviewable diff rather than a build artifact nobody sees.
+target_compile_definitions(pe_core_tests
+    PRIVATE PE_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
 
 add_test(NAME pe_core_tests COMMAND pe_core_tests)
 

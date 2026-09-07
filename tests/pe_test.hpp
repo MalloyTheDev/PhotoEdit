@@ -51,6 +51,14 @@ inline int runAll() {
     return failedCases == 0 ? 0 : 1;
 }
 
+// Record a failure with an explanatory message. The PE_CHECK macros stringify their
+// condition, which explains itself; this is for a check whose diagnosis is only known at
+// runtime, such as which pixel of a golden image drifted and by how much.
+inline void reportFailure(const std::string& message) {
+    ++currentFailures();
+    std::printf("    FAILED: %s\n", message.c_str());
+}
+
 inline bool nearly(float a, float b, float eps = 1e-4f) {
     return std::fabs(a - b) <= eps;
 }
