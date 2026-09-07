@@ -17,6 +17,8 @@ set(CMAKE_AUTORCC ON)  # compile icons.qrc (qt_standard_project_setup enables MO
 qt_add_library(pe_app STATIC
     MainWindow.cpp
     MainWindow.hpp
+    BusyTask.cpp
+    BusyTask.hpp
     CanvasView.cpp
     CanvasView.hpp
     CurveEditorWidget.cpp

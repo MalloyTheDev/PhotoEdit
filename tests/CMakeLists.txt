@@ -79,6 +79,7 @@ if(PHOTOEDIT_BUILD_APP)
         app/test_pixelformatnames.cpp
         app/test_iconutil.cpp
         app/test_canvasview.cpp
+        app/test_busytask.cpp
     )
 
     target_link_libraries(pe_app_tests PRIVATE PhotoEdit::App)

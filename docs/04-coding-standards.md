@@ -69,6 +69,21 @@ lane), and code review.
   worker threads operating on **tiles** that don't alias.
 - Any cross-thread sharing must have an explicit, documented synchronization
   story. Prefer message/task passing over shared locks.
+- **The engine is single threaded for READS as well as writes.** `TileStoreT`
+  caches its content bounds lazily and `CanvasRenderer` owns a mutable LRU, so two
+  threads merely *reading* the same document race. Copy-on-write forking keys off
+  `use_count()`, which is not a safe fork test once a second thread holds a
+  reference either (see the snapshot-handle work).
+- Consequently, moving work off the GUI thread means taking the GUI thread OFF the
+  document, not merely adding a worker. `pe::app::runDocumentTask` is the one place
+  that does it: it blocks input so no handler can be entered, and freezes the canvas
+  so `paintEvent` stops compositing. Anything that starts a worker without both is a
+  data race, however short the operation looks. A new background operation goes
+  through that helper rather than growing its own.
+- A blocked window is a correctness problem, not a polish problem. Seconds of
+  synchronous work on the GUI thread reads to the user as a crash, and on Windows the
+  OS escalates it to the not-responding state; force-quitting there loses the
+  document. Anything that can take longer than a frame belongs on a worker.
 
 ## Comments
 

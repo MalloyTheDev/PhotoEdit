@@ -12,6 +12,7 @@
 #include <QBrush>
 #include <QColor>
 #include <QImage>
+#include <QPixmap>
 #include <QPoint>
 #include <QPointF>
 #include <QString>
@@ -131,6 +132,20 @@ public:
     // so the tile cache would otherwise show stale pixels until the next committed change.
     void reloadImage();
 
+    // Stop reading the document to paint, and show the last frame instead.
+    //
+    // A background task (a save, an export, a wand click) runs the engine on a worker
+    // thread, and the engine is single threaded: tile stores and the renderer hold mutable
+    // caches, so a repaint compositing from this thread at the same time is a data race,
+    // not merely a stale picture. Freezing removes the paint path as a second reader. The
+    // frame is grabbed at the moment of freezing, so what stays on screen is exactly what
+    // the user was looking at when the task started.
+    //
+    // Paired with the input block in BusyTask.hpp, which stops every other handler here
+    // from being entered. Prefer runDocumentTask over calling this directly.
+    void setFrozen(bool on);
+    [[nodiscard]] bool isFrozen() const noexcept { return frozen_; }
+
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
@@ -174,6 +189,10 @@ private:
     Tool toolMode_ = Tool::Brush;
     bool maskEditTarget_ =
         false;  // Brush paints the active layer's mask (set via the Layers panel)
+
+    // While a worker owns the document, paint this instead of compositing. See setFrozen.
+    bool frozen_ = false;
+    QPixmap frozenFrame_;
 
     bool needsFit_ = true;  // fit-to-window pending until the widget has a valid size
     bool panning_ = false;  // pan in progress (middle-drag, or Hand tool + left-drag)

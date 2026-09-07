@@ -7,6 +7,8 @@
 #include "CanvasView.hpp"
 #include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/PixelLayer.hpp"
+#include "pe/core/Selection.hpp"
 #include "pe_test.hpp"
 
 #include <memory>
@@ -98,5 +100,71 @@ PE_TEST(canvasview_brush_on_a_pixel_layer_stays_quiet) {
     PE_CHECK(view.tool().isStroking());  // the stroke really did begin
 
     view.tool().cancel(*doc);
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_wand_click_selects_what_a_flattened_composite_would) {
+    // The wand no longer flattens through Document::compositeImage(); it samples the
+    // renderer's tile cache instead, and the click runs on a worker thread. Neither may
+    // change WHAT gets selected, so the reference here is the old path's own answer.
+    //
+    // Several tiles across, and the seed's region spans all of them, so a per-tile mistake
+    // in the cached path cannot hide inside one tile.
+    auto doc = pe::Document::createBlank(pe::Size{2 * pe::kTileSize, 2 * pe::kTileSize});
+    PE_CHECK(doc != nullptr);
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(pe::Rect{0, 0, 2 * pe::kTileSize, 2 * pe::kTileSize},
+                         pe::Rgba8{40, 80, 220, 255});
+    // A patch of a different colour, deliberately away from the centre so the seed lands
+    // in the large region and the selection has to cross every tile boundary.
+    pl->tiles().fillRect(pe::Rect{0, 0, 60, 60}, pe::Rgba8{240, 40, 40, 255});
+
+    pe::app::CanvasView view;
+    view.resize(300, 220);
+    view.setDocument(doc.get());
+    view.setTool(pe::app::CanvasView::Tool::Wand);
+    view.actualPixels();  // 100% zoom, centred: the widget centre is the canvas centre
+
+    const pe::Selection expected =
+        pe::magicWandSelection(doc->compositeImage(), pe::kTileSize, pe::kTileSize, 32);
+    PE_CHECK(expected.active());
+
+    const QStringList said = messagesFrom(view, [&] { pressLeft(view); });
+    PE_CHECK_EQ(said.size(), 0);  // a successful selection says nothing
+    PE_CHECK(doc->selection().active());
+    PE_CHECK(doc->selection() == expected);
+    PE_CHECK(doc->history().canUndo());  // and it went through history, so it is undoable
+
+    // The selection really does span more than one tile, or the case above proves little.
+    PE_CHECK(doc->selection().tightBounds().width > pe::kTileSize);
+    PE_CHECK(doc->selection().tightBounds().height > pe::kTileSize);
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_wand_leaves_the_canvas_thawed_after_a_click) {
+    // The click freezes the canvas while the worker samples the document. If a return path
+    // ever skipped the thaw, the canvas would sit showing a still image for the rest of the
+    // session, which looks exactly like a hung renderer.
+    auto doc = pe::Document::createBlank(pe::Size{2 * pe::kTileSize, 2 * pe::kTileSize});
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(pe::Rect{0, 0, 2 * pe::kTileSize, 2 * pe::kTileSize},
+                         pe::Rgba8{40, 80, 220, 255});
+
+    pe::app::CanvasView view;
+    view.resize(300, 220);
+    view.setDocument(doc.get());
+    view.setTool(pe::app::CanvasView::Tool::Wand);
+    view.actualPixels();
+    pressLeft(view);
+    PE_CHECK(!view.isFrozen());
+
+    // A click on empty canvas takes the other exit, and must thaw too.
+    auto blank = pe::Document::createBlank(pe::Size{2 * pe::kTileSize, 2 * pe::kTileSize});
+    view.setDocument(blank.get());
+    view.actualPixels();
+    pressLeft(view);
+    PE_CHECK(!view.isFrozen());
+
     view.setDocument(nullptr);
 }

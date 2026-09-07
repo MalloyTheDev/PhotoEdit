@@ -2,6 +2,7 @@
 
 #include "PixelFormatNames.hpp"
 
+#include "BusyTask.hpp"
 #include "CanvasView.hpp"
 #include "ColorPanel.hpp"
 #include "CurvesDialog.hpp"
@@ -1114,7 +1115,20 @@ void MainWindow::openDocument() {
     if (path.isEmpty()) return;
 
     pe::LoadError loadErr = pe::LoadError::None;
-    auto doc = pe::loadDocument(path.toStdString(), &loadErr);
+    std::unique_ptr<pe::Document> doc;
+    // Off the GUI thread: decoding a 24 MP file takes about 600 ms, and a 512 MB one takes
+    // far longer. The canvas is deliberately NOT frozen here, unlike a save: loading builds
+    // a separate document and never touches the one on screen, so the paint path can keep
+    // compositing the current document while the worker decodes the new one.
+    const TaskResult task = runBusyTask(
+        this, QStringLiteral("Opening %1").arg(QFileInfo(path).fileName()),
+        [&doc, &path, &loadErr] { doc = pe::loadDocument(path.toStdString(), &loadErr); });
+    if (task.threw) {
+        QMessageBox::warning(
+            this, QStringLiteral("Open failed"),
+            QStringLiteral("Reading \"%1\" stopped with an error: %2").arg(path, task.error));
+        return;
+    }
     if (doc == nullptr) {
         QMessageBox::warning(this, QStringLiteral("Open failed"), openFailureReason(path, loadErr));
         return;
@@ -1215,7 +1229,23 @@ bool MainWindow::saveDocumentAs() {
 bool MainWindow::writeTo(const QString& path) {
     if (doc_ == nullptr) return false;
     pe::SaveError saveErr = pe::SaveError::None;
-    if (!pe::saveDocument(*doc_, path.toStdString(), &saveErr)) {
+    bool wrote = false;
+    // Off the GUI thread: saving a 24 MP document took 3.3 seconds as PNG and 1.2 as
+    // .pedoc, every millisecond of it with the window unable to repaint, which Windows
+    // escalates to the not-responding state. A user cannot tell that from a crash, and
+    // force-quitting during a write is how a document gets lost.
+    const TaskResult task =
+        runDocumentTask(this, canvas_, QStringLiteral("Saving %1").arg(QFileInfo(path).fileName()),
+                        [this, &path, &saveErr, &wrote] {
+                            wrote = pe::saveDocument(*doc_, path.toStdString(), &saveErr);
+                        });
+    if (task.threw) {
+        QMessageBox::warning(
+            this, QStringLiteral("Save failed"),
+            QStringLiteral("Writing \"%1\" stopped with an error: %2").arg(path, task.error));
+        return false;
+    }
+    if (!wrote) {
         QMessageBox::warning(this, QStringLiteral("Save failed"),
                              saveFailureReason(doc_.get(), path, saveErr));
         return false;
@@ -1647,7 +1677,22 @@ void MainWindow::exportDocumentAs() {
         path += QStringLiteral(".%1").arg(ext);
     }
 
-    if (!pe::saveDocument(*doc_, path.toStdString(), dlg.options())) {
+    // Off the GUI thread, for the same reason as Save: an export flattens and re-encodes
+    // the whole canvas, and that is seconds of work on any document worth exporting.
+    bool wrote = false;
+    const pe::ExportOptions opts = dlg.options();
+    const TaskResult task = runDocumentTask(
+        this, canvas_, QStringLiteral("Exporting %1").arg(QFileInfo(path).fileName()),
+        [this, &path, &opts, &wrote] {
+            wrote = pe::saveDocument(*doc_, path.toStdString(), opts);
+        });
+    if (task.threw) {
+        QMessageBox::warning(
+            this, QStringLiteral("Export failed"),
+            QStringLiteral("Exporting \"%1\" stopped with an error: %2").arg(path, task.error));
+        return;
+    }
+    if (!wrote) {
         QMessageBox::warning(this, QStringLiteral("Export failed"),
                              QStringLiteral("Could not export \"%1\".").arg(path));
         return;

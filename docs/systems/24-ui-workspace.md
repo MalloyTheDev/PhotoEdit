@@ -94,6 +94,15 @@ reapplies it.
 - The UI thread only orchestrates; compositing/filtering happen on workers/GPU and
   results are marshaled back.
 - Thumbnails and previews render at reduced resolution to keep panels responsive.
+- Long operations (Save, Save As, Export, Open, Magic Wand) run through
+  `pe::app::runDocumentTask`: the work goes to a worker thread while the UI thread
+  keeps pumping events behind an indeterminate busy dialog, so the window never stops
+  responding. For the duration, user input is swallowed and the canvas is frozen to
+  its last frame, because the engine is single threaded and a repaint compositing
+  from the UI thread would race the worker rather than merely show stale pixels. The
+  dialog appears only after a short delay, so a fast save shows nothing at all.
+- The busy dialog has no Cancel button. The codecs are not interruptible yet, and a
+  button that cannot stop the work would be worse than none.
 
 ## Edge cases & failure modes
 

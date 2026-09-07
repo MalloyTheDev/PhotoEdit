@@ -1,5 +1,6 @@
 #include "CanvasView.hpp"
 
+#include "BusyTask.hpp"
 #include "Theme.hpp"
 #include "pe/core/Brush.hpp"  // pe::PaintCommand (move-tool preview command)
 #include "pe/core/CanvasRenderer.hpp"
@@ -490,7 +491,29 @@ pe::StrokePoint CanvasView::sampleAt(QPointF widgetPos) const {
     return pe::StrokePoint{{static_cast<float>(d.x), static_cast<float>(d.y)}, 1.0f};
 }
 
+void CanvasView::setFrozen(bool on) {
+    if (frozen_ == on) return;
+    if (on) {
+        // Grabbed BEFORE the flag is set, so this last render still goes through the
+        // renderer and captures the live document rather than an empty pixmap.
+        frozenFrame_ = grab();
+    } else {
+        frozenFrame_ = QPixmap{};
+    }
+    frozen_ = on;
+    update();
+}
+
 void CanvasView::paintEvent(QPaintEvent*) {
+    if (frozen_) {
+        // A worker owns the document; compositing here would race it. Everything below
+        // this point reads the document or the renderer, so none of it may run.
+        QPainter frozenPainter(this);
+        frozenPainter.fillRect(rect(), themeColors(currentTheme()).canvas);
+        if (!frozenFrame_.isNull()) frozenPainter.drawPixmap(0, 0, frozenFrame_);
+        return;
+    }
+
     maybeInitialFit();
 
     QPainter painter(this);
@@ -814,24 +837,47 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         return;
     }
     if (toolMode_ == Tool::Wand) {
+        if (renderer_ == nullptr) return;
         const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
-        const pe::PixelBuffer buf = doc_->compositeImage();  // sample the composited canvas
-        if (buf.isEmpty()) {
-            // compositeImage() returns nothing above kMaxCompositeImagePixels, so on a
-            // canvas past that cap the wand used to select nothing and say nothing.
+        const pe::Point seed{static_cast<int>(std::lround(d.x)),
+                             static_cast<int>(std::lround(d.y))};
+
+        // Sampling and flood-filling a whole canvas took 2.3 seconds on a 24 MP document,
+        // and it ran here, on the GUI thread, on a single click: long enough that the tool
+        // was indistinguishable from a hang. Both halves now run on a worker.
+        //
+        // Through the renderer's tile cache rather than Document::compositeImage(): the
+        // pixels are identical, but the paint path has already composited most of these
+        // tiles, so a click reuses them instead of flattening the whole canvas again.
+        pe::Selection sel;
+        bool overBudget = false;
+        const TaskResult task = runDocumentTask(
+            this, this, QStringLiteral("Magic Wand"), [this, seed, &sel, &overBudget] {
+                const pe::PixelBuffer buf = renderer_->renderRegion(doc_->canvasBounds());
+                if (buf.isEmpty()) {
+                    overBudget = true;
+                    return;
+                }
+                sel = pe::magicWandSelection(buf, seed.x, seed.y, wandTolerance_);
+            });
+        if (task.threw) {
+            emit toolMessage(QStringLiteral("Magic Wand failed: %1").arg(task.error));
+            return;
+        }
+        if (!task.ran) return;
+        if (overBudget) {
+            // The composite budget applies whether the pixels come from the renderer or
+            // from Document::compositeImage(), so on a canvas past that cap the wand used
+            // to select nothing and say nothing.
             emit toolMessage(
                 QStringLiteral("Magic Wand needs to flatten the image, and this one is over "
                                "the %1 megapixel limit.")
                     .arg(pe::kMaxCompositeImagePixels / 1'000'000));
             return;
         }
-        pe::Selection sel =
-            pe::magicWandSelection(buf, static_cast<int>(std::lround(d.x)),
-                                   static_cast<int>(std::lround(d.y)), wandTolerance_);
         if (sel.active()) {
             doc_->history().push(std::make_unique<SetSelectionCommand>(std::move(sel)));
-        } else if (doc_->canvasBounds().contains(pe::Point{static_cast<int>(std::lround(d.x)),
-                                                           static_cast<int>(std::lround(d.y))})) {
+        } else if (doc_->canvasBounds().contains(seed)) {
             emit toolMessage(QStringLiteral("Magic Wand selected nothing at that point."));
         }
         return;

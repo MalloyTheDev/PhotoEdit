@@ -108,7 +108,6 @@ private:
 
     void newDocument();
     void openDocument();
-    bool saveDocument();      // saves to the current path, or prompts if none
     bool saveDocumentAs();    // always prompts
     void exportDocumentAs();  // flatten + encode to a raster format with per-format options
     void onAddText(const QPointF& docPos);  // Type tool: prompt + rasterize + stamp text
@@ -131,6 +130,11 @@ public:
     void undo();
     void redo();
     void setDocument(std::unique_ptr<pe::Document> doc, QString path);
+    // Saves to the current path, or prompts if there is none. Public for the same reason
+    // as undo/redo: File > Save is a window operation, and the whole of it now runs on a
+    // worker thread, so a test that drives anything smaller would not exercise the part
+    // that can go wrong.
+    bool saveDocument();
 
     void reportRefusal(const pe::Refusal& r);
 

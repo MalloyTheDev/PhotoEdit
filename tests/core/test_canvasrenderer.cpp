@@ -446,3 +446,64 @@ PE_TEST(scaledcache_matches_a_box_average_of_the_full_resolution_composite) {
         }
     }
 }
+
+PE_TEST(renderregion_over_the_whole_canvas_equals_compositeimage) {
+    // The Magic Wand samples the flattened canvas. It used to do that through
+    // Document::compositeImage(), which recomposites every layer of every tile on every
+    // click; going through the renderer instead is only legitimate if the pixels are
+    // IDENTICAL, not merely similar. Several tiles across and several layers deep, so a
+    // per-tile or per-layer discrepancy has somewhere to show up.
+    auto doc = Document::createBlank(Size{3 * kTileSize, 2 * kTileSize});
+    auto* base = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    for (int row = 0; row < 2; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            base->tiles().fillRect(Rect{col * kTileSize, row * kTileSize, kTileSize, kTileSize},
+                                   Rgba8{static_cast<std::uint8_t>(20 + 60 * col),
+                                         static_cast<std::uint8_t>(20 + 60 * row), 180, 255});
+        }
+    }
+    auto overlay = std::make_unique<PixelLayer>();
+    overlay->setOpacity(0.4f);  // a partial layer, so the blend has to agree too
+    overlay->tiles().fillRect(Rect{kTileSize - 40, 30, 2 * kTileSize, kTileSize + 50},
+                              Rgba8{250, 240, 10, 200});
+    doc->cmdInsertTopLevel(1, std::move(overlay));
+
+    const Rect all = doc->canvasBounds();
+    const PixelBuffer flat = doc->compositeImage();
+    CanvasRenderer r(*doc);
+    const PixelBuffer viaCache = r.renderRegion(all);
+    PE_CHECK_EQ(viaCache.width(), flat.width());
+    PE_CHECK_EQ(viaCache.height(), flat.height());
+    if (viaCache.width() != flat.width() || viaCache.height() != flat.height()) return;
+
+    int differing = 0;
+    for (int y = 0; y < flat.height(); ++y) {
+        for (int x = 0; x < flat.width(); ++x) {
+            if (!(flat.at(x, y) == viaCache.at(x, y))) ++differing;
+        }
+    }
+    PE_CHECK_EQ(differing, 0);  // byte-identical, so the swap is not a behaviour change
+}
+
+PE_TEST(renderregion_over_the_whole_canvas_is_free_the_second_time) {
+    // And the reason for the swap: a second wand click, or one after an edit, must pay for
+    // the tiles that actually changed rather than for the whole canvas again.
+    auto doc = Document::createBlank(Size{3 * kTileSize, 2 * kTileSize});
+    auto* base = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    base->tiles().fillRect(Rect{0, 0, 3 * kTileSize, 2 * kTileSize}, kBlue);
+    const Rect all = doc->canvasBounds();
+
+    CanvasRenderer r(*doc);
+    (void)r.renderRegion(all);
+    const std::uint64_t afterFirst = r.recompositeCount();
+    PE_CHECK_EQ(afterFirst, static_cast<std::uint64_t>(6));  // all six tiles, once
+
+    (void)r.renderRegion(all);
+    PE_CHECK_EQ(r.recompositeCount(), afterFirst);  // nothing changed, so nothing recomposited
+
+    // One tile's worth of change costs one tile, not six.
+    base->tiles().fillRect(Rect{kTileSize + 10, 10, 20, 20}, kRed);
+    r.invalidate(Rect{kTileSize + 10, 10, 20, 20});
+    (void)r.renderRegion(all);
+    PE_CHECK_EQ(r.recompositeCount() - afterFirst, static_cast<std::uint64_t>(1));
+}
