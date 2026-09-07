@@ -99,7 +99,7 @@ PE_TEST(native_format_roundtrip_preserves_layers) {
     PE_CHECK(!blob.empty());
 
     auto loaded = deserializeDocument(blob);
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK_EQ(loaded->canvasSize().width, 32);
     PE_CHECK_EQ(loaded->canvasSize().height, 24);
     PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(2));
@@ -140,7 +140,7 @@ PE_TEST(native_format_rejects_garbage_and_truncation) {
 PE_TEST(native_format_empty_layer_roundtrip) {
     auto doc = Document::createBlank(Size{16, 16});  // single empty layer
     auto loaded = deserializeDocument(serializeDocument(*doc));
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(1));
     PE_CHECK_EQ(asPixel(*loaded, 0)->tiles().pixel(0, 0), (Rgba8{0, 0, 0, 0}));
 }
@@ -158,7 +158,7 @@ PE_TEST(native_format_roundtrip_adjustment_layer) {
     doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(adj));
 
     auto loaded = deserializeDocument(serializeDocument(*doc));
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(2));
     const Layer* l = loaded->topLevelLayers()[1].get();
     PE_CHECK(l != nullptr && l->isAdjustment());
@@ -179,10 +179,10 @@ PE_TEST(native_format_roundtrip_solid_color_layer) {
         std::make_unique<SolidColorLayer>(Rgba8{10, 20, 30, 200}, Rect{4, 5, 16, 12}, "Fill"));
 
     auto loaded = deserializeDocument(serializeDocument(*doc));
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(2));
     const auto* s = dynamic_cast<const SolidColorLayer*>(loaded->topLevelLayers()[1].get());
-    PE_CHECK(s != nullptr);
+    PE_REQUIRE(s != nullptr);
     PE_CHECK_EQ(s->color(), (Rgba8{10, 20, 30, 200}));
     PE_CHECK_EQ(s->bounds(), (Rect{4, 5, 16, 12}));
 }
@@ -213,7 +213,7 @@ PE_TEST(native_format_roundtrip_all_adjustment_kinds) {
     }
 
     auto loaded = deserializeDocument(serializeDocument(*doc));
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK_EQ(loaded->topLevelCount(), expected.size() + 1);  // +1 base pixel layer
     for (std::size_t i = 0; i < expected.size(); ++i) {
         const Layer* l = loaded->topLevelLayers()[i + 1].get();
@@ -234,7 +234,7 @@ PE_TEST(native_format_accepts_legacy_v4) {
     blob[8] = std::byte{0};
     blob[9] = std::byte{0};
     auto loaded = deserializeDocument(blob);
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(1));
     // And an unsupported future version is rejected.
     blob[6] = std::byte{99};
@@ -291,19 +291,19 @@ PE_TEST(native_format_roundtrips_nested_groups) {
     doc->setActiveLayer(childId);  // active layer is nested inside the group
 
     auto loaded = deserializeDocument(serializeDocument(*doc));
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(2));
 
     const auto& tops = loaded->topLevelLayers();
     auto* lgrp = dynamic_cast<GroupLayer*>(const_cast<Layer*>(tops[1].get()));
-    PE_CHECK(lgrp != nullptr);
+    PE_REQUIRE(lgrp != nullptr);
     PE_CHECK_EQ(lgrp->name(), std::string("Grp"));
     PE_CHECK_NEAR(lgrp->opacity(), 0.7f);
     PE_CHECK_EQ(lgrp->isolated(), false);
     PE_CHECK_EQ(lgrp->childCount(), static_cast<std::size_t>(1));
 
     auto* linner = dynamic_cast<PixelLayer*>(const_cast<Layer*>(lgrp->children()[0].get()));
-    PE_CHECK(linner != nullptr);
+    PE_REQUIRE(linner != nullptr);
     PE_CHECK_EQ(linner->name(), std::string("Inner"));
     PE_CHECK(linner->blendMode() == BlendMode::Screen);
     PE_CHECK_EQ(linner->tiles().pixel(3, 3), (Rgba8{77, 88, 99, 255}));
@@ -335,7 +335,7 @@ PE_TEST(native_format_pixel_compression_roundtrip) {
 
     std::vector<std::byte> blob = serializeDocument(*doc);
     auto loaded = deserializeDocument(blob);
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK_EQ(asPixel(*loaded, 0)->tiles().pixel(64, 64), (Rgba8{50, 100, 150, 255}));
     PE_CHECK_EQ(asPixel(*loaded, 0)->tiles().pixel(0, 0), (Rgba8{50, 100, 150, 255}));
 
@@ -359,10 +359,10 @@ PE_TEST(native_format_roundtrips_layer_mask) {
     base->setMask(std::move(mask));
 
     auto loaded = deserializeDocument(serializeDocument(*doc));
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     auto* lbase = asPixel(*loaded, 0);
     const Mask* lm = lbase->mask();
-    PE_CHECK(lm != nullptr);
+    PE_REQUIRE(lm != nullptr);
     PE_CHECK(lm->kind() == Mask::Kind::Layer);
     PE_CHECK_EQ(lm->enabled(), true);
     PE_CHECK_NEAR(lm->density(), 0.6f);
@@ -376,7 +376,7 @@ PE_TEST(native_format_roundtrips_layer_mask) {
 PE_TEST(native_format_no_mask_when_absent) {
     auto doc = Document::createBlank(Size{8, 8});  // layer has no mask
     auto loaded = deserializeDocument(serializeDocument(*doc));
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK(asPixel(*loaded, 0)->mask() == nullptr);
 }
 
@@ -391,7 +391,7 @@ PE_TEST(native_format_roundtrip_16bit) {
     base->tiles16().setPixel(4, 5, Rgba16{1000, 40000, 65535, 65535});
 
     auto loaded = deserializeDocument(serializeDocument(*doc));
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK(loaded->bitDepth() == BitDepth::U16);
     auto* lbase = asPixel(*loaded, 0);
     PE_CHECK(lbase != nullptr && lbase->depth() == BitDepth::U16);
@@ -411,7 +411,7 @@ PE_TEST(native_format_roundtrip_32bit) {
     base->tilesF().setPixel(7, 2, Rgbaf{0.25f, 0.5f, 0.75f, 1.0f});
 
     auto loaded = deserializeDocument(serializeDocument(*doc));
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK(loaded->bitDepth() == BitDepth::F32);
     auto* lbase = asPixel(*loaded, 0);
     PE_CHECK(lbase != nullptr && lbase->depth() == BitDepth::F32);
@@ -443,7 +443,7 @@ PE_TEST(native_format_budget_rejects_excess_allocation) {
     PE_CHECK(deserializeDocument(blob, 0) == nullptr);
     // The default (generous) budget loads it fine — the cap only bites pathological input.
     auto loaded = deserializeDocument(blob);
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK_EQ(loaded->topLevelCount(), static_cast<std::size_t>(2));
     PE_CHECK_EQ(asPixel(*loaded, 1)->tiles().pixel(0, 0), (Rgba8{40, 50, 60, 255}));
 }
@@ -463,7 +463,7 @@ PE_TEST(native_format_budget_charges_tiled_footprint_not_dense) {
     PE_CHECK(deserializeDocument(blob, 1'000'000) == nullptr);
     // The default budget comfortably covers ~2.62 MB, so the file still round-trips.
     auto loaded = deserializeDocument(blob);
-    PE_CHECK(loaded != nullptr);
+    PE_REQUIRE(loaded != nullptr);
     PE_CHECK_EQ(asPixel(*loaded, 0)->tiles().pixel(1000, 0), (Rgba8{1, 2, 3, 255}));
 }
 
@@ -514,9 +514,9 @@ PE_TEST(native_format_roundtrips_content_outside_the_canvas) {
 
     const std::vector<std::byte> blob = serializeDocument(*doc);
     auto back = deserializeDocument(blob);
-    PE_CHECK(back != nullptr);
+    PE_REQUIRE(back != nullptr);
     auto* rl = asPixel(*back, 0);
-    PE_CHECK(rl != nullptr);
+    PE_REQUIRE(rl != nullptr);
 
     PE_CHECK_EQ(rl->tiles().pixel(-30, -30), (Rgba8{200, 100, 50, 255}));  // off-canvas survives
     PE_CHECK_EQ(rl->tiles().pixel(-5, -5), (Rgba8{7, 8, 9, 255}));
@@ -534,7 +534,7 @@ PE_TEST(native_format_roundtrips_a_mask_outside_the_canvas) {
     base->setMask(std::move(mask));
 
     auto back = deserializeDocument(serializeDocument(*doc));
-    PE_CHECK(back != nullptr);
+    PE_REQUIRE(back != nullptr);
     const Layer* rl = back->topLevelLayers()[0].get();
     PE_CHECK(rl->mask() != nullptr);
     PE_CHECK_EQ(rl->mask()->buffer().value(-20, -20), MaskBuffer::kClear);
@@ -574,7 +574,7 @@ PE_TEST(native_format_stays_on_the_old_version_with_an_ordinary_mask) {
     PE_CHECK_EQ(static_cast<int>(blob[5]), static_cast<int>(std::byte{'6'}));
 
     auto back = deserializeDocument(blob);
-    PE_CHECK(back != nullptr);
+    PE_REQUIRE(back != nullptr);
     const Layer* rl = back->topLevelLayers()[0].get();
     PE_CHECK(rl->mask() != nullptr);
     PE_CHECK_EQ(rl->mask()->buffer().value(6, 6), MaskBuffer::kClear);
@@ -697,7 +697,7 @@ PE_TEST(native_format_keeps_an_on_canvas_solid_fill_on_the_older_version) {
     const std::vector<std::byte> blob = serializeDocument(*doc);
     PE_CHECK_EQ(static_cast<int>(blob[5]), static_cast<int>(std::byte{'6'}));
     const auto back = deserializeDocument(blob);
-    PE_CHECK(back != nullptr);
+    PE_REQUIRE(back != nullptr);
     if (back != nullptr) {
         const SolidColorLayer* solid = firstSolid(*back);
         PE_CHECK(solid != nullptr);
@@ -723,7 +723,7 @@ PE_TEST(native_format_still_rejects_an_off_canvas_solid_fill_in_a_pre_v7_file) {
     // The same record is accepted once the file declares the version that permits it.
     declareV7(blob);
     const auto back = deserializeDocument(blob);
-    PE_CHECK(back != nullptr);
+    PE_REQUIRE(back != nullptr);
     if (back != nullptr) {
         const SolidColorLayer* solid = firstSolid(*back);
         PE_CHECK(solid != nullptr);
@@ -787,6 +787,123 @@ PE_TEST(native_format_accepts_a_solid_fill_larger_than_the_dense_pixel_cap) {
     PE_CHECK(back != nullptr);
     if (back == nullptr) return;
     const SolidColorLayer* solid = firstSolid(*back);
-    PE_CHECK(solid != nullptr);
+    PE_REQUIRE(solid != nullptr);
     if (solid != nullptr) PE_CHECK(solid->bounds() == Rect{0, 0, 20'000, 20'000});
+}
+
+PE_TEST(native_format_scans_each_persisted_store_exactly_once_per_save) {
+    // #174. Content bounds are O(pixels in the layer) and two consumers want the same
+    // answer: the version decision asks whether anything is off-canvas, and the record
+    // emission writes the rect it found. They used to compute it separately, so an
+    // ordinary save scanned every pixel of every layer twice.
+    //
+    // Asserted as a count rather than as wall time. The duplicate is worth about 3.5% of a
+    // 24 MP save, which a benchmark on a fast machine would not reliably notice, so a
+    // regression would sail through CI unremarked.
+    const auto scansFor = [](const Document& doc) {
+        const std::uint64_t before = contentBoundsScanCount();
+        (void)serializeDocument(doc);
+        return contentBoundsScanCount() - before;
+    };
+
+    {  // Three pixel layers, no masks: three dense stores, three scans.
+        auto doc = Document::createBlank(Size{200, 150});
+        asPixel(*doc, 0)->tiles().fillRect(Rect{0, 0, 200, 150}, Rgba8{1, 2, 3, 255});
+        for (int i = 0; i < 2; ++i) {
+            auto extra = std::make_unique<PixelLayer>("L", BitDepth::U8);
+            extra->tiles().fillRect(Rect{10, 10, 100, 100}, Rgba8{4, 5, 6, 255});
+            doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(extra));
+        }
+        PE_CHECK_EQ(scansFor(*doc), static_cast<std::uint64_t>(3));
+    }
+
+    {  // Add a mask to each: a mask buffer is a second persisted store, scanned once too.
+        auto doc = Document::createBlank(Size{200, 150});
+        for (int i = 0; i < 3; ++i) {
+            PixelLayer* pl = nullptr;
+            std::unique_ptr<PixelLayer> made;
+            if (i == 0) {
+                pl = asPixel(*doc, 0);
+            } else {
+                made = std::make_unique<PixelLayer>("L", BitDepth::U8);
+                pl = made.get();
+            }
+            pl->tiles().fillRect(Rect{0, 0, 200, 150}, Rgba8{1, 2, 3, 255});
+            auto m = std::make_unique<Mask>();
+            m->buffer().fillRect(Rect{5, 5, 50, 50}, MaskBuffer::kClear);
+            pl->setMask(std::move(m));
+            if (made != nullptr) doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(made));
+        }
+        PE_CHECK_EQ(scansFor(*doc), static_cast<std::uint64_t>(6));
+    }
+
+    {  // Nesting does not multiply the count: one scan per store, wherever it sits.
+        auto doc = Document::createBlank(Size{200, 150});
+        asPixel(*doc, 0)->tiles().fillRect(Rect{0, 0, 200, 150}, Rgba8{1, 2, 3, 255});
+        auto group = std::make_unique<GroupLayer>("Set");
+        auto inner = std::make_unique<PixelLayer>("Inner", BitDepth::U8);
+        inner->tiles().fillRect(Rect{0, 0, 100, 100}, Rgba8{7, 7, 7, 255});
+        auto nested = std::make_unique<GroupLayer>("Nested");
+        auto deep = std::make_unique<PixelLayer>("Deep", BitDepth::U8);
+        deep->tiles().fillRect(Rect{20, 20, 40, 40}, Rgba8{8, 8, 8, 255});
+        nested->addChild(std::move(deep));
+        group->addChild(std::move(inner));
+        group->addChild(std::move(nested));
+        doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+        PE_CHECK_EQ(scansFor(*doc), static_cast<std::uint64_t>(3));
+    }
+
+    {  // A solid fill is procedural: no dense store, so nothing to scan at all.
+        auto doc = Document::createBlank(Size{200, 150});
+        std::vector<LayerId> seeded;
+        for (const auto& l : doc->topLevelLayers()) seeded.push_back(l->id());
+        for (LayerId id : seeded) (void)doc->cmdRemoveTopLevel(id);
+        doc->cmdInsertTopLevel(
+            0, std::make_unique<SolidColorLayer>(Rgba8{1, 2, 3, 255}, Rect{0, 0, 50, 50}, "Fill"));
+        PE_CHECK_EQ(scansFor(*doc), static_cast<std::uint64_t>(0));
+    }
+
+    {  // Off-canvas content does not change the count either. It used to: the version
+        // check short-circuited on the first off-canvas layer, so how many times a save
+        // scanned a document depended on its content. One scan per store, always.
+        auto doc = Document::createBlank(Size{200, 150});
+        asPixel(*doc, 0)->tiles().fillRect(Rect{-40, -40, 20, 20}, Rgba8{1, 2, 3, 255});
+        for (int i = 0; i < 2; ++i) {
+            auto extra = std::make_unique<PixelLayer>("L", BitDepth::U8);
+            extra->tiles().fillRect(Rect{10, 10, 100, 100}, Rgba8{4, 5, 6, 255});
+            doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(extra));
+        }
+        PE_CHECK_EQ(scansFor(*doc), static_cast<std::uint64_t>(3));
+    }
+}
+
+PE_TEST(native_format_emits_the_same_rect_the_version_decision_used) {
+    // The two consumers must agree. If the version decision saw one rectangle and the
+    // record carried another, a file could declare v6 while containing an off-canvas rect,
+    // and its own reader would then refuse it. That is the shape of #173, reached a
+    // different way.
+    //
+    // Checked over the boundary between the two versions: content just inside the canvas
+    // must stay v6, and content one pixel outside must go to v7 and round-trip.
+    for (const bool offCanvas : {false, true}) {
+        auto doc = Document::createBlank(Size{200, 150});
+        auto* base = asPixel(*doc, 0);
+        base->setName("");
+        base->tiles().fillRect(offCanvas ? Rect{-1, 0, 20, 20} : Rect{0, 0, 20, 20},
+                               Rgba8{1, 2, 3, 255});
+        const std::vector<std::byte> blob = serializeDocument(*doc);
+        PE_CHECK_EQ(static_cast<int>(blob[5]),
+                    static_cast<int>(offCanvas ? std::byte{'7'} : std::byte{'6'}));
+
+        const auto back = deserializeDocument(blob);
+        PE_CHECK(back != nullptr);
+        if (back == nullptr) continue;
+        // The pixels landed where they were, which is only possible if the emitted rect
+        // matched the one the version was chosen from.
+        const auto* rl = dynamic_cast<const PixelLayer*>(back->topLevelLayers()[0].get());
+        PE_CHECK(rl != nullptr);
+        if (rl == nullptr) continue;
+        PE_CHECK(rl->tiles().pixel(offCanvas ? -1 : 0, 0) == Rgba8{1, 2, 3, 255});
+        PE_CHECK(serializeDocument(*back) == blob);
+    }
 }

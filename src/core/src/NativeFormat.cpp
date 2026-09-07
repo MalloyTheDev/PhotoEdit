@@ -10,11 +10,13 @@
 #include "pe/core/SolidColorLayer.hpp"
 #include "pe/core/TextLayer.hpp"
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -532,8 +534,12 @@ bool readBlock(Reader& r, std::size_t expectedSize, std::vector<std::byte>& out,
 //
 // Scanned tile by tile through find(), not pixel by pixel through pixel(): the latter does
 // a map lookup per pixel, which is exactly what #150 removed from the other hot paths.
+// See contentBoundsScanCount in the header.
+std::atomic<std::uint64_t> g_boundsScans{0};
+
 template <class Pixel>
 Rect tightContentBounds(const TileStoreT<Pixel>& store) {
+    g_boundsScans.fetch_add(1, std::memory_order_relaxed);
     const Rect coarse = store.contentBounds();
     if (coarse.isEmpty()) return Rect{};
     const Pixel defaultPixel{};
@@ -570,6 +576,7 @@ Rect tightContentBounds(const TileStoreT<Pixel>& store) {
 // The same idea for a mask. MaskBuffer::contentBounds() is tile-granular too, and its
 // default byte is kOpaque (fully revealing) rather than a zeroed pixel.
 Rect tightMaskBounds(const MaskBuffer& buf) {
+    g_boundsScans.fetch_add(1, std::memory_order_relaxed);
     const Rect coarse = buf.contentBounds();
     if (coarse.isEmpty()) return Rect{};
     int minX = std::numeric_limits<int>::max();
@@ -603,11 +610,78 @@ Rect tightMaskBounds(const MaskBuffer& buf) {
     return Rect{minX, minY, maxX - minX + 1, maxY - minY + 1};
 }
 
+// The expensive per-layer facts one save needs, computed once.
+//
+// Two consumers want the SAME rectangle: the version decision asks whether anything lies
+// outside the canvas, and the record emission writes the rect it found. They used to
+// compute it independently, so an ordinary save scanned every pixel of every layer twice
+// (measured: 6 scans and 144 million pixel visits for a 24 MP three-layer document). The
+// answer cannot change between the two phases, because serializeDocument takes a const
+// document and nothing here mutates it, so computing it once is not a cache: it is the
+// same value reaching both places.
+//
+// Keyed by layer pointer rather than by position, so the two walks cannot drift out of
+// step. Local to one serializeDocument call: nothing is stored on the layers, and there is
+// nothing to invalidate.
+struct PreparedLayer {
+    Rect content{};           // tight bounds of the dense store at the document depth
+    Rect mask{};              // tight bounds of the mask buffer
+    bool hasContent = false;  // set for a pixel layer
+    bool hasMask = false;
+};
+using PreparedTree = std::unordered_map<const Layer*, PreparedLayer>;
+
+void prepareLayer(const Layer& layer, BitDepth depth, PreparedTree& out) {
+    PreparedLayer p;
+    if (layer.mask() != nullptr) {
+        p.mask = tightMaskBounds(layer.mask()->buffer());
+        p.hasMask = true;
+    }
+    if (const auto* pl = dynamic_cast<const PixelLayer*>(&layer)) {
+        switch (depth) {
+            case BitDepth::U16:
+                p.content = tightContentBounds(pl->tiles16());
+                break;
+            case BitDepth::F32:
+                p.content = tightContentBounds(pl->tilesF());
+                break;
+            case BitDepth::U8:
+            default:
+                p.content = tightContentBounds(pl->tiles());
+                break;
+        }
+        p.hasContent = true;
+    }
+    out.emplace(&layer, p);
+    if (const auto* group = dynamic_cast<const GroupLayer*>(&layer)) {
+        for (const auto& child : group->children()) {
+            if (child != nullptr) prepareLayer(*child, depth, out);
+        }
+    }
+}
+
+PreparedTree prepareTree(const Document& doc) {
+    PreparedTree out;
+    for (const auto& layer : doc.topLevelLayers()) {
+        if (layer != nullptr) prepareLayer(*layer, doc.bitDepth(), out);
+    }
+    return out;
+}
+
+// The prepared entry for a layer. Every layer the writer or the version decision can reach
+// was prepared by the walk above, so a miss means the two walks disagree about the tree;
+// an empty record is the conservative answer (no content, no mask) rather than a crash.
+const PreparedLayer& preparedFor(const PreparedTree& prepared, const Layer& layer) {
+    static const PreparedLayer kNone{};
+    const auto it = prepared.find(&layer);
+    return it == prepared.end() ? kNone : it->second;
+}
+
 template <class Pixel>
-void writePixelBlock(Writer& w, const TileStoreT<Pixel>& store) {
-    // NOT clamped to the canvas: content a user moved past the edge is real data, and
-    // clamping here dropped it permanently at save time. See kMinOffCanvasVersion.
-    const Rect b = tightContentBounds(store);
+void writePixelBlock(Writer& w, const TileStoreT<Pixel>& store, Rect b) {
+    // `b` is NOT clamped to the canvas: content a user moved past the edge is real data,
+    // and clamping here dropped it permanently at save time. See kMinOffCanvasVersion.
+    // It arrives from the prepared record so this and the version decision cannot disagree.
     w.i32(b.x);
     w.i32(b.y);
     w.i32(b.width);
@@ -705,7 +779,9 @@ bool readContentRect(Reader& r, int canvasW, int canvasH, bool allowOffCanvas, R
     return true;
 }
 
-void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active, BitDepth depth) {
+void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active, BitDepth depth,
+                const PreparedTree& prepared) {
+    const PreparedLayer& pre = preparedFor(prepared, layer);
     const bool isGroup = layer.kind() == LayerKind::Group;
     const bool isAdjustment = layer.isAdjustment();
     const auto* solid = dynamic_cast<const SolidColorLayer*>(&layer);
@@ -734,7 +810,7 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
         w.u8(mask->enabled() ? 1 : 0);
         w.f32(mask->density());
         w.u8(mask->inverted() ? 1 : 0);
-        const Rect mb = tightMaskBounds(mask->buffer());  // unclamped; see writePixelBlock
+        const Rect mb = pre.mask;  // unclamped; see writePixelBlock
         w.i32(mb.x);
         w.i32(mb.y);
         w.i32(mb.width);
@@ -757,7 +833,9 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
             if (serializable(*child)) kids.push_back(child.get());
         }
         w.u32(static_cast<std::uint32_t>(kids.size()));
-        for (const Layer* child : kids) writeLayer(w, *child, canvasBounds, active, depth);
+        for (const Layer* child : kids) {
+            writeLayer(w, *child, canvasBounds, active, depth, prepared);
+        }
         return;
     }
 
@@ -830,14 +908,14 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
     const auto& pl = static_cast<const PixelLayer&>(layer);
     switch (depth) {
         case BitDepth::U16:
-            writePixelBlock(w, pl.tiles16());
+            writePixelBlock(w, pl.tiles16(), pre.content);
             break;
         case BitDepth::F32:
-            writePixelBlock(w, pl.tilesF());
+            writePixelBlock(w, pl.tilesF(), pre.content);
             break;
         case BitDepth::U8:
         default:
-            writePixelBlock(w, pl.tiles());
+            writePixelBlock(w, pl.tiles(), pre.content);
             break;
     }
 }
@@ -1038,50 +1116,54 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allow
 // Whether anything in the tree extends past the canvas, which is what decides the file
 // version. Checked over the same three things the writer emits unclamped: pixel content,
 // mask content, and a solid-color layer's fill rect.
-bool hasOffCanvasContent(const Layer& layer, Rect canvasBounds) {
+bool hasOffCanvasContent(const Layer& layer, Rect canvasBounds, const PreparedTree& prepared) {
     const auto outside = [canvasBounds](Rect r) {
         return !r.isEmpty() && r.intersected(canvasBounds) != r;
     };
-    if (layer.mask() != nullptr && outside(tightMaskBounds(layer.mask()->buffer()))) return true;
+    // Reads the SAME rectangles the writer will emit, rather than recomputing them. Using
+    // an approximation here (the canvas, or tile-granular bounds) would let the version
+    // disagree with the record it describes, which is how a file becomes unreadable.
+    const PreparedLayer& pre = preparedFor(prepared, layer);
+    if (pre.hasMask && outside(pre.mask)) return true;
     if (const auto* solid = dynamic_cast<const SolidColorLayer*>(&layer)) {
         if (outside(solid->bounds())) return true;
     }
     if (const auto* group = dynamic_cast<const GroupLayer*>(&layer)) {
         for (const auto& child : group->children()) {
-            if (child != nullptr && hasOffCanvasContent(*child, canvasBounds)) return true;
+            if (child != nullptr && hasOffCanvasContent(*child, canvasBounds, prepared)) {
+                return true;
+            }
         }
         return false;
     }
-    if (const auto* pl = dynamic_cast<const PixelLayer*>(&layer)) {
-        // The same tight bounds the writer emits, or the version would disagree with the
-        // record it describes.
-        switch (pl->depth()) {
-            case BitDepth::U16:
-                return outside(tightContentBounds(pl->tiles16()));
-            case BitDepth::F32:
-                return outside(tightContentBounds(pl->tilesF()));
-            default:
-                return outside(tightContentBounds(pl->tiles()));
-        }
-    }
+    // The same tight bounds the writer emits, taken from the same prepared record, or the
+    // version would disagree with the record it describes.
+    if (pre.hasContent) return outside(pre.content);
     return false;
 }
 
-bool hasOffCanvasContent(const Document& doc) {
+bool hasOffCanvasContent(const Document& doc, const PreparedTree& prepared) {
     const Rect canvasBounds = doc.canvasBounds();
     for (const auto& layer : doc.topLevelLayers()) {
-        if (layer != nullptr && hasOffCanvasContent(*layer, canvasBounds)) return true;
+        if (layer != nullptr && hasOffCanvasContent(*layer, canvasBounds, prepared)) return true;
     }
     return false;
 }
 
 }  // namespace
 
+std::uint64_t contentBoundsScanCount() noexcept {
+    return g_boundsScans.load(std::memory_order_relaxed);
+}
+
 std::vector<std::byte> serializeDocument(const Document& doc) {
     Writer w;
     // Only claim the newer version when the document actually needs it, so an ordinary file
     // stays readable by builds that predate off-canvas support.
-    const bool offCanvas = hasOffCanvasContent(doc);
+    // One walk over the tree computes every expensive per-layer rectangle; the version
+    // decision and the records below both read from it. See PreparedLayer.
+    const PreparedTree prepared = prepareTree(doc);
+    const bool offCanvas = hasOffCanvasContent(doc, prepared);
     const std::uint32_t version = offCanvas ? kVersion : kVersionOnCanvas;
     w.bytes(kMagicPrefix, sizeof(kMagicPrefix));
     w.u8(static_cast<std::uint8_t>('0' + version));
@@ -1101,7 +1183,9 @@ std::vector<std::byte> serializeDocument(const Document& doc) {
     w.u32(static_cast<std::uint32_t>(tops.size()));
     const Rect canvasBounds = doc.canvasBounds();
     const BitDepth depth = doc.bitDepth();
-    for (const Layer* layer : tops) writeLayer(w, *layer, canvasBounds, doc.activeLayer(), depth);
+    for (const Layer* layer : tops) {
+        writeLayer(w, *layer, canvasBounds, doc.activeLayer(), depth, prepared);
+    }
     return w.take();
 }
 

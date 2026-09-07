@@ -80,6 +80,25 @@ inline bool nearly(float a, float b, float eps = 1e-4f) {
         }                                                                                     \
     } while (0)
 
+// PE_CHECK, then STOP this test case if it failed.
+//
+// For a precondition the rest of the case dereferences: a pointer that must be non-null, a
+// container that must be non-empty. PE_CHECK alone records the failure and carries on into
+// the dereference, which aborts the whole binary, and every case after it then silently
+// does not run. That is how a deliberate mutation hides a real regression, and it has now
+// happened twice in this repository, so the rule has a macro rather than a convention.
+//
+// Only valid at the top level of a PE_TEST body (it returns). Inside a loop, use PE_CHECK
+// with an explicit `continue`.
+#define PE_REQUIRE(...)                                                                         \
+    do {                                                                                        \
+        if (!(__VA_ARGS__)) {                                                                   \
+            ++::pe_test::currentFailures();                                                     \
+            std::printf("    REQUIRE failed: %s  (%s:%d)\n", #__VA_ARGS__, __FILE__, __LINE__); \
+            return;                                                                             \
+        }                                                                                       \
+    } while (0)
+
 #define PE_CHECK_EQ(a, b)                                                                        \
     do {                                                                                         \
         if (!((a) == (b))) {                                                                     \

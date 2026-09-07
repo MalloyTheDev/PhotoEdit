@@ -101,6 +101,17 @@ lane), and code review.
   OS escalates it to the not-responding state; force-quitting there loses the
   document. Anything that can take longer than a frame belongs on a worker.
 
+## Preconditions in a test
+
+- **A precondition the rest of the case dereferences uses `PE_REQUIRE`, not `PE_CHECK`.**
+  `PE_CHECK` records the failure and carries on into the dereference, which aborts the
+  whole binary; every case after it then silently does not run, which is exactly how a
+  deliberate mutation hides a real regression. `PE_REQUIRE` reports and returns.
+- Inside a loop, `PE_REQUIRE` is wrong (it returns from the case). Use `PE_CHECK` with an
+  explicit `continue`.
+- This has bitten twice: once in a live-stroke test, once during a format mutation where
+  the suite stopped at case 130 and the remaining 430 never ran.
+
 ## Testing against a framework
 
 - **Test the externally observable framework result, not that our interception ran.**

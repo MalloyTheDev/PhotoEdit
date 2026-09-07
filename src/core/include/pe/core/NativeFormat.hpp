@@ -32,6 +32,16 @@ class Document;
 // rejected (nullptr) rather than driven to bad_alloc. Hosts may tune it per environment.
 inline constexpr std::int64_t kMaxNativeContentBytes = 4'000'000'000;  // ~3.7 GiB
 
+// Diagnostics: how many full content-bounds scans serializeDocument has performed since
+// the process started. Each scan is O(pixels in the layer), so it is the expensive part of
+// a save, and each persisted store must be scanned AT MOST ONCE per save: the version
+// decision and the record emission are two consumers of one answer, not two computations.
+//
+// Exposed for tests and tuning, the same way CanvasRenderer::recompositeCount is. A
+// regression here is invisible to a benchmark that happens to run on a fast machine, so it
+// is asserted on directly. Atomic because a save runs on a worker thread.
+[[nodiscard]] std::uint64_t contentBoundsScanCount() noexcept;
+
 [[nodiscard]] std::vector<std::byte> serializeDocument(const Document& doc);
 [[nodiscard]] std::unique_ptr<Document> deserializeDocument(
     std::span<const std::byte> data, std::int64_t maxTotalContentBytes = kMaxNativeContentBytes);
