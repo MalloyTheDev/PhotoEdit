@@ -4,12 +4,22 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 
 namespace pe {
 
 namespace {
 // Cap decoded dimensions before allocating (untrusted input); 64 MP of RGBA8 = 256 MB.
 constexpr std::int64_t kMaxImagePixels = 64'000'000;
+
+// An owned libtiff handle. Both entry points here allocate large buffers, or grow one,
+// while the handle is open, and a throw there used to skip TIFFClose. The handle also
+// holds a pointer to the MemReader/MemWriter on the caller's stack, which unwinding
+// destroys, so it must always be declared AFTER the one it points at.
+struct TiffDeleter {
+    void operator()(TIFF* t) const noexcept { TIFFClose(t); }
+};
+using TiffHandle = std::unique_ptr<TIFF, TiffDeleter>;
 
 // --- in-memory libtiff client adapters (libtiff has no built-in memory API) ---
 
@@ -96,30 +106,33 @@ std::vector<std::byte> encodeTiff(const PixelBuffer& image) {
     if (image.isEmpty()) return {};
 
     MemWriter sink;
-    TIFF* tif = TIFFClientOpen("mem", "w", static_cast<thandle_t>(&sink), writeRead, writeWrite,
-                               writeSeek, memClose, writeSize, memMap, memUnmap);
+    // Declared after `sink`, which libtiff holds a pointer to, so it closes first.
+    TiffHandle tif(TIFFClientOpen("mem", "w", static_cast<thandle_t>(&sink), writeRead, writeWrite,
+                                  writeSeek, memClose, writeSize, memMap, memUnmap));
     if (tif == nullptr) return {};
 
-    TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, static_cast<uint32_t>(image.width()));
-    TIFFSetField(tif, TIFFTAG_IMAGELENGTH, static_cast<uint32_t>(image.height()));
-    TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 4);
-    TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, 8);
-    TIFFSetField(tif, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
-    TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
-    TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
-    TIFFSetField(tif, TIFFTAG_COMPRESSION, COMPRESSION_LZW);  // lossless
-    const uint16_t extra[1] = {EXTRASAMPLE_UNASSALPHA};       // straight (unassociated) alpha
-    TIFFSetField(tif, TIFFTAG_EXTRASAMPLES, 1, extra);
-    TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, TIFFDefaultStripSize(tif, 0));
+    TIFFSetField(tif.get(), TIFFTAG_IMAGEWIDTH, static_cast<uint32_t>(image.width()));
+    TIFFSetField(tif.get(), TIFFTAG_IMAGELENGTH, static_cast<uint32_t>(image.height()));
+    TIFFSetField(tif.get(), TIFFTAG_SAMPLESPERPIXEL, 4);
+    TIFFSetField(tif.get(), TIFFTAG_BITSPERSAMPLE, 8);
+    TIFFSetField(tif.get(), TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+    TIFFSetField(tif.get(), TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+    TIFFSetField(tif.get(), TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
+    TIFFSetField(tif.get(), TIFFTAG_COMPRESSION, COMPRESSION_LZW);  // lossless
+    const uint16_t extra[1] = {EXTRASAMPLE_UNASSALPHA};             // straight (unassociated) alpha
+    TIFFSetField(tif.get(), TIFFTAG_EXTRASAMPLES, 1, extra);
+    TIFFSetField(tif.get(), TIFFTAG_ROWSPERSTRIP, TIFFDefaultStripSize(tif.get(), 0));
 
     bool ok = true;
     for (int y = 0; y < image.height() && ok; ++y) {
         // One contiguous RGBA8 scanline; TIFFWriteScanline takes a non-const buffer but
         // does not modify it for a write.
         auto* row = const_cast<Rgba8*>(image.data() + static_cast<std::size_t>(y) * image.width());
-        ok = TIFFWriteScanline(tif, row, static_cast<uint32_t>(y), 0) >= 0;
+        ok = TIFFWriteScanline(tif.get(), row, static_cast<uint32_t>(y), 0) >= 0;
     }
-    TIFFClose(tif);
+    // Closed before `sink` is read: libtiff flushes its directory and any buffered strip on
+    // close, so the bytes are not all there until it has run.
+    tif.reset();
     if (!ok) return {};
     return std::move(sink.data);
 }
@@ -135,20 +148,24 @@ std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
     TIFFSetErrorHandler(nullptr);
 
     MemReader src{data.data(), static_cast<toff_t>(data.size()), 0};
-    TIFF* tif = TIFFClientOpen("mem", "r", static_cast<thandle_t>(&src), readRead, readWrite,
-                               readSeek, memClose, readSize, memMap, memUnmap);
+    // The TIFF* is owned from here on. The explicit TIFFClose calls this replaces covered
+    // every path the code could SEE; the PixelBuffer and row buffer below are up to 256 MB
+    // and can throw, and a throw there skipped the close. Worse than a plain leak: the
+    // handle libtiff keeps also holds a pointer to `src`, which is on this stack and is
+    // destroyed as it unwinds. `src` is declared BEFORE the guard so it outlives it.
+    const TiffHandle tif(TIFFClientOpen("mem", "r", static_cast<thandle_t>(&src), readRead,
+                                        readWrite, readSeek, memClose, readSize, memMap, memUnmap));
     if (tif == nullptr) return std::nullopt;
 
     uint32_t w = 0;
     uint32_t h = 0;
-    TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
-    TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
+    TIFFGetField(tif.get(), TIFFTAG_IMAGEWIDTH, &w);
+    TIFFGetField(tif.get(), TIFFTAG_IMAGELENGTH, &h);
     // uint64 product so two 32-bit dimensions can't overflow before the cap compares
     // (0xFFFFFFFF^2 fits in uint64) — matches the PNG/JPEG decoders.
     if (w == 0 || h == 0 ||
         static_cast<std::uint64_t>(w) * static_cast<std::uint64_t>(h) >
             static_cast<std::uint64_t>(kMaxImagePixels)) {
-        TIFFClose(tif);
         return std::nullopt;
     }
 
@@ -161,10 +178,10 @@ std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
     uint16_t bps = 0;
     uint16_t photometric = 0;
     uint16_t planar = 0;
-    TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLESPERPIXEL, &spp);
-    TIFFGetFieldDefaulted(tif, TIFFTAG_BITSPERSAMPLE, &bps);
-    TIFFGetField(tif, TIFFTAG_PHOTOMETRIC, &photometric);
-    TIFFGetFieldDefaulted(tif, TIFFTAG_PLANARCONFIG, &planar);
+    TIFFGetFieldDefaulted(tif.get(), TIFFTAG_SAMPLESPERPIXEL, &spp);
+    TIFFGetFieldDefaulted(tif.get(), TIFFTAG_BITSPERSAMPLE, &bps);
+    TIFFGetField(tif.get(), TIFFTAG_PHOTOMETRIC, &photometric);
+    TIFFGetFieldDefaulted(tif.get(), TIFFTAG_PLANARCONFIG, &planar);
     // The stored origin. The fast path reads scanlines in storage order, so it has to place
     // them itself; only the general fallback below normalizes orientation, via
     // TIFFReadRGBAImageOriented. Ignoring this decoded a BOTLEFT file (several scanners, and
@@ -175,12 +192,13 @@ std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
     // ImageWidth x ImageLength. Rather than reshape here, they are excluded from the fast
     // path and handled by the fallback, which is what they already got.
     uint16_t orientation = ORIENTATION_TOPLEFT;
-    TIFFGetFieldDefaulted(tif, TIFFTAG_ORIENTATION, &orientation);
+    TIFFGetFieldDefaulted(tif.get(), TIFFTAG_ORIENTATION, &orientation);
     const bool axisAligned =
         orientation == ORIENTATION_TOPLEFT || orientation == ORIENTATION_TOPRIGHT ||
         orientation == ORIENTATION_BOTRIGHT || orientation == ORIENTATION_BOTLEFT;
     const bool simpleRgb = bps == 8 && (spp == 3 || spp == 4) && photometric == PHOTOMETRIC_RGB &&
-                           planar == PLANARCONFIG_CONTIG && TIFFIsTiled(tif) == 0 && axisAligned;
+                           planar == PLANARCONFIG_CONTIG && TIFFIsTiled(tif.get()) == 0 &&
+                           axisAligned;
 
     if (simpleRgb) {
         // TOPRIGHT and BOTRIGHT store columns right to left; BOTLEFT and BOTRIGHT store rows
@@ -192,7 +210,7 @@ std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
         std::vector<std::uint8_t> row(static_cast<std::size_t>(w) * spp);
         bool ok = true;
         for (uint32_t y = 0; y < h && ok; ++y) {
-            if (TIFFReadScanline(tif, row.data(), y, 0) < 0) {
+            if (TIFFReadScanline(tif.get(), row.data(), y, 0) < 0) {
                 ok = false;
                 break;
             }
@@ -206,7 +224,6 @@ std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
         }
         // A simple-RGB TIFF is authoritative: if a scanline read fails the file is
         // corrupt — fail rather than silently taking the premultiplying RGBA fallback.
-        TIFFClose(tif);
         return ok ? std::optional<PixelBuffer>(std::move(out)) : std::nullopt;
     }
 
@@ -215,8 +232,7 @@ std::optional<PixelBuffer> decodeTiff(std::span<const std::byte> data) {
     // R,G,B,A — matching Rgba8. (Straight alpha is premultiplied here; acceptable for
     // exotic inputs we don't author.)
     auto* raster = reinterpret_cast<uint32_t*>(out.data());
-    const int rc = TIFFReadRGBAImageOriented(tif, w, h, raster, ORIENTATION_TOPLEFT, 0);
-    TIFFClose(tif);
+    const int rc = TIFFReadRGBAImageOriented(tif.get(), w, h, raster, ORIENTATION_TOPLEFT, 0);
     if (rc == 0) return std::nullopt;
     return out;
 }

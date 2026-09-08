@@ -5,8 +5,16 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 
 namespace pe {
+
+namespace {
+struct WebPDeleter {
+    void operator()(std::uint8_t* p) const noexcept { WebPFree(p); }
+};
+using WebPBuffer = std::unique_ptr<std::uint8_t, WebPDeleter>;
+}  // namespace
 
 namespace {
 // Cap decoded dimensions before allocating (untrusted input); 64 MP of RGBA8 = 256 MB.
@@ -20,13 +28,15 @@ std::vector<std::byte> encodeWebp(const PixelBuffer& image) {
     const std::size_t n =
         WebPEncodeLosslessRGBA(reinterpret_cast<const std::uint8_t*>(image.data()), image.width(),
                                image.height(), image.width() * 4 /*stride*/, &output);
+    // Owned from here: result.resize below can throw on a large image, and the explicit
+    // WebPFree it replaces was after it.
+    const WebPBuffer owned(output);
 
     std::vector<std::byte> result;
-    if (n > 0 && output != nullptr) {
+    if (n > 0 && owned != nullptr) {
         result.resize(n);
-        std::memcpy(result.data(), output, n);
+        std::memcpy(result.data(), owned.get(), n);
     }
-    WebPFree(output);
     return result;
 }
 

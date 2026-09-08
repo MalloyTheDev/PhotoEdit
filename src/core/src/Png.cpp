@@ -15,6 +15,28 @@ namespace {
 // Cap decoded dimensions so a malicious/huge PNG header can't trigger an enormous
 // allocation. 64 MP of RGBA8 is 256 MB — the same budget the rest of the engine uses.
 constexpr std::int64_t kMaxImagePixels = 64'000'000;
+
+// Frees whatever libpng hung off `png_image` however this scope ends.
+//
+// The explicit calls this replaces covered every path the code could SEE, but not the one
+// it could not: the buffers allocated between acquiring the struct's internals and freeing
+// them are up to 256 MB, and a throw there skipped the free entirely. That is not a
+// process-ending leak either, which is what makes it worth fixing: decoding runs on the
+// shell's worker thread, which catches the exception and returns the app to a usable state,
+// so the user retries the same large file and leaks again.
+//
+// png_image_free is idempotent and a no-op on a zeroed struct, so the guard is safe to arm
+// before libpng has allocated anything.
+class PngImageGuard {
+public:
+    explicit PngImageGuard(png_image& image) noexcept : image_(image) {}
+    ~PngImageGuard() { png_image_free(&image_); }
+    PngImageGuard(const PngImageGuard&) = delete;
+    PngImageGuard& operator=(const PngImageGuard&) = delete;
+
+private:
+    png_image& image_;
+};
 }  // namespace
 
 std::vector<std::byte> encodePng(const PixelBuffer& image) {
@@ -22,6 +44,7 @@ std::vector<std::byte> encodePng(const PixelBuffer& image) {
 
     png_image png;
     std::memset(&png, 0, sizeof(png));
+    const PngImageGuard guard(png);
     png.version = PNG_IMAGE_VERSION;
     png.width = static_cast<png_uint_32>(image.width());
     png.height = static_cast<png_uint_32>(image.height());
@@ -46,6 +69,7 @@ std::optional<PixelBuffer> decodePng(std::span<const std::byte> data) {
     png_image png;
     std::memset(&png, 0, sizeof(png));
     png.version = PNG_IMAGE_VERSION;
+    const PngImageGuard guard(png);
     if (png_image_begin_read_from_memory(&png, data.data(), data.size()) == 0) {
         return std::nullopt;  // not a PNG / malformed header
     }
@@ -55,7 +79,6 @@ std::optional<PixelBuffer> decodePng(std::span<const std::byte> data) {
     // the bound is self-evident without relying on libpng's internal dimension limits.
     if (static_cast<std::uint64_t>(png.width) * static_cast<std::uint64_t>(png.height) >
         static_cast<std::uint64_t>(kMaxImagePixels)) {
-        png_image_free(&png);
         return std::nullopt;
     }
 
@@ -63,7 +86,6 @@ std::optional<PixelBuffer> decodePng(std::span<const std::byte> data) {
     PixelBuffer out(static_cast<int>(png.width), static_cast<int>(png.height));
     // row_stride 0 == default (width * 4); out's storage is exactly width*height*4.
     const int ok = png_image_finish_read(&png, nullptr, out.data(), 0, nullptr);
-    png_image_free(&png);  // safe in all cases (idempotent)
     if (ok == 0) return std::nullopt;
     return out;
 }
