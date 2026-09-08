@@ -233,6 +233,9 @@ private:
     // While a worker owns the document, paint this instead of compositing. See setFrozen.
     bool frozen_ = false;
     TaskRunner taskRunner_;  // unset: run the work directly (see setTaskRunner)
+    // Whether this drag has already explained why the move is being refused. Reset on each
+    // press, so the reason is said once rather than on every motion event.
+    bool moveRefusalSaid_ = false;
     QPixmap frozenFrame_;
 
     bool needsFit_ = true;  // fit-to-window pending until the widget has a valid size

@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <vector>
 
 using namespace pe;
@@ -581,6 +582,48 @@ PE_TEST(move_refuses_content_outside_the_representable_coordinate_range) {
     auto* pl2 = static_cast<PixelLayer*>(ok->findLayer(ok->activeLayer()));
     pl2->tiles().setPixel(kMaxCanvasDimension - 10, 5, Rgba8{1, 2, 3, 255});
     PE_CHECK(moveLayerContent(*ok, ok->activeLayer(), 5000, 0) == nullptr);
+}
+
+PE_TEST(move_refusal_explains_what_the_move_actually_declined) {
+    // bakeRefusal must NOT be used for a Move: it answers about kMaxFilterPixels, which a
+    // Move has not been bounded by since it moved to its own native-depth path. Asked about a
+    // 4000x4000 layer it says "over budget, 16 megapixels" for a Move that in fact succeeds,
+    // which is worse than saying nothing.
+    constexpr int T = kTileSize;
+    {
+        auto doc = Document::createBlank(Size{4000, 4000});
+        PE_REQUIRE(doc != nullptr);
+        const LayerId base = doc->activeLayer();
+        auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+        pl->tiles().fillRect(Rect{0, 0, 4000, 4000}, Rgba8{1, 2, 3, 255});
+        // The move succeeds, so its refusal must be None...
+        PE_CHECK(!moveRefusal(*doc, base, 25, 25).isRefusal());
+        PE_CHECK(moveLayerContent(*doc, base, 25, 25) != nullptr);
+        // ...while bakeRefusal, asked about the same layer, confidently refuses.
+        PE_CHECK(bakeRefusal(*doc, base).isRefusal());
+    }
+    {  // Over the move budget: refused, and the reason names megabytes, not megapixels.
+        auto doc = Document::createBlank(Size{70 * T, 70 * T});
+        PE_REQUIRE(doc != nullptr);
+        const LayerId base = doc->activeLayer();
+        auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+        pl->tiles().setPixel(1, 1, Rgba8{1, 2, 3, 255});
+        pl->tiles().setPixel(69 * T, 69 * T, Rgba8{4, 5, 6, 255});
+        const Refusal why = moveRefusal(*doc, base, 4, 4);
+        PE_CHECK(why.isRefusal());
+        PE_CHECK(why.code == RefusalCode::OverSizeBudget);
+        PE_CHECK(why.explanation.find("MB") != std::string::npos);
+        PE_CHECK(moveLayerContent(*doc, base, 4, 4) == nullptr);  // and it really is refused
+    }
+    {  // An empty layer, and a zero move, are distinct NoEffect cases rather than budget ones.
+        auto doc = Document::createBlank(Size{64, 64});
+        PE_REQUIRE(doc != nullptr);
+        const LayerId base = doc->activeLayer();
+        PE_CHECK(moveRefusal(*doc, base, 4, 4).code == RefusalCode::NoEffect);
+        static_cast<PixelLayer*>(doc->findLayer(base))->tiles().setPixel(5, 5, Rgba8{1, 2, 3, 255});
+        PE_CHECK(moveRefusal(*doc, base, 0, 0).code == RefusalCode::NoEffect);
+        PE_CHECK(!moveRefusal(*doc, base, 4, 4).isRefusal());
+    }
 }
 
 PE_TEST(move_refuses_past_the_memory_budget) {

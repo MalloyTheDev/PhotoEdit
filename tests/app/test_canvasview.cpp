@@ -212,6 +212,59 @@ PE_TEST(canvasview_wand_leaves_the_canvas_thawed_after_a_click) {
     view.setDocument(nullptr);
 }
 
+PE_TEST(canvasview_a_refused_move_says_why_once) {
+    // #180's real complaint was the SILENCE, not the threshold. Raising the limit only moved
+    // where the silence starts, so a drag that cannot move anything has to explain itself.
+    // Once per drag, not once per motion event, or a slow drag buries the status bar.
+    constexpr int T = pe::kTileSize;
+    auto doc = pe::Document::createBlank(pe::Size{70 * T, 70 * T});
+    PE_REQUIRE(doc != nullptr);
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().setPixel(1, 1, pe::Rgba8{1, 2, 3, 255});
+    pl->tiles().setPixel(69 * T, 69 * T, pe::Rgba8{4, 5, 6, 255});  // far past the move budget
+
+    pe::app::CanvasView view;
+    view.resize(300, 300);
+    view.setDocument(doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Move);
+
+    const QStringList said = messagesFrom(view, [&view] {
+        pressAt(view, QPointF(40, 40));
+        moveTo(view, QPointF(50, 50));
+        moveTo(view, QPointF(60, 60));
+        moveTo(view, QPointF(70, 70));
+        releaseAt(view, QPointF(70, 70));
+    });
+    PE_CHECK_EQ(said.size(), 1);  // three motion events, one explanation
+    PE_CHECK(!said.isEmpty() && said.first().contains(QStringLiteral("MB")));
+    PE_CHECK(!doc->history().canUndo());  // and nothing was committed
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_a_move_that_works_says_nothing) {
+    // The inverse, so the message above cannot simply always fire.
+    auto doc = pe::Document::createBlank(pe::Size{256, 256});
+    PE_REQUIRE(doc != nullptr);
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(pe::Rect{10, 10, 20, 20}, pe::Rgba8{200, 50, 50, 255});
+
+    pe::app::CanvasView view;
+    view.resize(300, 300);
+    view.setDocument(doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Move);
+
+    const QStringList said = messagesFrom(view, [&view] {
+        pressAt(view, QPointF(20, 20));
+        moveTo(view, QPointF(40, 30));
+        releaseAt(view, QPointF(40, 30));
+    });
+    PE_CHECK_EQ(said.size(), 0);
+    PE_CHECK(doc->history().canUndo());
+    view.setDocument(nullptr);
+}
+
 PE_TEST(canvasview_move_drag_keeps_the_tile_cache_instead_of_dropping_it) {
     // Every mouse-move of a drag called reloadImage(), which drops the whole tile LRU and the
     // retained scaled composite, so the next paint recomposited everything visible. The exact

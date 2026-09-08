@@ -9,6 +9,7 @@
 #include "pe/core/Document.hpp"
 #include "pe/core/Filter.hpp"  // pe::moveLayerContent
 #include "pe/core/PixelBuffer.hpp"
+#include "pe/core/Refusal.hpp"
 #include "pe/core/Selection.hpp"
 
 #include <QApplication>
@@ -849,6 +850,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         return;
     }
     if (toolMode_ == Tool::Move) {
+        moveRefusalSaid_ = false;  // a new drag gets to explain itself again
         // Recover from any stale (capture-lost) preview. This used to revert without
         // repainting at all, leaving the reverted pixels stale on screen until something
         // else happened to invalidate them; having the rect closes that too.
@@ -1083,7 +1085,19 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         }
         movePreview_ = pe::moveLayerContent(*doc_, moveLayer_, dx, dy);
         pe::Rect applied{};
-        if (movePreview_) applied = movePreview_->execute(*doc_).dirtyRegion;
+        if (movePreview_) {
+            applied = movePreview_->execute(*doc_).dirtyRegion;
+        } else if (!moveRefusalSaid_) {
+            // A refused Move used to be completely silent, which is the whole of #180 and is
+            // indistinguishable from a broken tool. Said ONCE per drag, not per motion event,
+            // and not at all for the ordinary case of dragging back to the start, which is a
+            // NoEffect and not something the user needs told.
+            const pe::Refusal why = pe::moveRefusal(*doc_, moveLayer_, dx, dy);
+            if (why.isRefusal() && why.code != pe::RefusalCode::NoEffect) {
+                moveRefusalSaid_ = true;
+                emit toolMessage(QString::fromStdString(why.explanation));
+            }
+        }
         // Two calls rather than one united rect: uniting a rect near the drag origin with one
         // far away yields a bounding box that can dwarf both, and that is the only realistic
         // way to trip invalidate()'s escalation back to dropping the whole cache.

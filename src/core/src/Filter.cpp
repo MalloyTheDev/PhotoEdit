@@ -605,6 +605,52 @@ Refusal bakeRefusal(const Document& doc, LayerId layerId) {
     return Refusal{};  // nothing stops it
 }
 
+Refusal moveRefusal(const Document& doc, LayerId layerId, int dx, int dy) {
+    // Mirrors moveLayerContent's guards, in the same order, using the same constants.
+    if (dx == 0 && dy == 0) {
+        return refuse("layer.move", RefusalCode::NoEffect, {},
+                      "The layer is already where it started.");
+    }
+    const Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr) {
+        return refuse("layer.move", RefusalCode::NoActiveLayer, {}, "Select a layer to move.");
+    }
+    const std::string named = "\"" + layer->name() + "\"";
+    if (layer->kind() != LayerKind::Pixel) {
+        return refuse("layer.move", RefusalCode::LayerNotPixel, {},
+                      named + " is not a pixel layer, so its pixels cannot be moved.");
+    }
+    if (dx > kMaxCanvasDimension || dx < -kMaxCanvasDimension || dy > kMaxCanvasDimension ||
+        dy < -kMaxCanvasDimension) {
+        return refuse("layer.move", RefusalCode::OverSizeBudget, {},
+                      "That is farther than one move can shift content.");
+    }
+    const auto* pl = static_cast<const PixelLayer*>(layer);
+    const Rect src = pl->contentBounds();
+    if (src.isEmpty()) {
+        return refuse("layer.move", RefusalCode::NoEffect, {},
+                      named + " is empty, so there is nothing to move.");
+    }
+    const Rect dst{src.x + dx, src.y + dy, src.width, src.height};
+    if (!withinCoordinateRange(src) || !withinCoordinateRange(dst)) {
+        return refuse("layer.move", RefusalCode::OverSizeBudget, {},
+                      named + " would end up beyond the coordinate range the engine can store.");
+    }
+    const std::int64_t bytes = (tileCountOf(src) + tileCountOf(dst)) *
+                               static_cast<std::int64_t>(kTilePixels) *
+                               bytesPerPixelOf(pl->depth());
+    if (bytes > kMaxMoveBytes) {
+        return refuse("layer.move", RefusalCode::OverSizeBudget, {},
+                      named + " would need " + std::to_string(bytes / (1024 * 1024)) +
+                          " MB to move and undo, over the " +
+                          std::to_string(kMaxMoveBytes / (1024 * 1024)) +
+                          " MB limit. Move a smaller layer, or flatten first.",
+                      "content " + std::to_string(src.width) + "x" + std::to_string(src.height) +
+                          " at " + std::to_string(bytesPerPixelOf(pl->depth())) + " bytes/px");
+    }
+    return Refusal{};  // nothing stops it
+}
+
 std::unique_ptr<PaintCommand> bakePixelEditRegion(
     Document& doc, LayerId layerId, std::string name, Rect region,
     const std::function<void(std::span<Rgbaf>, int, int)>& transform, const Selection* selection) {

@@ -78,6 +78,21 @@ inline constexpr std::int64_t kMaxMoveBytes = 1LL << 30;
 // opposed to its preconditions) would not appear here until it is added here too.
 [[nodiscard]] Refusal bakeRefusal(const Document& doc, LayerId layerId);
 
+// Why moveLayerContent would refuse a shift of (dx, dy) on `layerId`, or code None if it
+// would proceed.
+//
+// A Move needs its own predicate because it no longer shares bakeRefusal's preconditions: it
+// is bounded by kMaxMoveBytes rather than by kMaxFilterPixels, and it validates its own
+// rects. Asking bakeRefusal about a Move gives a confidently wrong answer, which is worse
+// than none: a 4000x4000 layer reports "over budget, 16 megapixels" for a Move that in fact
+// succeeds.
+//
+// This exists because the Move tool declining SILENTLY is the whole of #180. Fixing the
+// threshold only moved where the silence starts; the drag still has to be able to say why.
+// Same shape as bakeRefusal: it re-evaluates the preconditions beside the code that enforces
+// them, using the same constants, rather than threading a Refusal back through the command.
+[[nodiscard]] Refusal moveRefusal(const Document& doc, LayerId layerId, int dx, int dy);
+
 // Run an in-place per-pixel transform over a pixel layer's content as a reversible
 // tile-delta command (the shared machinery behind destructive filters and
 // adjustments). `transform(img, w, h)` mutates the extracted content image in
