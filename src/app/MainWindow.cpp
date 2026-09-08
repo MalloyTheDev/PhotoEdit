@@ -103,11 +103,40 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             return runGuardedTask(title, access, work);
         });
     connect(canvas_, &CanvasView::colorPicked, this, &MainWindow::onColorPicked);
-    connect(canvas_, &CanvasView::toolMessage, this, [this](const QString& msg) {
-        statusBar()->showMessage(msg, 4000);
-        connect(canvas_, &CanvasView::refused, this, &MainWindow::reportRefusal);
-    });
+    connect(canvas_, &CanvasView::toolMessage, this,
+            [this](const QString& msg) { statusBar()->showMessage(msg, 4000); });
+    // Sibling, not nested inside the handler above, where it used to sit: a connect made
+    // inside a slot runs every time that slot runs, so canvas refusals were dropped entirely
+    // until the first tool message and then reported once per message after it.
+    connect(canvas_, &CanvasView::refused, this, &MainWindow::reportRefusal);
     connect(canvas_, &CanvasView::textRequested, this, &MainWindow::onAddText);
+    // The canvas can select a tool itself: grabbing a transform handle under the Move tool
+    // enters Free Transform. The strip has to follow, or it keeps claiming a tool that is
+    // not active. Triggering the action reuses the one path that also updates the status
+    // bar and the options bar, instead of a second copy of it here.
+    connect(canvas_, &CanvasView::toolChanged, this, [this](CanvasView::Tool t) {
+        const auto it = toolActions_.constFind(static_cast<int>(t));
+        if (it != toolActions_.constEnd() && *it != nullptr) {
+            if (!(*it)->isChecked()) (*it)->trigger();
+            return;
+        }
+        // Free Transform has no button in the strip: it is Edit > Free Transform (Ctrl+T).
+        // So there is nothing to check, and the strip would otherwise keep the PREVIOUS
+        // tool lit while the canvas transforms. That was already true of Ctrl+T before the
+        // canvas could select a tool itself.
+        if (t != CanvasView::Tool::Transform) return;
+        if (toolGroup_ != nullptr) {
+            if (QAction* lit = toolGroup_->checkedAction(); lit != nullptr) {
+                lit->setChecked(false);
+            }
+        }
+        if (toolLabel_ != nullptr) toolLabel_->setText(QStringLiteral("Free Transform"));
+        if (toolHintLabel_ != nullptr) {
+            toolHintLabel_->setText(QStringLiteral(
+                "Drag a corner to scale, the knob to rotate. Enter applies, Esc cancels"));
+        }
+        updateOptionsBar(OptKind::None, QStringLiteral("Free Transform"));
+    });
 
     buildMenuBar();
     buildToolBar();     // left tool strip (+ fg/bg swatches)
@@ -868,6 +897,7 @@ void MainWindow::buildToolBar() {
     };
 
     auto* toolGroup = new QActionGroup(this);
+    toolGroup_ = toolGroup;
     QAction* brushAction = nullptr;
     for (std::size_t g = 0; g < groups.size(); ++g) {
         if (g > 0) tb->addSeparator();
@@ -897,6 +927,13 @@ void MainWindow::buildToolBar() {
                 kind = OptKind::Brush;  // size/opacity drive the brush footprint + strength
             } else if (def.tool == Tool::Wand) {
                 kind = OptKind::Wand;  // tolerance drives the magic-wand flood
+            } else if (def.tool == Tool::Move) {
+                kind = OptKind::Move;  // auto-select and the on-canvas transform box
+            }
+            // Only wired tools, and only the first action for a given tool: Tool::Inactive
+            // covers several buttons and none of them selects anything.
+            if (wired && !toolActions_.contains(static_cast<int>(tool))) {
+                toolActions_.insert(static_cast<int>(tool), a);
             }
             connect(a, &QAction::triggered, this, [this, tool, label, wired, kind, hint] {
                 canvas_->setTool(tool);
@@ -965,6 +1002,7 @@ void MainWindow::buildOptionsBar() {
     stabSpin->setSuffix(QStringLiteral("%"));
     bl->addWidget(stabSpin);
     brushOptAction_ = optionsBar_->addWidget(brushOptions_);
+    brushOptAction_->setObjectName(QStringLiteral("BrushOptionsAction"));
 
     connect(sizeSpin_, &QSpinBox::valueChanged, this,
             [this](int v) { canvas_->tool().brush().diameter = static_cast<float>(v); });
@@ -986,10 +1024,66 @@ void MainWindow::buildOptionsBar() {
     wandTolSpin_->setValue(32);
     wl->addWidget(wandTolSpin_);
     wandOptAction_ = optionsBar_->addWidget(wandOptions_);
+    wandOptAction_->setObjectName(QStringLiteral("WandOptionsAction"));
     wandOptAction_->setVisible(false);
 
     connect(wandTolSpin_, &QSpinBox::valueChanged, this,
             [this](int v) { canvas_->setWandTolerance(v); });
+
+    // Move options. Auto-Select picks the layer under the cursor when a drag starts; the
+    // combo beside it chooses whether that means the individual layer or the top-level group
+    // containing it. Show Transform Controls draws the active layer's box and handles, and
+    // grabbing one enters Free Transform. All three are connected; the group that used to sit
+    // here was a scaffold with no connect() at all, which is why it was removed (#133).
+    moveOptions_ = new QWidget(optionsBar_);
+    auto* mvl = new QHBoxLayout(moveOptions_);
+    mvl->setContentsMargins(0, 0, 0, 0);
+    mvl->setSpacing(6);
+
+    auto* autoSelectBox = new QCheckBox(QStringLiteral("Auto-Select"), moveOptions_);
+    autoSelectBox->setObjectName(QStringLiteral("MoveAutoSelect"));
+    autoSelectBox->setToolTip(
+        QStringLiteral("Start the drag on the layer under the cursor, instead of on the active "
+                       "layer"));
+    autoSelectBox->setAccessibleName(QStringLiteral("Auto-Select"));
+    mvl->addWidget(autoSelectBox);
+
+    auto* autoSelectMode = new QComboBox(moveOptions_);
+    autoSelectMode->setObjectName(QStringLiteral("MoveAutoSelectMode"));
+    autoSelectMode->addItem(QStringLiteral("Layer"));
+    autoSelectMode->addItem(QStringLiteral("Group"));
+    autoSelectMode->setToolTip(
+        QStringLiteral("What Auto-Select picks: the layer itself, or the top-level group "
+                       "containing it"));
+    autoSelectMode->setAccessibleName(QStringLiteral("Auto-Select granularity"));
+    autoSelectMode->setEnabled(false);  // it decides nothing until Auto-Select is on
+    mvl->addWidget(autoSelectMode);
+
+    auto* showTransformBox = new QCheckBox(QStringLiteral("Show Transform Controls"), moveOptions_);
+    showTransformBox->setObjectName(QStringLiteral("MoveShowTransform"));
+    showTransformBox->setToolTip(
+        QStringLiteral("Draw the active layer's bounding box. Drag a corner or the rotate knob "
+                       "to start a Free Transform"));
+    showTransformBox->setAccessibleName(QStringLiteral("Show Transform Controls"));
+    mvl->addWidget(showTransformBox);
+
+    moveOptAction_ = optionsBar_->addWidget(moveOptions_);
+    // Named, like the tree and the panels are: which option group the bar is showing is
+    // the observable that says the bar is contextual at all, and a hidden toolbar widget
+    // cannot be asked in a window that was never shown.
+    moveOptAction_->setObjectName(QStringLiteral("MoveOptionsAction"));
+    moveOptAction_->setVisible(false);
+
+    connect(autoSelectBox, &QCheckBox::toggled, this, [this, autoSelectMode](bool on) {
+        canvas_->setAutoSelect(on);
+        autoSelectMode->setEnabled(on);
+    });
+    connect(autoSelectMode, &QComboBox::currentIndexChanged, this, [this](int index) {
+        canvas_->setAutoSelectMode(index == 1 ? CanvasView::AutoSelectMode::Group
+                                              : CanvasView::AutoSelectMode::Layer);
+    });
+    connect(showTransformBox, &QCheckBox::toggled, this,
+            [this](bool on) { canvas_->setShowTransformControls(on); });
 
     // Right-aligned utility icons. These are not wired to anything yet, so they say
     // so on click and carry the same "coming soon" hint the scaffolded tools use.
@@ -1101,6 +1195,7 @@ void MainWindow::updateOptionsBar(OptKind kind, const QString& toolName) {
     // via their wrapping action, so hiding the widget alone leaves a gap/ghost.
     if (brushOptAction_ != nullptr) brushOptAction_->setVisible(kind == OptKind::Brush);
     if (wandOptAction_ != nullptr) wandOptAction_->setVisible(kind == OptKind::Wand);
+    if (moveOptAction_ != nullptr) moveOptAction_->setVisible(kind == OptKind::Move);
 }
 
 void MainWindow::refreshZoomStrip() {

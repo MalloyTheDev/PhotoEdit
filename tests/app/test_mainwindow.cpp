@@ -18,12 +18,15 @@
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Refusal.hpp"
 #include "pe/core/Selection.hpp"
+#include "pe/core/Tile.hpp"
 #include "pe_test.hpp"
 
 #include <iterator>
 
 #include <QAction>
+#include <QCheckBox>
 #include <QColor>
+#include <QComboBox>
 #include <QDockWidget>
 #include <QImage>
 #include <QKeySequence>
@@ -31,6 +34,7 @@
 #include <QList>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMouseEvent>
 #include <QSize>
 #include <QString>
 #include <QToolBar>
@@ -953,4 +957,159 @@ PE_TEST(mainwindow_an_arrange_that_cannot_move_the_layer_reaches_the_status_bar)
     PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::NoEffect);
     PE_CHECK(w.refusals()[0].operation == std::string("layer.arrange"));
     PE_CHECK_EQ(w.document()->history().undoDepth(), static_cast<std::size_t>(0));
+}
+
+namespace {
+
+// The tool strip's action for a tool, by its visible label. Tests drive the strip the way
+// the user does rather than calling CanvasView::setTool, so the label, the options bar and
+// the canvas all have to agree for the case to pass.
+QAction* stripAction(pe::app::MainWindow& w, const QString& label) {
+    for (QAction* a : w.findChildren<QAction*>()) {
+        if (a->text() == label) return a;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+PE_TEST(mainwindow_the_move_options_are_present_and_connected) {
+    // The Move tool shipped with no options at all, after an earlier group of three widgets
+    // was removed for having no connect() behind any of them (#133). Each of these has to
+    // reach the canvas, or the group is decoration again.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    PE_REQUIRE(w.canvas() != nullptr);
+
+    QAction* move = stripAction(w, QStringLiteral("Move"));
+    PE_REQUIRE(move != nullptr);
+    move->trigger();  // the group is hidden, and so disabled, under any other tool
+
+    auto* autoSelect = w.findChild<QCheckBox*>(QStringLiteral("MoveAutoSelect"));
+    auto* mode = w.findChild<QComboBox*>(QStringLiteral("MoveAutoSelectMode"));
+    auto* showBox = w.findChild<QCheckBox*>(QStringLiteral("MoveShowTransform"));
+    PE_REQUIRE(autoSelect != nullptr && mode != nullptr && showBox != nullptr);
+
+    // Every one of them says what it does, by name and by tooltip.
+    for (QWidget* c : {static_cast<QWidget*>(autoSelect), static_cast<QWidget*>(mode),
+                       static_cast<QWidget*>(showBox)}) {
+        PE_CHECK(!c->toolTip().isEmpty());
+        PE_CHECK(!c->accessibleName().isEmpty());
+    }
+
+    // The granularity combo decides nothing until Auto-Select is on, and says so by being
+    // disabled rather than by quietly having no effect.
+    PE_CHECK(!mode->isEnabled());
+    PE_CHECK(!w.canvas()->autoSelect());
+    autoSelect->setChecked(true);
+    PE_CHECK(w.canvas()->autoSelect());
+    PE_CHECK(mode->isEnabled());
+
+    PE_CHECK(w.canvas()->autoSelectMode() == pe::app::CanvasView::AutoSelectMode::Layer);
+    mode->setCurrentIndex(1);
+    PE_CHECK(w.canvas()->autoSelectMode() == pe::app::CanvasView::AutoSelectMode::Group);
+    mode->setCurrentIndex(0);
+    PE_CHECK(w.canvas()->autoSelectMode() == pe::app::CanvasView::AutoSelectMode::Layer);
+
+    PE_CHECK(!w.canvas()->showTransformControls());
+    showBox->setChecked(true);
+    PE_CHECK(w.canvas()->showTransformControls());
+
+    autoSelect->setChecked(false);
+    PE_CHECK(!w.canvas()->autoSelect());
+    PE_CHECK(!mode->isEnabled());
+}
+
+PE_TEST(mainwindow_the_options_bar_shows_the_group_for_the_active_tool) {
+    // The bar is contextual: a group left visible under every tool is worse than none,
+    // because it implies its controls apply to whatever is selected.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+
+    QAction* moveGroup = w.findChild<QAction*>(QStringLiteral("MoveOptionsAction"));
+    QAction* brushGroup = w.findChild<QAction*>(QStringLiteral("BrushOptionsAction"));
+    QAction* wandGroup = w.findChild<QAction*>(QStringLiteral("WandOptionsAction"));
+    PE_REQUIRE(moveGroup != nullptr && brushGroup != nullptr && wandGroup != nullptr);
+
+    QAction* move = stripAction(w, QStringLiteral("Move"));
+    QAction* brush = stripAction(w, QStringLiteral("Brush"));
+    PE_REQUIRE(move != nullptr && brush != nullptr);
+
+    move->trigger();
+    PE_CHECK(w.canvas()->activeTool() == pe::app::CanvasView::Tool::Move);
+    PE_CHECK(moveGroup->isVisible());
+    PE_CHECK(!brushGroup->isVisible());
+    PE_CHECK(!wandGroup->isVisible());
+
+    brush->trigger();
+    PE_CHECK(w.canvas()->activeTool() == pe::app::CanvasView::Tool::Brush);
+    PE_CHECK(!moveGroup->isVisible());
+    PE_CHECK(brushGroup->isVisible());
+}
+
+PE_TEST(mainwindow_the_tool_strip_follows_a_tool_the_canvas_selected) {
+    // The canvas can now change the tool itself: grabbing a transform handle under Move
+    // enters Free Transform. Free Transform has no button in the strip, so the previous tool
+    // would otherwise stay lit and the options bar would keep offering its controls. That
+    // was already true of Edit > Free Transform (Ctrl+T) before the canvas could do it.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    PE_REQUIRE(w.canvas() != nullptr);
+
+    QAction* move = stripAction(w, QStringLiteral("Move"));
+    QAction* brush = stripAction(w, QStringLiteral("Brush"));
+    QAction* moveGroup = w.findChild<QAction*>(QStringLiteral("MoveOptionsAction"));
+    PE_REQUIRE(move != nullptr && brush != nullptr && moveGroup != nullptr);
+
+    move->trigger();
+    PE_CHECK(move->isChecked());
+    PE_CHECK(moveGroup->isVisible());
+
+    w.canvas()->setTool(pe::app::CanvasView::Tool::Transform);
+    PE_CHECK(!move->isChecked());       // the strip stops claiming Move
+    PE_CHECK(!moveGroup->isVisible());  // and the bar stops offering its options
+
+    // And a tool that DOES have a button gets it checked.
+    w.canvas()->setTool(pe::app::CanvasView::Tool::Brush);
+    PE_CHECK(brush->isChecked());
+}
+
+PE_TEST(mainwindow_a_canvas_refusal_is_recorded_without_a_prior_tool_message) {
+    // The connect for CanvasView::refused sat INSIDE the toolMessage handler, so it was not
+    // made until the first tool message arrived: every canvas refusal before that was
+    // dropped, and one more duplicate connection was added per message after it. A refusal
+    // that reaches nobody is the silent failure the Refusal type exists to prevent.
+    pe::app::MainWindow w;
+    // A blank document: its one layer is empty, which is what makes Free Transform decline
+    // below and so emit a tool message on demand.
+    w.setDocument(pe::Document::createBlank(pe::Size{64, 64}), QString());
+    PE_REQUIRE(w.canvas() != nullptr);
+    w.clearRefusals();
+    w.canvas()->actualPixels();
+
+    // A Type click on the pasteboard, well outside a 64 pixel canvas at 100% zoom.
+    const QPointF off = w.canvas()->docToWidget(pe::PointD{-400.0, -400.0});
+    const auto clickOffCanvas = [&w, off] {
+        w.canvas()->setTool(pe::app::CanvasView::Tool::Type);
+        QMouseEvent press(QEvent::MouseButtonPress, off, off, Qt::LeftButton, Qt::LeftButton,
+                          Qt::NoModifier);
+        QCoreApplication::sendEvent(w.canvas(), &press);
+    };
+
+    // The baseline: a canvas refusal is recorded, once, and with the right code.
+    clickOffCanvas();
+    PE_REQUIRE(w.refusals().size() == 1);
+    PE_CHECK(w.refusals()[0].operation == std::string("tool.type.place"));
+    PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::PointOutsideCanvas);
+
+    // And the part that pins the defect: a connect made inside a slot is made AGAIN every
+    // time that slot runs, so each tool message added another copy of the connection and the
+    // next refusal was recorded once per copy. Free Transform on an empty layer declines
+    // with a tool message, so this produces two before the refusal.
+    w.clearRefusals();
+    w.canvas()->setTool(pe::app::CanvasView::Tool::Transform);
+    w.canvas()->setTool(pe::app::CanvasView::Tool::Brush);
+    w.canvas()->setTool(pe::app::CanvasView::Tool::Transform);
+    clickOffCanvas();
+    PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(1));  // one refusal, one record
 }

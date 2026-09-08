@@ -8,6 +8,8 @@
 #include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/CanvasRenderer.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/Geometry.hpp"
+#include "pe/core/GroupLayer.hpp"
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
@@ -15,8 +17,10 @@
 #include "pe_test.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include <QCoreApplication>
 #include <QMouseEvent>
@@ -417,5 +421,249 @@ PE_TEST(canvasview_move_release_commits_one_step_and_leaves_nothing_stale) {
     doc->history().undo();
     PE_CHECK(rendererAgreesWithAFreshComposite(view, *doc));
     PE_CHECK_EQ(pl->tiles().pixel(15, 15), (pe::Rgba8{200, 50, 50, 255}));
+    view.setDocument(nullptr);
+}
+
+// --- Move tool options (#134) ----------------------------------------------------------
+
+namespace {
+
+// A document with a red square low in the stack, a blue square high in it, and an empty
+// active layer at the bottom. Positions are chosen so the two squares do not overlap, so a
+// press names one layer unambiguously.
+struct MoveScene {
+    std::unique_ptr<pe::Document> doc;
+    pe::LayerId empty = pe::kNoLayer;
+    pe::LayerId low = pe::kNoLayer;
+    pe::LayerId high = pe::kNoLayer;
+};
+
+MoveScene moveScene() {
+    MoveScene s;
+    s.doc = pe::Document::createBlank(pe::Size{200, 200});
+    if (s.doc == nullptr) return s;
+    s.empty = s.doc->activeLayer();
+
+    auto low = std::make_unique<pe::PixelLayer>("Low");
+    low->tiles().fillRect(pe::Rect{10, 10, 40, 40}, pe::Rgba8{200, 40, 40, 255});
+    s.low = low->id();
+    s.doc->cmdInsertTopLevel(s.doc->topLevelCount(), std::move(low));
+
+    auto high = std::make_unique<pe::PixelLayer>("High");
+    high->tiles().fillRect(pe::Rect{120, 120, 40, 40}, pe::Rgba8{40, 40, 200, 255});
+    s.high = high->id();
+    s.doc->cmdInsertTopLevel(s.doc->topLevelCount(), std::move(high));
+
+    s.doc->setActiveLayer(s.empty);
+    return s;
+}
+
+// Alpha of one document pixel of a raster layer. contentBounds() is TILE aligned, so it
+// cannot tell a 30 pixel move from no move at all; the pixels can.
+std::uint8_t alphaAt(const pe::Document& doc, pe::LayerId id, int x, int y) {
+    const pe::Layer* l = doc.findLayer(id);
+    if (l == nullptr || l->kind() != pe::LayerKind::Pixel) return 0;
+    return static_cast<const pe::PixelLayer*>(l)->tiles().pixel(x, y).a;
+}
+
+void clickDoc(pe::app::CanvasView& view, pe::PointD at) {
+    const QPointF w = view.docToWidget(at);
+    pressAt(view, w);
+    releaseAt(view, w);
+}
+
+}  // namespace
+
+PE_TEST(canvasview_auto_select_grabs_the_layer_under_the_cursor) {
+    // Without it, a Move drag always moves whatever is active, so compositing means going
+    // back to the Layers panel between every drag. The option is off by default, which is
+    // the behaviour that shipped, and the OFF case is asserted rather than assumed.
+    MoveScene s = moveScene();
+    PE_REQUIRE(s.doc != nullptr);
+
+    pe::app::CanvasView view;
+    view.resize(400, 400);
+    view.setDocument(s.doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Move);
+
+    PE_CHECK(!view.autoSelect());
+    clickDoc(view, pe::PointD{30, 30});
+    PE_CHECK(s.doc->activeLayer() == s.empty);  // off: the click selects nothing
+
+    view.setAutoSelect(true);
+    clickDoc(view, pe::PointD{30, 30});
+    PE_CHECK(s.doc->activeLayer() == s.low);
+    clickDoc(view, pe::PointD{140, 140});
+    PE_CHECK(s.doc->activeLayer() == s.high);
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_auto_select_moves_the_layer_it_picked) {
+    // Picking the layer is only half of it: the drag that follows has to move THAT layer,
+    // not the one that was active when the press arrived.
+    MoveScene s = moveScene();
+    PE_REQUIRE(s.doc != nullptr);
+    // The square spans x in [10, 50). After a 30 pixel move right it spans [40, 80), so
+    // these two points swap.
+    PE_REQUIRE(alphaAt(*s.doc, s.low, 15, 30) == 255);
+    PE_REQUIRE(alphaAt(*s.doc, s.low, 75, 30) == 0);
+
+    pe::app::CanvasView view;
+    view.resize(400, 400);
+    view.setDocument(s.doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Move);
+    view.setAutoSelect(true);
+
+    pressAt(view, view.docToWidget(pe::PointD{30, 30}));
+    moveTo(view, view.docToWidget(pe::PointD{60, 30}));
+    releaseAt(view, view.docToWidget(pe::PointD{60, 30}));
+
+    PE_CHECK(s.doc->activeLayer() == s.low);
+    PE_CHECK_EQ(s.doc->history().undoDepth(), static_cast<std::size_t>(1));
+    PE_CHECK_EQ(alphaAt(*s.doc, s.low, 15, 30), 0);
+    PE_CHECK_EQ(alphaAt(*s.doc, s.low, 75, 30), 255);
+    // And the layer that was active when the press arrived is untouched.
+    PE_CHECK(s.doc->findLayer(s.empty)->contentBounds().isEmpty());
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_auto_select_on_empty_canvas_starts_no_drag) {
+    // Falling back to the active layer here is exactly the surprise Auto-Select exists to
+    // remove: the user aimed at nothing and would have dragged something else. Refusing the
+    // drag is right, and saying so is what stops it reading as a broken tool.
+    MoveScene s = moveScene();
+    PE_REQUIRE(s.doc != nullptr);
+
+    pe::app::CanvasView view;
+    view.resize(400, 400);
+    view.setDocument(s.doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Move);
+    view.setAutoSelect(true);
+    s.doc->setActiveLayer(s.low);
+
+    const QStringList said = messagesFrom(view, [&view] {
+        pressAt(view, view.docToWidget(pe::PointD{100, 20}));  // between the two squares
+        moveTo(view, view.docToWidget(pe::PointD{140, 20}));
+        releaseAt(view, view.docToWidget(pe::PointD{140, 20}));
+    });
+    PE_CHECK_EQ(said.size(), 1);
+    PE_CHECK(!said.isEmpty() && said.first().contains(QStringLiteral("Auto-Select")));
+    // Nothing selected, nothing moved, nothing on the undo stack.
+    PE_CHECK(s.doc->activeLayer() == s.low);
+    PE_CHECK_EQ(s.doc->history().undoDepth(), static_cast<std::size_t>(0));
+    PE_CHECK_EQ(alphaAt(*s.doc, s.low, 15, 30), 255);  // still exactly where it was
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_auto_select_group_mode_picks_the_top_level_group) {
+    // The granularity combo has to change the ANSWER, or it is another decorative control.
+    auto doc = pe::Document::createBlank(pe::Size{200, 200});
+    PE_REQUIRE(doc != nullptr);
+    const pe::LayerId base = doc->activeLayer();
+    auto group = std::make_unique<pe::GroupLayer>("G");
+    auto inner = std::make_unique<pe::PixelLayer>("Inner");
+    inner->tiles().fillRect(pe::Rect{10, 10, 40, 40}, pe::Rgba8{200, 40, 40, 255});
+    const pe::LayerId innerId = inner->id();
+    group->addChild(std::move(inner));
+    const pe::LayerId groupId = group->id();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+    doc->setActiveLayer(base);
+
+    pe::app::CanvasView view;
+    view.resize(400, 400);
+    view.setDocument(doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Move);
+    view.setAutoSelect(true);
+
+    PE_CHECK(view.autoSelectMode() == pe::app::CanvasView::AutoSelectMode::Layer);
+    clickDoc(view, pe::PointD{30, 30});
+    PE_CHECK(doc->activeLayer() == innerId);
+
+    doc->setActiveLayer(base);
+    view.setAutoSelectMode(pe::app::CanvasView::AutoSelectMode::Group);
+    clickDoc(view, pe::PointD{30, 30});
+    PE_CHECK(doc->activeLayer() == groupId);
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_show_transform_controls_starts_a_transform_from_a_handle) {
+    // The box is not decoration: grabbing a corner is meant to start a Free Transform
+    // without Ctrl+T, and the canvas has to tell the shell that the tool changed or the
+    // strip keeps claiming Move.
+    MoveScene s = moveScene();
+    PE_REQUIRE(s.doc != nullptr);
+    s.doc->setActiveLayer(s.low);
+
+    pe::app::CanvasView view;
+    view.resize(400, 400);
+    view.setDocument(s.doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Move);
+
+    std::vector<pe::app::CanvasView::Tool> announced;
+    QObject::connect(&view, &pe::app::CanvasView::toolChanged,
+                     [&announced](pe::app::CanvasView::Tool t) { announced.push_back(t); });
+
+    // Off: the corner is just canvas, so the press starts a move.
+    PE_CHECK(!view.showTransformControls());
+    const pe::Rect box = s.doc->findLayer(s.low)->contentBounds();
+    const QPointF corner =
+        view.docToWidget(pe::PointD{static_cast<double>(box.x), static_cast<double>(box.y)});
+    pressAt(view, corner);
+    releaseAt(view, corner);
+    PE_CHECK(view.activeTool() == pe::app::CanvasView::Tool::Move);
+    PE_CHECK(announced.empty());
+
+    // On: the same press enters Free Transform and says so.
+    view.setShowTransformControls(true);
+    pressAt(view, corner);
+    PE_CHECK(view.activeTool() == pe::app::CanvasView::Tool::Transform);
+    PE_REQUIRE(announced.size() == 1);
+    PE_CHECK(announced[0] == pe::app::CanvasView::Tool::Transform);
+
+    // Dragging that handle scales the layer, and the release commits one undo step.
+    moveTo(view, view.docToWidget(pe::PointD{static_cast<double>(box.x) - 20.0,
+                                             static_cast<double>(box.y) - 20.0}));
+    releaseAt(view, view.docToWidget(pe::PointD{static_cast<double>(box.x) - 20.0,
+                                                static_cast<double>(box.y) - 20.0}));
+    view.setTool(pe::app::CanvasView::Tool::Move);  // leaving Free Transform commits it
+    PE_CHECK(s.doc->history().undoDepth() >= static_cast<std::size_t>(1));
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_a_press_inside_the_transform_box_is_still_a_move) {
+    // Only the handles start a transform. A press in the middle of the box has to keep
+    // doing what the Move tool does, or turning the controls on would take the tool away.
+    MoveScene s = moveScene();
+    PE_REQUIRE(s.doc != nullptr);
+    s.doc->setActiveLayer(s.low);
+    // The square spans x in [10, 50); a 25 pixel move right puts it at [35, 75).
+    PE_REQUIRE(alphaAt(*s.doc, s.low, 15, 30) == 255);
+    PE_REQUIRE(alphaAt(*s.doc, s.low, 70, 30) == 0);
+
+    pe::app::CanvasView view;
+    view.resize(400, 400);
+    view.setDocument(s.doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Move);
+    view.setShowTransformControls(true);
+
+    pressAt(view, view.docToWidget(pe::PointD{30, 30}));  // well inside the box
+    moveTo(view, view.docToWidget(pe::PointD{55, 30}));
+    releaseAt(view, view.docToWidget(pe::PointD{55, 30}));
+
+    PE_CHECK(view.activeTool() == pe::app::CanvasView::Tool::Move);
+    PE_CHECK_EQ(alphaAt(*s.doc, s.low, 15, 30), 0);
+    PE_CHECK_EQ(alphaAt(*s.doc, s.low, 70, 30), 255);
+
     view.setDocument(nullptr);
 }

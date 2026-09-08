@@ -81,6 +81,23 @@ public:
     // Select the active tool (driven by the tool toolbar). Brush/Eraser also set
     // the paint controller's mode.
     void setTool(Tool t);
+
+    // Move tool options (#134). Both default off, which is the behaviour that shipped.
+    //
+    // Auto-Select picks the layer under the cursor when a Move drag starts, instead of
+    // moving whatever happens to be active. Its granularity is the individual layer, or the
+    // top-level group containing it.
+    enum class AutoSelectMode { Layer, Group };
+    void setAutoSelect(bool on) noexcept { autoSelect_ = on; }
+    void setAutoSelectMode(AutoSelectMode m) noexcept { autoSelectMode_ = m; }
+    [[nodiscard]] bool autoSelect() const noexcept { return autoSelect_; }
+    [[nodiscard]] AutoSelectMode autoSelectMode() const noexcept { return autoSelectMode_; }
+
+    // Show Transform Controls draws the active layer's bounding box and handles under the
+    // Move tool. Grabbing a corner or the rotate knob enters Free Transform, which is what
+    // the box is for; a press anywhere else is still a move.
+    void setShowTransformControls(bool on);
+    [[nodiscard]] bool showTransformControls() const noexcept { return showTransformControls_; }
     [[nodiscard]] Tool activeTool() const noexcept { return toolMode_; }
 
     // True while a Free Transform session is live (an uncommitted preview is applied directly to
@@ -114,6 +131,10 @@ signals:
     // Mask-edit was exited because a non-Brush tool became active (only the Brush paints masks).
     // MainWindow relays it so the Layers panel drops the focus ring; keeps the ring honest.
     void maskEditTargetCleared();
+    // The canvas changed the active tool ITSELF: grabbing a transform handle under the Move
+    // tool enters Free Transform. Without this the tool strip would keep claiming Move while
+    // the canvas was transforming. Not emitted when the shell set the tool.
+    void toolChanged(Tool t);
     // A canvas gesture declined for a structural reason. Distinct from toolMessage, which
     // is a transient hint: this is the answer to "why did nothing happen", and MainWindow
     // records it as well as showing it.
@@ -126,6 +147,11 @@ public:
     void zoomIn();        // step zoom in about the viewport center
     void zoomOut();       // step zoom out about the viewport center
     [[nodiscard]] double zoomPercent() const noexcept { return view_.zoom() * 100.0; }
+
+    // Document point -> widget point under the current view transform. Public so a caller
+    // that means "the pixel at (30, 30)" can say where that is on screen: deriving it from
+    // the zoom and the centring is how a test ends up passing for the wrong reason.
+    [[nodiscard]] QPointF docToWidget(pe::PointD docPos) const;
 
     // DocumentObserver: re-flatten and repaint after any committed change.
     void onDocumentChanged(const pe::Document&, const pe::DocumentChange&) override;
@@ -236,6 +262,9 @@ private:
     // Whether this drag has already explained why the move is being refused. Reset on each
     // press, so the reason is said once rather than on every motion event.
     bool moveRefusalSaid_ = false;
+    bool autoSelect_ = false;
+    AutoSelectMode autoSelectMode_ = AutoSelectMode::Layer;
+    bool showTransformControls_ = false;
     QPixmap frozenFrame_;
 
     bool needsFit_ = true;  // fit-to-window pending until the widget has a valid size
@@ -285,6 +314,22 @@ private:
     void cancelTransform();         // revert the preview and end the session
     [[nodiscard]] pe::Affine2D transformMatrix() const;   // original-box -> current placement
     [[nodiscard]] pe::PointD transformCenterDoc() const;  // current box center (doc space)
+
+    // Which box the on-canvas handles refer to, and the matrix placing it. Two callers show
+    // them: a live Free Transform session, and the Move tool with Show Transform Controls,
+    // where the box is the active layer's bounds with nothing applied yet. Returns false
+    // when there are no controls to show.
+    [[nodiscard]] bool controlsGeometry(pe::Rect& box, pe::Affine2D& m) const;
+
+    // The handle positions for one box, in widget space. Kept in one place because the
+    // painter and the hit test have to agree about where a handle is to within a few
+    // pixels, and they used to compute it twice from the same fields.
+    struct ControlPoints {
+        QPointF corner[4];  // TL, TR, BR, BL
+        QPointF rotate;     // the knob out past the top edge
+    };
+    [[nodiscard]] ControlPoints controlPointsFor(pe::Rect box, const pe::Affine2D& m) const;
+
     // Hit-test a widget point: 0..3 = corner (scale), 4 = rotate handle, 5 = inside (move), -1
     // none.
     [[nodiscard]] int hitTransformHandle(QPointF widgetPos) const;

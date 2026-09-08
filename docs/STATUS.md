@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **659 engine cases + 104 shell cases, 0 failed**. The engine tests
+Test suite: **659 engine cases + 114 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -65,6 +65,14 @@ The engine is no longer headless-only; the Qt6 app provides a real
   `ViewTransform`: wheel-zoom about the cursor, middle-drag pan, fit-to-window /
   actual-pixels (Ctrl+0/1), and a transparency checkerboard. Painting maps the
   pointer back through `viewToDoc`, so it tracks the cursor under any zoom/pan.
+- **Move tool options**: Auto-Select starts the drag on the layer under the cursor
+  rather than on the active one, at either Layer or Group granularity; it rests on
+  the engine's `layerAt()`, which walks the stack top-down and falls through anything
+  hidden, cleared, masked out or adjustment. Show Transform Controls draws the active
+  layer's box and handles, and grabbing a corner or the rotate knob enters Free
+  Transform without Ctrl+T. Both default off. Group granularity selects the group,
+  which the Move command then declines to move: relocating a group's pixels needs an
+  engine command that does not exist yet.
 - **Layers panel** — top-first stack with visibility / opacity / blend mode and
   add / duplicate / delete / reorder, all as undoable commands. Rows rename in place
   (double-click), delete asks before discarding a layer that holds content, every

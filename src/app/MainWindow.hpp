@@ -120,7 +120,7 @@ private:
     void clearCursorPos();  // blanks the position readout when the cursor is off-canvas
 
     // Which contextual control group the options bar shows for the active tool.
-    enum class OptKind { None, Brush, Wand };
+    enum class OptKind { None, Brush, Wand, Move };
     void updateOptionsBar(OptKind kind, const QString& toolName);
     void refreshDocTab();
     [[nodiscard]] QWidget* makeColorSwatches();
@@ -245,13 +245,19 @@ private:
     QAction* undoAct_ = nullptr;
     QAction* redoAct_ = nullptr;
 
-    QMenu* windowMenu_ = nullptr;         // View-style panel toggles, filled after docks exist
-    QToolBar* optionsBar_ = nullptr;      // contextual tool options (top)
-    QLabel* optToolName_ = nullptr;       // options bar: active tool name
-    QWidget* brushOptions_ = nullptr;     // options bar: brush size/opacity group
-    QWidget* wandOptions_ = nullptr;      // options bar: magic-wand group
-    QAction* brushOptAction_ = nullptr;   // toolbar action wrapping brushOptions_ (for show/hide)
-    QAction* wandOptAction_ = nullptr;    // toolbar action wrapping wandOptions_
+    QMenu* windowMenu_ = nullptr;        // View-style panel toggles, filled after docks exist
+    QToolBar* optionsBar_ = nullptr;     // contextual tool options (top)
+    QLabel* optToolName_ = nullptr;      // options bar: active tool name
+    QWidget* brushOptions_ = nullptr;    // options bar: brush size/opacity group
+    QWidget* wandOptions_ = nullptr;     // options bar: magic-wand group
+    QAction* brushOptAction_ = nullptr;  // toolbar action wrapping brushOptions_ (for show/hide)
+    QAction* wandOptAction_ = nullptr;   // toolbar action wrapping wandOptions_
+    QWidget* moveOptions_ = nullptr;     // Move: Auto-Select + Show Transform Controls
+    QAction* moveOptAction_ = nullptr;   // toolbar action wrapping moveOptions_
+    // The tool-strip action for each wired tool, so a tool the CANVAS selected can check the
+    // matching button. Keyed by the Tool enum value.
+    QHash<int, QAction*> toolActions_;
+    QActionGroup* toolGroup_ = nullptr;   // the strip's exclusive selection
     QSpinBox* sizeSpin_ = nullptr;        // options bar: brush diameter
     QSpinBox* opacitySpinOpt_ = nullptr;  // options bar: brush opacity
     QSpinBox* wandTolSpin_ = nullptr;     // options bar: magic-wand tolerance

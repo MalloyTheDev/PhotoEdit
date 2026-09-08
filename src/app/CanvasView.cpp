@@ -7,7 +7,8 @@
 #include "pe/core/Commands.hpp"
 #include "pe/core/Compositor.hpp"  // kMaxCompositeImagePixels (extreme-zoom-out downscale threshold)
 #include "pe/core/Document.hpp"
-#include "pe/core/Filter.hpp"  // pe::moveLayerContent
+#include "pe/core/Filter.hpp"
+#include "pe/core/HitTest.hpp"  // pe::moveLayerContent
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/Refusal.hpp"
 #include "pe/core/Selection.hpp"
@@ -32,6 +33,11 @@ namespace pe::app {
 
 namespace {
 constexpr double kZoomStep = 1.25;  // per Zoom In/Out and per wheel notch
+
+// How far the rotate knob sits out past the top edge of the transform box, in widget
+// pixels. Named because the painter and the hit test both need it and a disagreement here
+// draws the knob somewhere the user cannot grab it.
+constexpr double kRotateHandleOffsetPx = 24.0;
 
 // Map an engine Affine2 to a QTransform. Both map (x,y) -> (a*x + c*y + e,
 // b*x + d*y + f), so the six coefficients line up directly.
@@ -267,6 +273,7 @@ void CanvasView::zoomOut() {
 }
 
 void CanvasView::setTool(Tool t) {
+    const bool changed = toolMode_ != t;
     toolMode_ = t;
     // Abandon any live stroke FIRST, before changing the paint mode: otherwise a tool change
     // mid-stroke (e.g. a shortcut while the button is held) would leave the stroke active and the
@@ -332,6 +339,13 @@ void CanvasView::setTool(Tool t) {
         // pressing Ctrl+T again mid-edit) keeps the in-progress transform instead of dropping it.
         if (!transforming_) beginTransform();
     }
+    if (changed) emit toolChanged(t);
+}
+
+void CanvasView::setShowTransformControls(bool on) {
+    if (showTransformControls_ == on) return;
+    showTransformControls_ = on;
+    update();  // the box appears or goes away immediately, not on the next unrelated repaint
 }
 
 void CanvasView::setMaskEditTarget(bool on) {
@@ -444,34 +458,69 @@ void CanvasView::cancelTransform() {
     }
 }
 
-int CanvasView::hitTransformHandle(QPointF w) const {
-    if (!transforming_) return -1;
-    const pe::Affine2D m = transformMatrix();
-    const double l = transformBox_.x;
-    const double t = transformBox_.y;
-    const double r = transformBox_.x + transformBox_.width;
-    const double b = transformBox_.y + transformBox_.height;
-    const double cxd[4] = {l, r, r, l};  // TL, TR, BR, BL (original box corners)
+QPointF CanvasView::docToWidget(pe::PointD docPos) const {
+    const pe::PointD v = view_.docToView(docPos);
+    return QPointF(v.x, v.y);
+}
+
+bool CanvasView::controlsGeometry(pe::Rect& box, pe::Affine2D& m) const {
+    if (transforming_) {
+        box = transformBox_;
+        m = transformMatrix();
+        return true;
+    }
+    // Show Transform Controls: the same handles on the active layer with nothing applied
+    // yet, so grabbing one can start a real transform from exactly where the box sits.
+    if (toolMode_ != Tool::Move || !showTransformControls_ || doc_ == nullptr) return false;
+    const pe::Layer* l = doc_->findLayer(doc_->activeLayer());
+    if (l == nullptr || l->kind() != pe::LayerKind::Pixel) return false;
+    box = l->contentBounds();
+    if (box.isEmpty()) return false;  // nothing to draw a box around, so no controls
+    m = pe::Affine2D{};               // identity
+    return true;
+}
+
+CanvasView::ControlPoints CanvasView::controlPointsFor(pe::Rect box, const pe::Affine2D& m) const {
+    const double l = box.x;
+    const double t = box.y;
+    const double r = box.x + box.width;
+    const double b = box.y + box.height;
+    const double cxd[4] = {l, r, r, l};  // TL, TR, BR, BL
     const double cyd[4] = {t, t, b, b};
-    QPointF cw[4];
+    ControlPoints cp;
     for (int i = 0; i < 4; ++i) {
         const pe::PointD v =
             view_.docToView(pe::PointD{m.applyX(cxd[i], cyd[i]), m.applyY(cxd[i], cyd[i])});
-        cw[i] = QPointF(v.x, v.y);
+        cp.corner[i] = QPointF(v.x, v.y);
     }
+    // The knob sits out past the top-edge midpoint, away from the centre. The centre is the
+    // box centre through the same matrix, which is what transformCenterDoc() works out for a
+    // live session and is also correct for the identity.
+    const double mx = box.x + box.width / 2.0;
+    const double my = box.y + box.height / 2.0;
+    const pe::PointD cv = view_.docToView(pe::PointD{m.applyX(mx, my), m.applyY(mx, my)});
+    const QPointF topMid((cp.corner[0].x() + cp.corner[1].x()) / 2.0,
+                         (cp.corner[0].y() + cp.corner[1].y()) / 2.0);
+    QPointF dir = topMid - QPointF(cv.x, cv.y);
+    const double len = std::hypot(dir.x(), dir.y());
+    dir = len > 1e-6 ? dir / len : QPointF(0.0, -1.0);
+    cp.rotate = topMid + dir * kRotateHandleOffsetPx;
+    return cp;
+}
+
+int CanvasView::hitTransformHandle(QPointF w) const {
+    pe::Rect box{};
+    pe::Affine2D m;
+    if (!controlsGeometry(box, m)) return -1;
+    const ControlPoints cp = controlPointsFor(box, m);
+    const QPointF* cw = cp.corner;
+
     constexpr double kHandlePx = 9.0;
     for (int i = 0; i < 4; ++i) {
         if (std::hypot(w.x() - cw[i].x(), w.y() - cw[i].y()) <= kHandlePx)
             return i;  // corner=scale
     }
-    // Rotate handle: offset out from the center past the top-edge midpoint.
-    const QPointF topMid((cw[0].x() + cw[1].x()) / 2.0, (cw[0].y() + cw[1].y()) / 2.0);
-    const pe::PointD cv = view_.docToView(transformCenterDoc());
-    QPointF dir = topMid - QPointF(cv.x, cv.y);
-    const double len = std::hypot(dir.x(), dir.y());
-    dir = len > 1e-6 ? dir / len : QPointF(0.0, -1.0);
-    const QPointF rot = topMid + dir * 24.0;
-    if (std::hypot(w.x() - rot.x(), w.y() - rot.y()) <= kHandlePx) return 4;  // rotate
+    if (std::hypot(w.x() - cp.rotate.x(), w.y() - cp.rotate.y()) <= kHandlePx) return 4;  // rotate
     // Inside the (convex) quad => move. Consistent-sign cross products over the 4 edges.
     const auto cross = [](QPointF a, QPointF c, QPointF p) {
         return (c.x() - a.x()) * (p.y() - a.y()) - (c.y() - a.y()) * (p.x() - a.x());
@@ -679,23 +728,15 @@ void CanvasView::paintEvent(QPaintEvent*) {
         painter.drawLine(gradStartWidget_, gradEndWidget_);
     }
 
-    // Free Transform: the transformed bounding box (dashed black-under-white, like the ants), the
-    // four corner scale handles, and a rotate knob above the top edge — all in widget space.
-    if (transforming_) {
+    // The transform box: dashed black-under-white like the marching ants, four corner scale
+    // handles, and a rotate knob above the top edge, all in widget space. Shown for a live
+    // Free Transform session, and for the Move tool when Show Transform Controls is on.
+    pe::Rect ctlBox{};
+    pe::Affine2D ctlMatrix;
+    if (controlsGeometry(ctlBox, ctlMatrix)) {
         painter.resetTransform();
-        const pe::Affine2D m = transformMatrix();
-        const double bl = transformBox_.x;
-        const double bt = transformBox_.y;
-        const double br = transformBox_.x + transformBox_.width;
-        const double bb = transformBox_.y + transformBox_.height;
-        const double cxd[4] = {bl, br, br, bl};
-        const double cyd[4] = {bt, bt, bb, bb};
-        QPointF cw[4];
-        for (int i = 0; i < 4; ++i) {
-            const pe::PointD v =
-                view_.docToView(pe::PointD{m.applyX(cxd[i], cyd[i]), m.applyY(cxd[i], cyd[i])});
-            cw[i] = QPointF(v.x, v.y);
-        }
+        const ControlPoints cp = controlPointsFor(ctlBox, ctlMatrix);
+        const QPointF* cw = cp.corner;
         const QPointF poly[5] = {cw[0], cw[1], cw[2], cw[3], cw[0]};
         QPen edgeBlack(QColor(0, 0, 0), 1);
         edgeBlack.setCosmetic(true);
@@ -708,13 +749,8 @@ void CanvasView::paintEvent(QPaintEvent*) {
         painter.drawPolyline(poly, 5);
 
         const QPointF topMid((cw[0].x() + cw[1].x()) / 2.0, (cw[0].y() + cw[1].y()) / 2.0);
-        const pe::PointD cv = view_.docToView(transformCenterDoc());
-        QPointF dir = topMid - QPointF(cv.x, cv.y);
-        const double len = std::hypot(dir.x(), dir.y());
-        dir = len > 1e-6 ? dir / len : QPointF(0.0, -1.0);
-        const QPointF rot = topMid + dir * 24.0;
         painter.setPen(edgeBlack);
-        painter.drawLine(topMid, rot);
+        painter.drawLine(topMid, cp.rotate);
 
         painter.setPen(QPen(QColor(0, 0, 0), 1));
         painter.setBrush(QColor(255, 255, 255));
@@ -722,7 +758,7 @@ void CanvasView::paintEvent(QPaintEvent*) {
         for (int i = 0; i < 4; ++i) {
             painter.drawRect(QRectF(cw[i].x() - hs, cw[i].y() - hs, 2 * hs, 2 * hs));
         }
-        painter.drawEllipse(rot, hs, hs);
+        painter.drawEllipse(cp.rotate, hs, hs);
     }
 }
 
@@ -855,6 +891,39 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         // repainting at all, leaving the reverted pixels stale on screen until something
         // else happened to invalidate them; having the rect closes that too.
         repaintRegion(cancelMovePreview());
+
+        // A corner or the rotate knob starts a transform, which is what drawing the box is
+        // for. Inside the box (5) or outside it (-1) is still a move, so both fall through.
+        // hitTransformHandle answers -1 unless the controls are actually shown.
+        const int handle = hitTransformHandle(e->position());
+        if (handle >= 0 && handle != 5) {
+            setTool(Tool::Transform);    // begins the session, takes focus, tells the shell
+            if (!transforming_) return;  // no transformable layer: setTool already said why
+            tfDrag_ = handle;
+            tfDragStartDoc_ = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+            tfDragStartScale_ = tfScale_;
+            tfDragStartAngle_ = tfAngle_;
+            tfDragStartTranslate_ = tfTranslate_;
+            return;
+        }
+
+        if (autoSelect_) {
+            const pe::PointD d = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
+            const pe::Point p{static_cast<int>(std::lround(d.x)),
+                              static_cast<int>(std::lround(d.y))};
+            pe::LayerId picked = pe::layerAt(*doc_, p);
+            if (picked != pe::kNoLayer && autoSelectMode_ == AutoSelectMode::Group) {
+                picked = pe::topLevelAncestorOf(*doc_, picked);
+            }
+            if (picked == pe::kNoLayer) {
+                // Nothing visible under the cursor. Dragging the active layer instead is
+                // exactly the surprise Auto-Select exists to remove, so no drag starts.
+                emit toolMessage(QStringLiteral("Auto-Select: nothing under the cursor."));
+                return;
+            }
+            doc_->setActiveLayer(picked);  // notifies, so the Layers panel follows the click
+        }
+
         movingContent_ = true;
         moveStartWidget_ = e->position();
         moveLayer_ = doc_->activeLayer();  // move the layer that is active when the drag begins
