@@ -151,3 +151,27 @@ PE_TEST(app_icon_resources_are_linked_into_the_library) {
         }
     }
 }
+
+PE_TEST(theme_the_tree_selection_does_not_box_every_cell) {
+    // The layer tree has more than one column (the layer, and its mask), and a per-cell
+    // `border` on the selected item draws a box around EACH cell: a selected layer rendered
+    // as two boxes with a seam between them, and its label nudged right by the left edge.
+    // The rule has to be top and bottom only, so the cells join into one band across the row.
+    for (const pe::app::ThemeId id : pe::app::kAllThemes) {
+        const QString qss = pe::app::buildStyleSheet(pe::app::themeColors(id));
+        const int at = qss.indexOf(QStringLiteral("QTreeWidget::item:selected"));
+        PE_CHECK(at >= 0);
+        if (at < 0) continue;
+        const int close = qss.indexOf(QLatin1Char('}'), at);
+        PE_CHECK(close > at);
+        if (close <= at) continue;
+        const QString rule = qss.mid(at, close - at);
+        PE_CHECK(rule.contains(QStringLiteral("border-top")));
+        PE_CHECK(rule.contains(QStringLiteral("border-bottom")));
+        // The shorthand is what boxes the cell. border-top / border-bottom are not it, so
+        // the search has to exclude them rather than look for "border" anywhere.
+        PE_CHECK(!rule.contains(QStringLiteral("border:")));
+        PE_CHECK(!rule.contains(QStringLiteral("border-left")));
+        PE_CHECK(!rule.contains(QStringLiteral("border-right")));
+    }
+}

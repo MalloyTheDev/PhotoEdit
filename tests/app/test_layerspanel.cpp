@@ -17,6 +17,7 @@
 #include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/GroupLayer.hpp"
+#include "pe/core/Mask.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Refusal.hpp"
 #include "pe_test.hpp"
@@ -25,6 +26,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -695,5 +697,130 @@ PE_TEST(layerspanel_arrange_that_cannot_move_the_layer_says_so) {
     PE_CHECK(said[3].code == pe::RefusalCode::LayerNotTopLevel);
 
     PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));  // nothing pushed
+    panel.setDocument(nullptr);
+}
+
+// --- thumbnail framing -------------------------------------------------------------------
+
+PE_TEST(layerspanel_a_thumbnail_frames_the_document_and_centres_it) {
+    // The checkerboard filled the whole 26x26 icon and the document was pinned to the top
+    // left, so a landscape canvas (which is most of them) left a band of checker along the
+    // bottom of every thumbnail. Checker means "transparent", so that band read as empty
+    // canvas when it is not part of the document at all.
+    auto doc = pe::Document::createBlank(pe::Size{1200, 800});  // 3:2, so 26 x 17 in the icon
+    PE_REQUIRE(doc != nullptr);
+    baseLayer(*doc)->tiles().fillRect(pe::Rect{0, 0, 1200, 800}, pe::Rgba8{220, 40, 40, 255});
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr && tree->topLevelItemCount() == 1);
+    const QImage img = iconImage(tree->topLevelItem(0), 0);
+    PE_REQUIRE(!img.isNull());
+    PE_REQUIRE(img.width() == kThumb && img.height() == kThumb);
+
+    // A 3:2 document in a square icon leaves four transparent rows top and bottom, and none
+    // at the sides. Counting the opaque band is how the centring is asserted without
+    // hard-coding the divisor arithmetic.
+    int firstOpaqueRow = -1;
+    int lastOpaqueRow = -1;
+    for (int y = 0; y < kThumb; ++y) {
+        bool any = false;
+        for (int x = 0; x < kThumb && !any; ++x) any = img.pixelColor(x, y).alpha() > 0;
+        if (!any) continue;
+        if (firstOpaqueRow < 0) firstOpaqueRow = y;
+        lastOpaqueRow = y;
+    }
+    PE_REQUIRE(firstOpaqueRow >= 0);
+    // Centred: the same number of blank rows above as below, to within the odd pixel.
+    const int above = firstOpaqueRow;
+    const int below = kThumb - 1 - lastOpaqueRow;
+    PE_CHECK(above > 0);  // a landscape document does not reach the top of the icon
+    PE_CHECK(std::abs(above - below) <= 1);
+    // And the document is not squashed: it spans the full width.
+    PE_CHECK(img.pixelColor(0, kThumb / 2).alpha() > 0);
+    PE_CHECK(img.pixelColor(kThumb - 1, kThumb / 2).alpha() > 0);
+
+    // The band itself is the layer's colour, not checker.
+    PE_CHECK(nearColor(img.pixelColor(kThumb / 2, kThumb / 2), QColor(220, 40, 40)));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_a_square_document_fills_the_thumbnail) {
+    // The inverse: nothing is trimmed when the aspect already matches, so the centring did
+    // not just shrink every thumbnail.
+    auto doc = pe::Document::createBlank(pe::Size{800, 800});
+    PE_REQUIRE(doc != nullptr);
+    baseLayer(*doc)->tiles().fillRect(pe::Rect{0, 0, 800, 800}, pe::Rgba8{40, 200, 40, 255});
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr && tree->topLevelItemCount() == 1);
+    const QImage img = iconImage(tree->topLevelItem(0), 0);
+    PE_REQUIRE(!img.isNull());
+
+    PE_CHECK(img.pixelColor(0, 0).alpha() > 0);
+    PE_CHECK(img.pixelColor(kThumb - 1, kThumb - 1).alpha() > 0);
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_a_selected_rows_thumbnail_shows_its_own_pixels) {
+    // A QIcon carrying only a Normal pixmap makes Qt synthesize the Selected one by blending
+    // it toward the highlight colour. The active layer is the row the user is working on, so
+    // it was the one row whose thumbnail did not show the layer's actual colours.
+    auto doc = pe::Document::createBlank(pe::Size{400, 400});
+    PE_REQUIRE(doc != nullptr);
+    baseLayer(*doc)->tiles().fillRect(pe::Rect{0, 0, 400, 400}, pe::Rgba8{20, 120, 60, 255});
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr && tree->topLevelItemCount() == 1);
+    const QIcon icon = tree->topLevelItem(0)->icon(0);
+
+    const QImage normal = icon.pixmap(QSize(kThumb, kThumb), QIcon::Normal).toImage();
+    const QImage selected = icon.pixmap(QSize(kThumb, kThumb), QIcon::Selected).toImage();
+    const QImage active = icon.pixmap(QSize(kThumb, kThumb), QIcon::Active).toImage();
+    PE_REQUIRE(!normal.isNull() && !selected.isNull());
+    PE_CHECK(selected == normal);
+    PE_CHECK(active == normal);
+    // And it really is the layer's colour, so the comparison is not two blank images.
+    PE_CHECK(nearColor(normal.pixelColor(kThumb / 2, kThumb / 2), QColor(20, 120, 60)));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_a_mask_thumbnail_is_framed_like_the_layer_beside_it) {
+    // The mask was sampled onto the full 26x26 square while the layer thumbnail next to it
+    // was aspect-fitted, so on any non-square canvas the two disagreed about where a
+    // masked-out region sat.
+    auto doc = pe::Document::createBlank(pe::Size{1200, 800});
+    PE_REQUIRE(doc != nullptr);
+    baseLayer(*doc)->tiles().fillRect(pe::Rect{0, 0, 1200, 800}, pe::Rgba8{200, 200, 200, 255});
+    auto mask = std::make_unique<pe::Mask>();
+    mask->buffer().fillRect(pe::Rect{0, 0, 1200, 800}, 255);
+    doc->findLayer(doc->activeLayer())->setMask(std::move(mask));
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr && tree->topLevelItemCount() == 1);
+    const QImage layerImg = iconImage(tree->topLevelItem(0), 0);
+    const QImage maskImg = iconImage(tree->topLevelItem(0), 1);
+    PE_REQUIRE(!layerImg.isNull() && !maskImg.isNull());
+
+    // Same frame: the rows that are outside the document in one are outside it in the other.
+    int mismatched = 0;
+    for (int y = 0; y < kThumb; ++y) {
+        for (int x = 0; x < kThumb; ++x) {
+            const bool inLayer = layerImg.pixelColor(x, y).alpha() > 0;
+            const bool inMask = maskImg.pixelColor(x, y).alpha() > 0;
+            if (inLayer != inMask) ++mismatched;
+        }
+    }
+    PE_CHECK_EQ(mismatched, 0);
+    // And it is not vacuously true because both are empty.
+    PE_CHECK(maskImg.pixelColor(kThumb / 2, kThumb / 2).alpha() > 0);
+    PE_CHECK(maskImg.pixelColor(kThumb / 2, 0).alpha() == 0);  // trimmed top, like the layer
     panel.setDocument(nullptr);
 }

@@ -132,8 +132,13 @@ QDockWidget > QWidget { background: @panel@; }
 QListWidget, QTreeWidget { background: @base@; border: 1px solid @outline@; border-radius: 3px; padding: 2px; }
 QListWidget:focus, QTreeWidget:focus { border: 1px solid @accent@; }
 QListWidget::item { padding: 4px 7px; border-radius: 3px; color: @text@; margin: 1px 0; }
-QListWidget::item:selected, QTreeWidget::item:selected { background: @raised@; color: @text@;
-    border: 1px solid @accent@; }
+QListWidget::item:selected { background: @raised@; color: @text@; border: 1px solid @accent@; }
+/* The tree has more than one column (the layer, and its mask), and a per-cell border boxes
+   EACH cell of the selected row, so a selected layer came out as two boxes with a seam
+   between them and its label nudged right by the left edge. Top and bottom only: the cells
+   join into one band across the row, and the outline cue the theme relies on is kept. */
+QTreeWidget::item:selected { background: @raised@; color: @text@;
+    border-top: 1px solid @accent@; border-bottom: 1px solid @accent@; }
 QListWidget::item:hover:!selected { background: @raised@; }
 
 QComboBox { background: @base@; border: 1px solid @outline@; border-radius: 3px; padding: 3px 8px; min-height: 20px; }

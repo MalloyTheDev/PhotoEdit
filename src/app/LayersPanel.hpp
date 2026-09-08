@@ -159,7 +159,18 @@ private:
 
     DeleteConfirmer confirmDelete_;
 
-    [[nodiscard]] static QIcon checkerThumbnail(const QImage& img, int offX, int offY);
+    // The canvas at thumbnail scale: the divisor mapping document pixels onto the icon, and
+    // the size the document occupies inside it. One place, so the layer thumbnail and the
+    // mask thumbnail frame the same document identically.
+    struct ThumbScale {
+        int divisor = 1;
+        int width = 1;
+        int height = 1;
+    };
+    [[nodiscard]] static ThumbScale thumbScaleFor(pe::Rect canvas);
+
+    [[nodiscard]] static QIcon checkerThumbnail(const QImage& img, int offX, int offY,
+                                                ThumbScale scale);
 
     [[nodiscard]] QIcon layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> siblings,
                                        std::size_t index) const;

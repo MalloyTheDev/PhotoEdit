@@ -88,6 +88,19 @@ protected:
         onDrop(dragged, target, where);
     }
 };
+// A thumbnail as an icon that looks the same on a selected row.
+//
+// A QIcon carrying only a Normal pixmap makes Qt SYNTHESIZE the Selected one by blending it
+// with the highlight colour, so the active layer's thumbnail came out washed toward the
+// accent: the one row whose pixels the user is working on was the one showing them wrongly.
+[[nodiscard]] QIcon thumbIcon(const QPixmap& pm) {
+    QIcon icon;
+    icon.addPixmap(pm, QIcon::Normal);
+    icon.addPixmap(pm, QIcon::Selected);
+    icon.addPixmap(pm, QIcon::Active);
+    return icon;
+}
+
 }  // namespace
 
 std::size_t reorderTargetForDrop(std::size_t fromIndex, int insertBeforeRow, int rowCount) {
@@ -371,44 +384,53 @@ QIcon LayersPanel::maskThumbnail(const pe::Mask& mask, bool targeted) const {
     if (doc_ == nullptr) return QIcon();
     const pe::Rect b = doc_->canvasBounds();
     if (b.width <= 0 || b.height <= 0) return QIcon();
-    // Sample the mask coverage on a small grid — cheap regardless of canvas size (no
-    // per-canvas-pixel loop). evaluate() reflects inverted + density; a disabled mask is marked
-    // with a cross below.
-    QImage gray(kThumb, kThumb, QImage::Format_RGB888);
-    for (int ty = 0; ty < kThumb; ++ty) {
-        const int dy = b.y + static_cast<int>((static_cast<std::int64_t>(ty) * b.height) / kThumb);
-        for (int tx = 0; tx < kThumb; ++tx) {
+    // Framed like the layer thumbnail beside it: same aspect, same centring. Sampled onto a
+    // grid of that size, so the mask is not stretched to a square while the layer next to it
+    // is not, which made the two disagree about where a masked-out region sat.
+    const ThumbScale scale = thumbScaleFor(b);
+    QImage gray(scale.width, scale.height, QImage::Format_RGB888);
+    for (int ty = 0; ty < scale.height; ++ty) {
+        const int dy =
+            b.y + static_cast<int>((static_cast<std::int64_t>(ty) * b.height) / scale.height);
+        for (int tx = 0; tx < scale.width; ++tx) {
             const int dx =
-                b.x + static_cast<int>((static_cast<std::int64_t>(tx) * b.width) / kThumb);
+                b.x + static_cast<int>((static_cast<std::int64_t>(tx) * b.width) / scale.width);
             const int v = static_cast<int>(std::lround(mask.evaluate(dx, dy) * 255.0f));
             gray.setPixel(tx, ty, qRgb(v, v, v));
         }
     }
-    QPixmap pm = QPixmap::fromImage(gray);
+    const int ox = (kThumb - scale.width) / 2;
+    const int oy = (kThumb - scale.height) / 2;
+    QPixmap pm(kThumb, kThumb);
+    pm.fill(Qt::transparent);
     QPainter p(&pm);
-    p.setRenderHint(QPainter::Antialiasing, true);
+    p.drawImage(ox, oy, gray);
     if (!mask.enabled()) {
         // Dim + a red cross: the compositor currently ignores this mask.
-        p.fillRect(pm.rect(), QColor(0, 0, 0, 90));
+        p.fillRect(ox, oy, scale.width, scale.height, QColor(0, 0, 0, 90));
+        // Antialiasing only for the cross: it is the one diagonal here, and on the axis
+        // aligned rects below it spills partial coverage a pixel outside the document box,
+        // which stops the mask thumbnail lining up with the layer thumbnail beside it.
+        p.setRenderHint(QPainter::Antialiasing, true);
         p.setPen(QPen(QColor(220, 80, 80), 1.5));
-        p.drawLine(3, 3, kThumb - 4, kThumb - 4);
-        p.drawLine(kThumb - 4, 3, 3, kThumb - 4);
+        p.drawLine(ox + 3, oy + 3, ox + scale.width - 4, oy + scale.height - 4);
+        p.drawLine(ox + scale.width - 4, oy + 3, ox + 3, oy + scale.height - 4);
+        p.setRenderHint(QPainter::Antialiasing, false);
     }
     p.setPen(QColor(0, 0, 0, 140));
-    p.drawRect(0, 0, kThumb - 1, kThumb - 1);
+    p.drawRect(ox, oy, scale.width - 1, scale.height - 1);
     if (targeted) {
         // Bright focus ring: this mask is the Brush's current paint target (Photoshop's mask
         // focus).
         p.setPen(QPen(QColor(90, 170, 250), 2));
-        p.drawRect(1, 1, kThumb - 3, kThumb - 3);
+        p.drawRect(ox + 1, oy + 1, scale.width - 3, scale.height - 3);
     }
     p.end();
-    return QIcon(pm);
+    return thumbIcon(pm);
 }
 
 QIcon LayersPanel::layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> siblings,
                                   std::size_t index) const {
-    constexpr int kThumb = 26;
     if (doc_ == nullptr || index >= siblings.size()) return QIcon();
     const pe::Rect canvas = doc_->canvasBounds();
     if (canvas.isEmpty()) return QIcon();
@@ -425,10 +447,12 @@ QIcon LayersPanel::layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> si
     // and a mark still appears where it sits on the canvas rather than filling the icon. And
     // only the layer's own content is composited, so an empty layer or a small dab costs a
     // tile or two instead of the whole document.
-    const int divisor =
-        std::max({1, (canvas.width + kThumb - 1) / kThumb, (canvas.height + kThumb - 1) / kThumb});
+    const ThumbScale scale = thumbScaleFor(canvas);
+    const int divisor = scale.divisor;
     const pe::Rect content = siblings[index]->contentBounds().intersected(canvas);
-    if (content.isEmpty()) return checkerThumbnail(QImage(), 0, 0);  // nothing on this layer
+    if (content.isEmpty()) {
+        return checkerThumbnail(QImage(), 0, 0, scale);  // nothing on this layer
+    }
 
     // Snap outward to whole divisor-blocks of the CANVAS grid, so an output pixel never
     // straddles the region edge and the placement below stays exact.
@@ -443,17 +467,37 @@ QIcon LayersPanel::layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> si
     if (buf.isEmpty()) return QIcon();
     const QImage src(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),
                      buf.width() * 4, QImage::Format_RGBA8888);
-    return checkerThumbnail(src, (ax - canvas.left()) / divisor, (ay - canvas.top()) / divisor);
+    return checkerThumbnail(src, (ax - canvas.left()) / divisor, (ay - canvas.top()) / divisor,
+                            scale);
 }
 
-// The checkerboard, the border, and `img` placed at (offX, offY) within it. Split out so the
-// empty-layer case shows the same checker as a transparent one rather than no icon at all.
-QIcon LayersPanel::checkerThumbnail(const QImage& img, int offX, int offY) {
+LayersPanel::ThumbScale LayersPanel::thumbScaleFor(pe::Rect canvas) {
     constexpr int kThumb = 26;
+    if (canvas.isEmpty()) return ThumbScale{1, 1, 1};
+    const int divisor =
+        std::max({1, (canvas.width + kThumb - 1) / kThumb, (canvas.height + kThumb - 1) / kThumb});
+    return ThumbScale{divisor, std::clamp((canvas.width + divisor - 1) / divisor, 1, kThumb),
+                      std::clamp((canvas.height + divisor - 1) / divisor, 1, kThumb)};
+}
+
+// The checkerboard, the border, and `img` placed at (offX, offY) within the canvas box.
+// Split out so the empty-layer case shows the same checker as a transparent one rather than
+// no icon at all.
+QIcon LayersPanel::checkerThumbnail(const QImage& img, int offX, int offY, ThumbScale scale) {
+    constexpr int kThumb = 26;
+    // The document is centred in the square icon. It used to be pinned to the top left, so a
+    // landscape canvas (which is most of them) left a band of bare checker along the bottom
+    // of every thumbnail, reading as empty canvas rather than as space outside the document.
+    const int ox = (kThumb - scale.width) / 2;
+    const int oy = (kThumb - scale.height) / 2;
 
     QPixmap pm(kThumb, kThumb);
     pm.fill(Qt::transparent);
     QPainter p(&pm);
+    // Clipped to the document, for the same reason: the checker has to mean "transparent
+    // HERE", and nothing outside the canvas should claim to be part of the layer. The
+    // pattern still starts at the icon's origin, so it lines up from one row to the next.
+    p.setClipRect(ox, oy, scale.width, scale.height);
     const QColor c0(88, 94, 104);
     const QColor c1(66, 72, 82);
     for (int y = 0; y < kThumb; y += 6) {
@@ -463,11 +507,12 @@ QIcon LayersPanel::checkerThumbnail(const QImage& img, int offX, int offY) {
     }
     // Already at thumbnail scale: drawn at its canvas-relative offset, not stretched to fill.
     // Stretching would render a single dab as a full-thumbnail blob and lose where it sits.
-    if (!img.isNull()) p.drawImage(offX, offY, img);
+    if (!img.isNull()) p.drawImage(ox + offX, oy + offY, img);
+    p.setClipping(false);
     p.setPen(QColor(0, 0, 0, 110));
-    p.drawRect(0, 0, kThumb - 1, kThumb - 1);
+    p.drawRect(ox, oy, scale.width - 1, scale.height - 1);
     p.end();
-    return QIcon(pm);
+    return thumbIcon(pm);
 }
 
 QTreeWidgetItem* LayersPanel::itemForId(pe::LayerId id) const {
