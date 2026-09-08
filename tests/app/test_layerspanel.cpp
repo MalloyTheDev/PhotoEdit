@@ -18,24 +18,32 @@
 #include "pe/core/Document.hpp"
 #include "pe/core/GroupLayer.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/Refusal.hpp"
 #include "pe_test.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
+#include <QAbstractItemView>
 #include <QColor>
 #include <QIcon>
 #include <QImage>
 #include <QList>
+#include <QObject>
 #include <QPixmap>
 #include <QPushButton>
 #include <QSize>
 #include <QString>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+#include <QWidget>
 
 namespace {
 
@@ -407,5 +415,210 @@ PE_TEST(layerspanel_every_button_has_a_tooltip_and_an_accessible_name) {
         // The name must say what it does, not repeat a glyph.
         PE_CHECK(b->accessibleName() != b->text());
     }
+    panel.setDocument(nullptr);
+}
+
+// --- drag reorder (#131) -------------------------------------------------------------
+//
+// The panel advertised drag and drop by being a tree and then did nothing when you dragged
+// a row: no move, no message. What follows tests the rule, not Qt's mouse handling. The one
+// step deliberately not covered is pixel position -> DropPlace, which is Qt's own
+// dragMoveEvent: under InternalMove it discards any event whose source() is not the view,
+// so a synthesized drag never sets the drop indicator and there is nothing to assert on.
+// Everything after that point belongs to the shell, and handleLayerDrop is where it starts.
+
+namespace {
+
+std::string describeRows(const std::vector<int>& rows) {
+    std::string out;
+    for (int v : rows) out += (out.empty() ? "" : ",") + std::to_string(v);
+    return out;
+}
+
+// Apply reorderTargetForDrop and report the resulting ROW order (top row first), each row
+// named by the engine index its layer started at.
+std::vector<int> rowsAfterDrop(int n, int from, int insertBefore) {
+    std::vector<int> engine;  // bottom-first, holding original indices
+    for (int i = 0; i < n; ++i) engine.push_back(i);
+
+    const std::size_t to =
+        pe::app::reorderTargetForDrop(static_cast<std::size_t>(from), insertBefore, n);
+    if (to != pe::GroupLayer::npos) {
+        const int v = engine[static_cast<std::size_t>(from)];
+        engine.erase(engine.begin() + from);
+        // Clamped exactly as GroupLayer::insertChild clamps, so an over-large target shows
+        // up here as the wrong ARRANGEMENT (what the user would see) rather than as
+        // undefined behaviour in the harness.
+        const std::size_t at = std::min(to, engine.size());
+        engine.insert(engine.begin() + static_cast<std::ptrdiff_t>(at), v);
+    }
+    return std::vector<int>(engine.rbegin(), engine.rend());  // rows read top-first
+}
+
+// What the drop ASKED for, worked out independently and entirely in row space: pull the
+// dragged row out of the list, then put it back at the requested slot.
+std::vector<int> rowsRequested(int n, int from, int insertBefore) {
+    std::vector<int> rows;
+    for (int i = n - 1; i >= 0; --i) rows.push_back(i);  // top-first
+    const auto it = std::find(rows.begin(), rows.end(), from);
+    const int fromRow = static_cast<int>(std::distance(rows.begin(), it));
+    rows.erase(it);
+    int at = insertBefore;
+    if (fromRow < at) --at;  // the removal closed a slot above the target
+    rows.insert(rows.begin() + at, from);
+    return rows;
+}
+
+}  // namespace
+
+PE_TEST(layerspanel_a_drop_lands_the_layer_where_the_indicator_said) {
+    // Rows count down from the top while the engine counts up from the bottom, and the
+    // command removes the layer before reinserting it, so there are two separate chances to
+    // land one slot off. Checked exhaustively against an oracle that never leaves row space.
+    int bad = 0;
+    for (int n = 1; n <= 6; ++n) {
+        for (int from = 0; from < n; ++from) {
+            for (int insertBefore = 0; insertBefore <= n; ++insertBefore) {
+                const std::vector<int> got = rowsAfterDrop(n, from, insertBefore);
+                const std::vector<int> want = rowsRequested(n, from, insertBefore);
+                if (got == want) continue;
+                if (++bad <= 4) {  // enough to see the pattern, not a wall of output
+                    std::printf("    drop n=%d from=%d before=%d gave [%s], wanted [%s]\n", n, from,
+                                insertBefore, describeRows(got).c_str(),
+                                describeRows(want).c_str());
+                }
+            }
+        }
+    }
+    PE_CHECK_EQ(bad, 0);
+
+    // A drop asking for the position the layer already holds is not a reorder: pushing one
+    // would leave a history entry that undoes to the same picture.
+    PE_CHECK(pe::app::reorderTargetForDrop(2, 1, 4) == pe::GroupLayer::npos);  // above its row
+    PE_CHECK(pe::app::reorderTargetForDrop(2, 2, 4) == pe::GroupLayer::npos);  // below its row
+    // Nor is a drop against a stack that cannot hold the dragged layer.
+    PE_CHECK(pe::app::reorderTargetForDrop(0, 0, 0) == pe::GroupLayer::npos);
+    PE_CHECK(pe::app::reorderTargetForDrop(7, 0, 4) == pe::GroupLayer::npos);
+}
+
+PE_TEST(layerspanel_dragging_a_row_reorders_the_document_and_undoes) {
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<pe::PixelLayer>("Middle"));
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<pe::PixelLayer>("Top"));
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr);
+    PE_REQUIRE(tree->topLevelItemCount() == 3);
+    // Rows read top-first, so row 0 holds the layer at the highest engine index.
+    PE_REQUIRE(tree->topLevelItem(0)->text(0) == QStringLiteral("Top"));
+
+    // Drag the top row down and drop it below the bottom row: it becomes the bottom layer.
+    panel.handleLayerDrop(tree->topLevelItem(0), tree->topLevelItem(2), pe::app::DropPlace::Below);
+    PE_CHECK(doc->topLevelLayers()[0]->name() == std::string("Top"));
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+
+    doc->history().undo();
+    PE_CHECK(doc->topLevelLayers()[2]->name() == std::string("Top"));
+    // The rows followed the undo rather than keeping the dragged arrangement.
+    PE_REQUIRE(tree->topLevelItemCount() == 3);
+    PE_CHECK(tree->topLevelItem(0)->text(0) == QStringLiteral("Top"));
+
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));  // the undo took it
+
+    // Dropping a row into the gap it already occupies is not an edit, on either side: a
+    // command here would leave a history entry that undoes to the same picture.
+    panel.handleLayerDrop(tree->topLevelItem(0), tree->topLevelItem(0), pe::app::DropPlace::Above);
+    panel.handleLayerDrop(tree->topLevelItem(0), tree->topLevelItem(0), pe::app::DropPlace::Below);
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_a_drop_past_the_last_row_sends_the_layer_to_the_bottom) {
+    // The empty space below the rows is a real drop target, and the one that reads as "put
+    // this at the very bottom". Qt reports it with a null index, so there is no target row.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<pe::PixelLayer>("Top"));
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr);
+    PE_REQUIRE(tree->topLevelItemCount() == 2);
+    PE_REQUIRE(tree->topLevelItem(0)->text(0) == QStringLiteral("Top"));
+
+    panel.handleLayerDrop(tree->topLevelItem(0), nullptr, pe::app::DropPlace::PastEnd);
+    PE_CHECK(doc->topLevelLayers()[0]->name() == std::string("Top"));
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_a_drop_that_would_change_nesting_says_so) {
+    // ReorderLayerCommand takes a TOP-LEVEL index, so dragging into or out of a group is not
+    // something the engine can do yet. The panel has to say that, rather than put the layer
+    // somewhere else instead, and rather than swallow the drag the way it used to.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    auto group = std::make_unique<pe::GroupLayer>("G");
+    group->addChild(std::make_unique<pe::PixelLayer>("inner"));
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+
+    pe::app::LayersPanel panel;
+    std::vector<pe::Refusal> said;
+    QObject::connect(&panel, &pe::app::LayersPanel::refused,
+                     [&said](const pe::Refusal& r) { said.push_back(r); });
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr);
+    PE_REQUIRE(tree->topLevelItemCount() == 2);
+
+    QTreeWidgetItem* groupRow = tree->topLevelItem(0);  // inserted last, so it is the top row
+    PE_REQUIRE(groupRow->text(0) == QStringLiteral("G"));
+    PE_REQUIRE(groupRow->childCount() == 1);
+    QTreeWidgetItem* inner = groupRow->child(0);
+    QTreeWidgetItem* other = tree->topLevelItem(1);
+
+    // Dropping ON a row means "inside it" in a tree.
+    panel.handleLayerDrop(other, groupRow, pe::app::DropPlace::OnRow);
+    PE_REQUIRE(said.size() == 1);
+    PE_CHECK(said[0].code == pe::RefusalCode::Unsupported);
+    PE_CHECK(!said[0].explanation.empty());
+
+    // Dropping between a group's children is the same request by another route.
+    panel.handleLayerDrop(other, inner, pe::app::DropPlace::Above);
+    PE_REQUIRE(said.size() == 2);
+    PE_CHECK(said[1].code == pe::RefusalCode::Unsupported);
+
+    // And dragging a nested layer out of its group is refused with the reason that names the
+    // way out: ungroup it first.
+    panel.handleLayerDrop(inner, other, pe::app::DropPlace::Below);
+    PE_REQUIRE(said.size() == 3);
+    PE_CHECK(said[2].code == pe::RefusalCode::LayerNotTopLevel);
+
+    // None of the three touched the document.
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));
+    PE_CHECK_EQ(doc->topLevelCount(), static_cast<std::size_t>(2));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_the_tree_is_actually_wired_for_dragging) {
+    // The rule above is unreachable if the view never starts a drag, which is exactly the
+    // state the panel shipped in: a QTreeWidget left at its default NoDragDrop.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr);
+
+    PE_CHECK(tree->dragDropMode() == QAbstractItemView::InternalMove);
+    PE_CHECK(tree->dragEnabled());
+    PE_CHECK(tree->viewport()->acceptDrops());
+    // And the rows themselves have to be draggable, or the view has nothing to pick up.
+    PE_REQUIRE(tree->topLevelItemCount() >= 1);
+    PE_CHECK((tree->topLevelItem(0)->flags() & Qt::ItemIsDragEnabled) != 0);
     panel.setDocument(nullptr);
 }

@@ -32,11 +32,36 @@ namespace pe::app {
 // undoable commands — visibility, opacity, blend mode, add, duplicate, delete,
 // reorder, and group / ungroup. Per-layer property edits (visibility/opacity/blend)
 // work at any depth; add / duplicate / delete / reorder operate on the top level in
-// this version (nested reordering and drag-drop arrive with the engine commands for it).
+// this version. Top-level rows can be dragged to reorder; a drag that would change
+// nesting is refused out loud, because ReorderLayerCommand takes a top-level index and
+// the engine has no command for moving a layer across levels yet.
 //
 // It observes the document, so external edits (undo/redo, file loads, structural
 // changes from anywhere) keep the panel in sync. All mutations go through History,
 // so the canvas (also an observer) recomposites automatically.
+// Where a drop landed relative to the row under the cursor. The shell's own vocabulary
+// rather than Qt's, so the rule below can be stated and tested without a drag.
+enum class DropPlace {
+    Above,    // between the target row and the one above it
+    Below,    // between the target row and the one below it
+    OnRow,    // on the row itself, which in a tree means "inside it"
+    PastEnd,  // past the last row
+};
+
+// Which top-level index a dragged layer should end up at, or GroupLayer::npos when the
+// drop would not move it.
+//
+// Two coordinate systems meet here and they run opposite ways: rows are displayed top
+// first (row 0 is the TOP layer) while the engine stacks bottom first (index 0 is the
+// BOTTOM layer). Inserting before row r therefore means inserting after engine index
+// n-1-r, which is engine insertion point n-r. ReorderLayerCommand also removes the layer
+// before reinserting it, so an insertion point above the layer's own position shifts down
+// by one. Getting either wrong drops the layer one place off, or on the wrong side of the
+// stack entirely, which is why this is a function and not four lines inside an event
+// handler.
+[[nodiscard]] std::size_t reorderTargetForDrop(std::size_t fromIndex, int insertBeforeRow,
+                                               int rowCount);
+
 class LayersPanel : public QWidget, public pe::DocumentObserver {
     Q_OBJECT
 
@@ -55,6 +80,13 @@ public:
     void setDeleteConfirmer(DeleteConfirmer c) { confirmDelete_ = std::move(c); }
 
     void onDocumentChanged(const pe::Document&, const pe::DocumentChange&) override;
+
+    // Turn a drop onto `target` into a reorder, or refuse it. Public because the pixel
+    // position -> DropPlace step belongs to Qt and cannot be driven from a test (Qt's own
+    // dragMoveEvent ignores a synthesized event under InternalMove, so the drop indicator
+    // never gets set); everything downstream of it is the shell's rule, and this is where
+    // a test picks the rule up. `target` is null for a drop past the last row.
+    void handleLayerDrop(QTreeWidgetItem* dragged, QTreeWidgetItem* target, DropPlace where);
 
     // Group the multi-selected top-level layers into a new group; dissolve the active
     // top-level group. Both are safe no-ops when the selection doesn't qualify.

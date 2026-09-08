@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **651 engine cases + 95 shell cases, 0 failed**. The engine tests
+Test suite: **651 engine cases + 100 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -66,7 +66,12 @@ The engine is no longer headless-only; the Qt6 app provides a real
   actual-pixels (Ctrl+0/1), and a transparency checkerboard. Painting maps the
   pointer back through `viewToDoc`, so it tracks the cursor under any zoom/pan.
 - **Layers panel** — top-first stack with visibility / opacity / blend mode and
-  add / duplicate / delete / reorder, all as undoable commands.
+  add / duplicate / delete / reorder, all as undoable commands. Rows rename in place
+  (double-click), delete asks before discarding a layer that holds content, every
+  button carries a tooltip and an accessible name, and top-level rows can be dragged
+  to reorder. A drag that would change nesting is refused out loud rather than
+  ignored: `ReorderLayerCommand` takes a top-level index, so moving a layer into or
+  out of a group needs an engine command that does not exist yet (#131).
 - **History panel** — a state timeline (uses `History::undoNames/redoNames`) with
   click-to-seek; the current state is highlighted, redoable states dimmed.
 

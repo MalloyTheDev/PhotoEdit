@@ -11,6 +11,7 @@
 
 #include <QColor>
 #include <QComboBox>
+#include <QDropEvent>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -25,8 +26,10 @@
 #include <QTreeWidgetItemIterator>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <utility>
 
@@ -38,7 +41,69 @@ namespace {
     return item == nullptr ? pe::kNoLayer
                            : static_cast<pe::LayerId>(item->data(0, Qt::UserRole).toULongLong());
 }
+
+// A tree that reports a drop instead of performing it.
+//
+// The document is the source of truth and the panel rebuilds its rows from it after every
+// change, so letting QTreeWidget move a row itself would leave the view disagreeing with
+// the document until that rebuild, and would move the row even for a drop the engine
+// cannot express. The base dropEvent is therefore never called: the drop becomes a
+// command, and the rebuild that follows redraws the rows.
+class LayerTree final : public QTreeWidget {
+public:
+    using QTreeWidget::QTreeWidget;
+
+    std::function<void(QTreeWidgetItem* dragged, QTreeWidgetItem* target, DropPlace where)> onDrop;
+
+protected:
+    void dropEvent(QDropEvent* e) override {
+        QTreeWidgetItem* dragged = currentItem();
+        if (dragged == nullptr || !onDrop) {
+            e->ignore();
+            return;
+        }
+        QTreeWidgetItem* target = itemFromIndex(indexAt(e->position().toPoint()));
+        DropPlace where = DropPlace::PastEnd;
+        if (target != nullptr) {
+            switch (dropIndicatorPosition()) {
+                case QAbstractItemView::AboveItem:
+                    where = DropPlace::Above;
+                    break;
+                case QAbstractItemView::BelowItem:
+                    where = DropPlace::Below;
+                    break;
+                case QAbstractItemView::OnItem:
+                    where = DropPlace::OnRow;
+                    break;
+                case QAbstractItemView::OnViewport:
+                default:
+                    target = nullptr;
+                    break;
+            }
+        }
+        // Accepted with no action either way, so the view does not fall back to moving the
+        // row itself.
+        e->setDropAction(Qt::IgnoreAction);
+        e->accept();
+        onDrop(dragged, target, where);
+    }
+};
 }  // namespace
+
+std::size_t reorderTargetForDrop(std::size_t fromIndex, int insertBeforeRow, int rowCount) {
+    if (rowCount <= 0 || fromIndex >= static_cast<std::size_t>(rowCount)) {
+        return pe::GroupLayer::npos;
+    }
+    const int from = static_cast<int>(fromIndex);
+    // Rows run top-first and the engine runs bottom-first, so the two indices count in
+    // opposite directions: inserting before row r is engine insertion point n-r.
+    int target = rowCount - std::clamp(insertBeforeRow, 0, rowCount);
+    // The layer is removed before it is reinserted, so an insertion point above its own
+    // position loses one slot.
+    if (from < target) --target;
+    if (target == from) return pe::GroupLayer::npos;  // dropped where it already was
+    return static_cast<std::size_t>(target);
+}
 
 LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
@@ -56,7 +121,17 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     topRow->addWidget(opacity_);
     root->addLayout(topRow);
 
-    tree_ = new QTreeWidget(this);
+    auto* layerTree = new LayerTree(this);
+    tree_ = layerTree;
+    // Internal move only: a drag reorders this document's own layers and never accepts
+    // anything dropped in from outside.
+    tree_->setDragDropMode(QAbstractItemView::InternalMove);
+    tree_->setDragEnabled(true);
+    tree_->setAcceptDrops(true);
+    tree_->setDropIndicatorShown(true);
+    layerTree->onDrop = [this](QTreeWidgetItem* dragged, QTreeWidgetItem* target, DropPlace where) {
+        handleLayerDrop(dragged, target, where);
+    };
     // Named so a test can reach it, the idiom the shell already uses for its other widgets.
     tree_->setObjectName(QStringLiteral("LayerTree"));
     tree_->setHeaderHidden(true);
@@ -843,6 +918,45 @@ void LayersPanel::onDelete() {
         if (!confirmDelete_(QString::fromStdString(victim->name()))) return;
     }
     push(std::make_unique<pe::RemoveLayerCommand>(id));
+}
+
+void LayersPanel::handleLayerDrop(QTreeWidgetItem* dragged, QTreeWidgetItem* target,
+                                  DropPlace where) {
+    if (doc_ == nullptr || dragged == nullptr) return;
+
+    // Moving a layer ACROSS a nesting level is a different operation from reordering
+    // within one, and ReorderLayerCommand takes a top-level index, so there is no engine
+    // command for it yet. Saying so beats dropping the layer somewhere the user did not
+    // aim, and beats the drag appearing to do nothing at all.
+    if (dragged->parent() != nullptr) {
+        emit refused(pe::refuse(
+            "layer.reorder", pe::RefusalCode::LayerNotTopLevel, "Reorder Layer",
+            "Only top-level layers can be dragged. Ungroup this one to move it in the stack.",
+            describeSelectionForRefusal()));
+        return;
+    }
+    if (where == DropPlace::OnRow || (target != nullptr && target->parent() != nullptr)) {
+        emit refused(pe::refuse("layer.reorder", pe::RefusalCode::Unsupported, "Reorder Layer",
+                                "Dragging a layer into or out of a group is not supported yet. "
+                                "Use Group and Ungroup instead.",
+                                describeSelectionForRefusal()));
+        return;
+    }
+
+    const int rows = static_cast<int>(doc_->topLevelCount());
+    int insertBefore = rows;  // dropped past the last row: send it to the bottom
+    if (target != nullptr && where != DropPlace::PastEnd) {
+        const int row = tree_->indexOfTopLevelItem(target);
+        if (row < 0) return;
+        insertBefore = where == DropPlace::Below ? row + 1 : row;
+    }
+
+    const pe::LayerId id = idOf(dragged);
+    const std::size_t from = doc_->topLevelIndexOf(id);
+    if (from == pe::GroupLayer::npos) return;
+    const std::size_t to = reorderTargetForDrop(from, insertBefore, rows);
+    if (to == pe::GroupLayer::npos) return;
+    push(std::make_unique<pe::ReorderLayerCommand>(id, to));
 }
 
 void LayersPanel::onMoveUp() {
