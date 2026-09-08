@@ -37,3 +37,6 @@ Thumbs.db
 moc_*.cpp
 qrc_*.cpp
 ui_*.h
+
+# Deployed, self-contained app bundles (windeployqt output). Build artifacts, not sources.
+dist/
