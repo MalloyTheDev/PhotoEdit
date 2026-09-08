@@ -316,6 +316,48 @@ void MainWindow::buildMenuBar() {
     {
         auto* layerMenu = menuBar()->addMenu(QStringLiteral("&Layer"));
         docMenus_.push_back(layerMenu);
+        // New / Duplicate / Delete and Arrange existed only as buttons in the Layers dock,
+        // so a user who had closed that dock (or never found it) had no way to add a layer
+        // at all, and no keyboard route to any of it. The panel owns the rules; the menu is
+        // a second door onto them.
+        QAction* newLayerAct = layerMenu->addAction(QStringLiteral("&New Layer"), this, [this] {
+            if (layers_ != nullptr) layers_->addLayer();
+        });
+        newLayerAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+N")));
+        QAction* dupLayerAct =
+            layerMenu->addAction(QStringLiteral("&Duplicate Layer"), this, [this] {
+                if (layers_ != nullptr) layers_->duplicateLayer();
+            });
+        dupLayerAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+J")));
+        layerMenu->addAction(QStringLiteral("De&lete Layer"), this, [this] {
+            if (layers_ != nullptr) layers_->deleteLayer();
+        });
+
+        layerMenu->addSeparator();
+        auto* arrangeMenu = layerMenu->addMenu(QStringLiteral("&Arrange"));
+        struct ArrangeEntry {
+            const char* text;
+            const char* keys;
+            LayersPanel::Arrange where;
+        };
+        // Listed top of the stack first, so the menu reads the way the Layers dock does.
+        static constexpr ArrangeEntry kArrangements[] = {
+            {"Bring to &Front", "Ctrl+Shift+]", LayersPanel::Arrange::Front},
+            {"Bring F&orward", "Ctrl+]", LayersPanel::Arrange::Forward},
+            {"Send &Backward", "Ctrl+[", LayersPanel::Arrange::Backward},
+            {"Send to Bac&k", "Ctrl+Shift+[", LayersPanel::Arrange::Back},
+        };
+        for (const ArrangeEntry& e : kArrangements) {
+            QAction* act =
+                arrangeMenu->addAction(QString::fromUtf8(e.text), this, [this, where = e.where] {
+                    if (layers_ != nullptr) {
+                        layers_->arrangeActive(where);
+                    }
+                });
+            act->setShortcut(QKeySequence(QString::fromUtf8(e.keys)));
+        }
+
+        layerMenu->addSeparator();
         QAction* groupAct = layerMenu->addAction(QStringLiteral("&Group Layers"), this, [this] {
             if (layers_ != nullptr) layers_->groupSelected();
         });

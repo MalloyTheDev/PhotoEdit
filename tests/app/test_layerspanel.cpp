@@ -622,3 +622,78 @@ PE_TEST(layerspanel_the_tree_is_actually_wired_for_dragging) {
     PE_CHECK((tree->topLevelItem(0)->flags() & Qt::ItemIsDragEnabled) != 0);
     panel.setDocument(nullptr);
 }
+
+// --- arrange ---------------------------------------------------------------------------
+
+PE_TEST(layerspanel_arrange_moves_the_active_layer_through_the_stack) {
+    // The two arrows computed their target inline, in opposite directions, and there was no
+    // way to reach either end of the stack in one step. One rule now, stated once.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<pe::PixelLayer>("Middle"));
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<pe::PixelLayer>("Top"));
+    const pe::LayerId bottom = doc->topLevelLayers()[0]->id();
+    doc->setActiveLayer(bottom);
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+
+    // Engine index 0 is the BOTTOM of the stack, so "front" is the highest index.
+    panel.arrangeActive(pe::app::LayersPanel::Arrange::Forward);
+    PE_CHECK_EQ(doc->topLevelIndexOf(bottom), static_cast<std::size_t>(1));
+    panel.arrangeActive(pe::app::LayersPanel::Arrange::Front);
+    PE_CHECK_EQ(doc->topLevelIndexOf(bottom), static_cast<std::size_t>(2));
+    panel.arrangeActive(pe::app::LayersPanel::Arrange::Backward);
+    PE_CHECK_EQ(doc->topLevelIndexOf(bottom), static_cast<std::size_t>(1));
+    panel.arrangeActive(pe::app::LayersPanel::Arrange::Back);
+    PE_CHECK_EQ(doc->topLevelIndexOf(bottom), static_cast<std::size_t>(0));
+
+    // Four moves, four undo steps, and the whole trip reverses.
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(4));
+    for (int i = 0; i < 4; ++i) doc->history().undo();
+    PE_CHECK_EQ(doc->topLevelIndexOf(bottom), static_cast<std::size_t>(0));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_arrange_that_cannot_move_the_layer_says_so) {
+    // Both arrows were silent at the ends of the stack: the button stayed enabled, the
+    // click did nothing, and nothing said why. That is the exact shape of "dead UI".
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    auto group = std::make_unique<pe::GroupLayer>("G");
+    group->addChild(std::make_unique<pe::PixelLayer>("inner"));
+    const pe::LayerId inner = group->children()[0]->id();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+
+    pe::app::LayersPanel panel;
+    std::vector<pe::Refusal> said;
+    QObject::connect(&panel, &pe::app::LayersPanel::refused,
+                     [&said](const pe::Refusal& r) { said.push_back(r); });
+    panel.setDocument(doc.get());
+
+    // The top layer cannot go further forward, in either flavour.
+    doc->setActiveLayer(doc->topLevelLayers()[1]->id());
+    panel.arrangeActive(pe::app::LayersPanel::Arrange::Forward);
+    panel.arrangeActive(pe::app::LayersPanel::Arrange::Front);
+    PE_REQUIRE(said.size() == 2);
+    PE_CHECK(said[0].code == pe::RefusalCode::NoEffect);
+    PE_CHECK(said[1].code == pe::RefusalCode::NoEffect);
+    PE_CHECK(said[0].explanation.find("top") != std::string::npos);
+
+    // Nor the bottom layer further back.
+    doc->setActiveLayer(doc->topLevelLayers()[0]->id());
+    panel.arrangeActive(pe::app::LayersPanel::Arrange::Backward);
+    PE_REQUIRE(said.size() == 3);
+    PE_CHECK(said[2].code == pe::RefusalCode::NoEffect);
+    PE_CHECK(said[2].explanation.find("bottom") != std::string::npos);
+
+    // And a nested layer has no top-level index to move, which is a different reason and
+    // gets a different one.
+    doc->setActiveLayer(inner);
+    panel.arrangeActive(pe::app::LayersPanel::Arrange::Front);
+    PE_REQUIRE(said.size() == 4);
+    PE_CHECK(said[3].code == pe::RefusalCode::LayerNotTopLevel);
+
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));  // nothing pushed
+    panel.setDocument(nullptr);
+}

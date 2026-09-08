@@ -26,6 +26,7 @@
 #include <QColor>
 #include <QDockWidget>
 #include <QImage>
+#include <QKeySequence>
 #include <QLabel>
 #include <QList>
 #include <QMenu>
@@ -877,4 +878,79 @@ PE_TEST(effect_refusal_reports_an_over_budget_layer) {
     PE_CHECK(!r.retryMeaningful);
     PE_CHECK(!r.fixableByState);  // no choice of layer makes an over-budget region fit
     PE_CHECK(!r.context.empty());
+}
+
+PE_TEST(mainwindow_the_layer_menu_can_add_duplicate_delete_and_arrange) {
+    // New / Duplicate / Delete / Arrange lived only on buttons inside the Layers dock. Close
+    // that dock, or never find it, and there was no way to add a layer at all and no
+    // keyboard route to any of it, even though the Layer menu was right there.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    PE_REQUIRE(w.document() != nullptr);
+
+    struct Expected {
+        const char* text;
+        const char* keys;  // empty when the entry deliberately has none
+    };
+    const Expected wanted[] = {
+        {"&New Layer", "Ctrl+Shift+N"},
+        {"&Duplicate Layer", "Ctrl+J"},
+        {"De&lete Layer", ""},
+        {"Bring to &Front", "Ctrl+Shift+]"},
+        {"Bring F&orward", "Ctrl+]"},
+        {"Send &Backward", "Ctrl+["},
+        {"Send to Bac&k", "Ctrl+Shift+["},
+    };
+    for (const Expected& e : wanted) {
+        QAction* a = findAction(w.menuBar(), QString::fromUtf8(e.text));
+        PE_CHECK(a != nullptr);
+        if (a == nullptr) continue;
+        const QString keys = QString::fromUtf8(e.keys);
+        PE_CHECK(a->shortcut().toString(QKeySequence::PortableText) == keys);
+    }
+
+    // And they are wired, not just present. One layer to start with.
+    PE_REQUIRE(w.document()->topLevelCount() == 1);
+    QAction* add = findAction(w.menuBar(), QStringLiteral("&New Layer"));
+    PE_REQUIRE(add != nullptr);
+    add->trigger();
+    PE_CHECK_EQ(w.document()->topLevelCount(), static_cast<std::size_t>(2));
+
+    QAction* dup = findAction(w.menuBar(), QStringLiteral("&Duplicate Layer"));
+    PE_REQUIRE(dup != nullptr);
+    dup->trigger();
+    PE_CHECK_EQ(w.document()->topLevelCount(), static_cast<std::size_t>(3));
+
+    // Arrange moves the active layer rather than merely reporting something. The layer the
+    // duplicate produced is active and sits at the top, so send it to the back.
+    const pe::LayerId active = w.document()->activeLayer();
+    QAction* toBack = findAction(w.menuBar(), QStringLiteral("Send to Bac&k"));
+    PE_REQUIRE(toBack != nullptr);
+    toBack->trigger();
+    PE_CHECK_EQ(w.document()->topLevelIndexOf(active), static_cast<std::size_t>(0));
+
+    // Delete is the one destructive entry, and the layer here is empty, so it needs no
+    // prompt and must not open one in a headless run.
+    QAction* del = findAction(w.menuBar(), QStringLiteral("De&lete Layer"));
+    PE_REQUIRE(del != nullptr);
+    del->trigger();
+    PE_CHECK_EQ(w.document()->topLevelCount(), static_cast<std::size_t>(2));
+}
+
+PE_TEST(mainwindow_an_arrange_that_cannot_move_the_layer_reaches_the_status_bar) {
+    // The panel's refusals only help if the menu route is connected to the same sink. The
+    // arrows were silent at the ends of the stack; the menu entries must not be.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    PE_REQUIRE(w.document() != nullptr);
+    PE_REQUIRE(w.document()->topLevelCount() == 1);  // the only layer is both top and bottom
+    w.clearRefusals();
+
+    QAction* forward = findAction(w.menuBar(), QStringLiteral("Bring F&orward"));
+    PE_REQUIRE(forward != nullptr);
+    forward->trigger();
+    PE_REQUIRE(w.refusals().size() == 1);
+    PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::NoEffect);
+    PE_CHECK(w.refusals()[0].operation == std::string("layer.arrange"));
+    PE_CHECK_EQ(w.document()->history().undoDepth(), static_cast<std::size_t>(0));
 }

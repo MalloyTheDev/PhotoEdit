@@ -959,25 +959,73 @@ void LayersPanel::handleLayerDrop(QTreeWidgetItem* dragged, QTreeWidgetItem* tar
     push(std::make_unique<pe::ReorderLayerCommand>(id, to));
 }
 
-void LayersPanel::onMoveUp() {
+void LayersPanel::addLayer() {
+    onAdd();
+}
+
+void LayersPanel::duplicateLayer() {
+    onDuplicate();
+}
+
+void LayersPanel::deleteLayer() {
+    onDelete();
+}
+
+void LayersPanel::arrangeActive(Arrange where) {
     if (doc_ == nullptr) return;
     const pe::LayerId id = doc_->activeLayer();
-    if (doc_->findLayer(id) == nullptr) return;
-    const std::size_t idx = doc_->topLevelIndexOf(id);
-    // Up in the list = toward the top of the stack = a higher engine index.
-    if (idx != pe::GroupLayer::npos && idx + 1 < doc_->topLevelCount()) {
-        push(std::make_unique<pe::ReorderLayerCommand>(id, idx + 1));
+    const pe::Layer* l = doc_->findLayer(id);
+    if (l == nullptr) {
+        emit refused(pe::refuse("layer.arrange", pe::RefusalCode::NoActiveLayer, "Arrange Layer",
+                                "Select a layer to move first.", describeSelectionForRefusal()));
+        return;
     }
+    const std::size_t idx = doc_->topLevelIndexOf(id);
+    if (idx == pe::GroupLayer::npos) {
+        emit refused(pe::refuse("layer.arrange", pe::RefusalCode::LayerNotTopLevel, "Arrange Layer",
+                                "Only a top-level layer can be moved in the stack. Ungroup \"" +
+                                    l->name() + "\" first.",
+                                describeSelectionForRefusal()));
+        return;
+    }
+
+    // Engine index 0 is the BOTTOM of the stack, so the front of the picture is the
+    // HIGHEST index. Both arrows used to compute this inline and in opposite directions.
+    const std::size_t top = doc_->topLevelCount() - 1;
+    std::size_t to = idx;
+    switch (where) {
+        case Arrange::Front:
+            to = top;
+            break;
+        case Arrange::Forward:
+            to = idx < top ? idx + 1 : idx;
+            break;
+        case Arrange::Backward:
+            to = idx > 0 ? idx - 1 : idx;
+            break;
+        case Arrange::Back:
+            to = 0;
+            break;
+    }
+    if (to == idx) {
+        // Already at that end of the stack. Saying so beats an arrow and a menu item that
+        // both look live and do nothing, which is what they did.
+        const bool towardFront = where == Arrange::Front || where == Arrange::Forward;
+        emit refused(pe::refuse(
+            "layer.arrange", pe::RefusalCode::NoEffect, "Arrange Layer",
+            "\"" + l->name() + "\" is already the " + (towardFront ? "top" : "bottom") + " layer.",
+            describeSelectionForRefusal()));
+        return;
+    }
+    push(std::make_unique<pe::ReorderLayerCommand>(id, to));
+}
+
+void LayersPanel::onMoveUp() {
+    arrangeActive(Arrange::Forward);
 }
 
 void LayersPanel::onMoveDown() {
-    if (doc_ == nullptr) return;
-    const pe::LayerId id = doc_->activeLayer();
-    if (doc_->findLayer(id) == nullptr) return;
-    const std::size_t idx = doc_->topLevelIndexOf(id);
-    if (idx != pe::GroupLayer::npos && idx > 0) {
-        push(std::make_unique<pe::ReorderLayerCommand>(id, idx - 1));
-    }
+    arrangeActive(Arrange::Backward);
 }
 
 }  // namespace pe::app

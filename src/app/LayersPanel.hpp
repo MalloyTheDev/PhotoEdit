@@ -88,6 +88,19 @@ public:
     // a test picks the rule up. `target` is null for a drop past the last row.
     void handleLayerDrop(QTreeWidgetItem* dragged, QTreeWidgetItem* target, DropPlace where);
 
+    // Where in the stack to move the active layer. Forward / Backward move one step;
+    // Front / Back go the whole way. Named for the stack the user sees, not the engine's
+    // index, which runs the other way.
+    enum class Arrange { Front, Forward, Backward, Back };
+
+    // The dock's buttons and the Layer menu are two doors onto the same operations, so both
+    // come through here rather than each growing its own copy of the rule. Every one of
+    // these refuses out loud when it cannot run; none of them is a silent no-op.
+    void addLayer();
+    void duplicateLayer();
+    void deleteLayer();
+    void arrangeActive(Arrange where);
+
     // Group the multi-selected top-level layers into a new group; dissolve the active
     // top-level group. Both are safe no-ops when the selection doesn't qualify.
     // MainWindow wires the Layer▸Group (Ctrl+G) / Ungroup (Ctrl+Shift+G) actions here.
