@@ -130,13 +130,45 @@ private:
 
 #ifdef PHOTOEDIT_HAVE_ZLIB
 // Deflate `in`. Returns empty on failure (caller falls back to storing raw).
+// The DEFLATE level every .pedoc block is written at.
+//
+// .pedoc is PhotoEdit's WORKING document format, not an archive. It is written on every
+// save, and will be written far more often once autosave and crash recovery exist, so its
+// priorities are correctness, then save latency, then reasonable disk use, and only then
+// compression ratio. It was on Z_DEFAULT_COMPRESSION (level 6) by accident rather than by
+// decision: compress2's default is what the first version happened to pass.
+//
+// Measured across seven workloads at 0/1/3/6/9 (see the #177 comment for the full table),
+// level 1 against level 6:
+//
+//   photo-like, 24 MP x 3 layers   6733 ms -> 2555 ms   55.0 MB -> 85.9 MB
+//   16-bit photo-like, 6 MP         605 ms ->  281 ms    5.6 MB ->  9.9 MB
+//   masks, 3 MP x 2 layers          547 ms ->  254 ms    4.3 MB ->  7.1 MB
+//   flat, 24 MP x 3 layers         1301 ms ->  676 ms    0.3 MB ->  1.4 MB
+//   high entropy, 3 MP              404 ms ->  295 ms   10.10 MB -> 10.11 MB
+//
+// So roughly 2.1x to 2.6x faster for 1.6x to 1.8x the bytes on realistic content, and on
+// incompressible content it is nearly free. Level 3 was measured too and buys 14% smaller
+// files for 30% more time, which is the wrong trade for a file written this often. Level 9
+// costs 24% to 91% more time than 6 for output that is the same size, occasionally larger.
+//
+// NOT level 0. It is the fastest, but writeBlock stores a block raw when compression does
+// not shrink it, so level 0 means storing everything uncompressed: 288 MB instead of 86 MB
+// for that 24 MP document, and 1028x larger on the flat one. At the 900 MP target that
+// moves the bottleneck into disk, autosave and recovery storage.
+//
+// This is a WRITER policy. The zlib stream is self-describing, so the level is not recorded
+// in the file and any reader, old or new, reads any level; tests/fixtures holds a document
+// written under the old policy to keep proving that.
+constexpr int kDeflateLevel = Z_BEST_SPEED;
+
 std::vector<std::byte> zlibDeflate(const std::vector<std::byte>& in) {
     if (in.empty()) return {};
     uLongf bound = compressBound(static_cast<uLong>(in.size()));
     std::vector<std::byte> out(bound);
     if (compress2(reinterpret_cast<Bytef*>(out.data()), &bound,
                   reinterpret_cast<const Bytef*>(in.data()), static_cast<uLong>(in.size()),
-                  Z_DEFAULT_COMPRESSION) != Z_OK) {
+                  kDeflateLevel) != Z_OK) {
         return {};
     }
     out.resize(bound);
@@ -465,6 +497,12 @@ std::unique_ptr<Adjustment> readAdjustment(Reader& r) {
 // built in), else raw. The per-block flag keeps the surrounding record uncompressed.
 void writeBlock(Writer& w, const std::vector<std::byte>& raw) {
 #ifdef PHOTOEDIT_HAVE_ZLIB
+    // A compression failure is NOT a save failure. zlibDeflate returns empty on any zlib
+    // error, and an incompressible block legitimately deflates to more than it started
+    // with; either way the block is stored raw, which is a first-class encoding of this
+    // format that every reader handles. The file is larger and completely correct, which
+    // for a working document is the right answer: refusing to save because a compressor
+    // was unhappy would lose work. A build without zlib takes the same path.
     const std::vector<std::byte> comp = zlibDeflate(raw);
     if (!comp.empty() && comp.size() < raw.size()) {
         w.u8(1);  // compressed: u32 length + deflated bytes

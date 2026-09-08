@@ -64,6 +64,10 @@ target_include_directories(pe_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # reviewable diff rather than a build artifact nobody sees.
 target_compile_definitions(pe_core_tests
     PRIVATE PE_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
+# Committed .pedoc files written under an older writer policy. They exist to prove the
+# reader keeps reading them, so they are never regenerated to make a test pass.
+target_compile_definitions(pe_core_tests
+    PRIVATE PE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
 add_test(NAME pe_core_tests COMMAND pe_core_tests)
 

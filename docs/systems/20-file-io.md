@@ -269,6 +269,48 @@ the solid-fill branch validated its own way, was missed when v7 widened the rule
 PhotoEdit wrote files its own reader refused. The save reported success, and opening the
 file lost the whole document rather than that one layer.
 
+**Compression policy for `.pedoc`.** Every block is DEFLATE at **level 1**
+(`Z_BEST_SPEED`), chosen rather than inherited: it was on zlib's default (level 6) because
+that is what `compress2` does when nothing is passed.
+
+`.pedoc` is the WORKING document format. It is written on every save and will be written
+far more often once autosave and crash recovery exist, so its priorities are correctness,
+then save latency, then reasonable disk use, and only then compression ratio. It is not an
+archive.
+
+Measured across seven workloads, level 1 against level 6:
+
+| workload | L1 total | L6 total | L1 size | L6 size |
+|---|---:|---:|---:|---:|
+| photo-like, 24 MP x 3 layers | 2555 ms | 6733 ms | 85.9 MB | 55.0 MB |
+| flat, 24 MP x 3 layers | 676 ms | 1301 ms | 1.40 MB | 0.28 MB |
+| 16-bit photo-like, 6 MP | 281 ms | 605 ms | 9.85 MB | 5.57 MB |
+| float photo-like, 6 MP | 479 ms | 1011 ms | 14.4 MB | 8.21 MB |
+| masks, 3 MP x 2 layers | 254 ms | 547 ms | 7.14 MB | 4.30 MB |
+| high entropy, 3 MP | 295 ms | 404 ms | 10.11 MB | 10.10 MB |
+| sparse, one tile per layer | 6.1 ms | 18.0 ms | 188 KB | 118 KB |
+
+Roughly 2.1x to 2.6x faster for 1.6x to 1.8x the bytes on realistic content, and nearly
+free on incompressible content. Level 3 buys 14% smaller files for 30% more time, which is
+the wrong trade for a file written this often. Level 9 costs 24% to 91% more time than 6
+for output the same size, occasionally larger.
+
+Level 0 is rejected despite being fastest: `writeBlock` stores a block raw when compression
+does not shrink it, so level 0 means storing everything uncompressed. That is 288 MB rather
+than 86 MB for the 24 MP document and 1028x larger on the flat one, which at the 900 MP
+target moves the bottleneck into disk, autosave and recovery storage.
+
+The level is a WRITER policy and is not recorded in the file: a zlib stream is
+self-describing, so any reader takes any level. `tests/fixtures` holds a `.pedoc` written
+under the old policy, and a test loads it, so that stays proven rather than assumed. There
+is deliberately no user-facing setting; if a real need appears it can be filed then.
+
+**Compression failure is not save failure.** `zlibDeflate` returns empty on any zlib error,
+and incompressible data legitimately deflates larger than it started; `writeBlock` stores
+the block raw in both cases, which is a first-class encoding every reader handles. The file
+is larger and completely correct. Refusing to save because a compressor was unhappy would
+lose the user's work.
+
 **PSD/PSB mapping.** A bidirectional mapping table translates between our model and
 Photoshop's records, accepting deliberate lossiness:
 

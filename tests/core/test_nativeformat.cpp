@@ -12,7 +12,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <memory>
+#include <string>
 #include <vector>
 
 using namespace pe;
@@ -1118,4 +1121,220 @@ PE_TEST(native_format_mask_gather_is_exact_across_tiles_and_holes) {
         std::printf("    first mask mismatch at (%d,%d), %d in total\n", firstX, firstY,
                     mismatches);
     }
+}
+
+#ifdef PHOTOEDIT_HAVE_ZLIB
+namespace {
+
+// The .pedoc written under the pre-#177 Z_DEFAULT_COMPRESSION policy, checked into the
+// repository. It is a compatibility fixture: it must keep loading whatever level the writer
+// is set to, and it is never regenerated to make a test pass.
+//
+// Guarded on zlib because its blocks are compressed, and a build without zlib cannot read a
+// compressed .pedoc at all: readBlock returns false for a compressed block and says so.
+// That is a pre-existing property of the no-optional-deps configuration, not something this
+// slice changed.
+std::vector<std::byte> readLegacyFixture() {
+    std::ifstream f(std::string(PE_FIXTURE_DIR) + "/legacy-default-compression.pedoc",
+                    std::ios::binary);
+    if (!f) return {};
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    if (!raw.empty()) std::memcpy(out.data(), raw.data(), raw.size());
+    return out;
+}
+
+}  // namespace
+
+PE_TEST(native_format_reads_a_file_written_under_the_previous_compression_policy) {
+    // #177 changed the writer's DEFLATE level from zlib's default to Z_BEST_SPEED. The level
+    // is not recorded in the file and a zlib stream is self-describing, so this should be a
+    // non-event for readers. "Should be" is not evidence, and a format that quietly stopped
+    // reading its own older files would be the worst possible outcome of a performance
+    // change, so a file written under the old policy is committed and loaded here.
+    const std::vector<std::byte> blob = readLegacyFixture();
+    PE_REQUIRE(!blob.empty());
+    PE_CHECK_EQ(static_cast<int>(blob[5]), static_cast<int>(std::byte{'7'}));
+
+    const auto doc = deserializeDocument(blob);
+    PE_REQUIRE(doc != nullptr);
+    PE_CHECK_EQ(doc->canvasSize().width, 300);
+    PE_CHECK_EQ(doc->canvasSize().height, 200);
+    PE_CHECK_EQ(doc->resolutionPpi(), 144);
+    PE_CHECK_EQ(doc->topLevelCount(), static_cast<std::size_t>(3));
+
+    const auto* base = dynamic_cast<const PixelLayer*>(doc->topLevelLayers()[0].get());
+    PE_REQUIRE(base != nullptr);
+    PE_CHECK(base->name() == "Base");
+    PE_CHECK(base->blendMode() == BlendMode::Multiply);
+    PE_CHECK(base->opacity() > 0.74f && base->opacity() < 0.76f);
+    // Pixels, including the off-canvas patch that made the file v7.
+    PE_CHECK(base->tiles().pixel(10, 20) == Rgba8{10, 20, 30, 255});
+    PE_CHECK(base->tiles().pixel(-40, -30) == Rgba8{7, 7, 7, 255});
+    // The mask, with its flag.
+    PE_REQUIRE(base->mask() != nullptr);
+    PE_CHECK(base->mask()->inverted());
+    PE_CHECK_EQ(static_cast<int>(base->mask()->buffer().value(20, 20)),
+                static_cast<int>(MaskBuffer::kClear));
+    // The nested group and the off-canvas solid fill.
+    const auto* group = dynamic_cast<const GroupLayer*>(doc->topLevelLayers()[1].get());
+    PE_REQUIRE(group != nullptr);
+    PE_CHECK_EQ(group->childCount(), static_cast<std::size_t>(1));
+    const auto* solid = dynamic_cast<const SolidColorLayer*>(doc->topLevelLayers()[2].get());
+    PE_REQUIRE(solid != nullptr);
+    PE_CHECK(solid->bounds() == Rect{-10, -10, 90, 90});
+}
+
+PE_TEST(native_format_compression_policy_is_the_chosen_one_not_zlibs_default) {
+    // The policy is a decision, so it is asserted rather than left to whatever compress2
+    // defaults to. The level is not recorded in the file, so this infers it from the only
+    // observable consequence: how large the output is for a payload whose compressed size
+    // differs sharply between levels.
+    //
+    // Bounds rather than an exact size, because zlib's output is not contractually stable
+    // across versions. Measured on this exact payload with this zlib:
+    //
+    //   level 0   1.00x   (stored raw: deflate made it bigger, so writeBlock falls back)
+    //   level 1  26.75x
+    //   level 3  27.44x
+    //   level 6  54.79x
+    //   level 9  55.68x
+    //
+    // So the window below admits level 1 with wide margins and excludes 0, 6 and 9. It does
+    // NOT distinguish 1 from 3, which is fine: the values this guards against are the ones
+    // something could drift back to by accident, and those are 6 (zlib's default, which is
+    // what this slice replaced) and 0 (the other obvious constant). Nothing lands on 3 by
+    // accident.
+    auto doc = Document::createBlank(Size{1200, 900});
+    auto* base = asPixel(*doc, 0);
+    for (int y = 0; y < 900; ++y) {
+        for (int x = 0; x < 1200; ++x) {
+            const auto v = static_cast<std::uint8_t>(((x / 3) ^ (y / 5)) & 0xFF);
+            base->tiles().setPixel(x, y, Rgba8{v, static_cast<std::uint8_t>(v / 2), 64, 255});
+        }
+    }
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+    const double raw = 1200.0 * 900.0 * 4.0;
+    const double ratio = raw / static_cast<double>(blob.size());
+
+    PE_CHECK(ratio > 5.0);   // really compressed, so not level 0 and not a raw fallback
+    PE_CHECK(ratio < 40.0);  // and not squeezed the way 6 or 9 would
+
+    const auto back = deserializeDocument(blob);
+    PE_REQUIRE(back != nullptr);
+    const auto* rl = dynamic_cast<const PixelLayer*>(back->topLevelLayers()[0].get());
+    PE_REQUIRE(rl != nullptr);
+    PE_CHECK(rl->tiles().pixel(700, 400) == base->tiles().pixel(700, 400));
+}
+#endif  // PHOTOEDIT_HAVE_ZLIB
+
+PE_TEST(native_format_payload_survives_the_compression_policy_unchanged) {
+    // Compressed bytes differ between levels, so the byte-equality oracle used for #174 and
+    // #176 is the wrong assertion here. What must not change is the DECOMPRESSED payload:
+    // the same document in, the same document out. Unguarded, because a build without zlib
+    // stores every block raw and must round-trip identically too.
+    constexpr int T = kTileSize;
+    for (const BitDepth depth : {BitDepth::U8, BitDepth::U16, BitDepth::F32}) {
+        auto doc = Document::createBlank(Size{2 * T, T}, ColorMode::RGB, depth, 96);
+        auto* base = asPixel(*doc, 0);
+        const auto paint = [depth, base](Rect r, int seed) {
+            switch (depth) {
+                case BitDepth::U16:
+                    base->tiles16().fillRect(
+                        r, Rgba16{static_cast<std::uint16_t>(seed * 1000), 2000, 3000, 65535});
+                    break;
+                case BitDepth::F32:
+                    base->tilesF().fillRect(
+                        r, Rgbaf{static_cast<float>(seed) / 10.0f, 0.25f, 0.5f, 1.0f});
+                    break;
+                case BitDepth::U8:
+                default:
+                    base->tiles().fillRect(
+                        r, Rgba8{static_cast<std::uint8_t>(seed * 20), 40, 60, 255});
+                    break;
+            }
+        };
+        paint(Rect{0, 0, 2 * T, T}, 1);
+        paint(Rect{-30, -30, 25, 25}, 5);  // off-canvas, so the file is v7
+        auto m = std::make_unique<Mask>();
+        m->buffer().fillRect(Rect{T - 5, 5, 20, 20}, MaskBuffer::kClear);
+        base->setMask(std::move(m));
+
+        const std::vector<std::byte> blob = serializeDocument(*doc);
+        PE_CHECK_EQ(static_cast<int>(blob[5]), static_cast<int>(std::byte{'7'}));
+        const auto back = deserializeDocument(blob);
+        PE_CHECK(back != nullptr);
+        if (back == nullptr) continue;
+        const auto* rl = dynamic_cast<const PixelLayer*>(back->topLevelLayers()[0].get());
+        PE_CHECK(rl != nullptr);
+        if (rl == nullptr) continue;
+
+        int mismatches = 0;
+        for (int y = -32; y < T + 2; ++y) {
+            for (int x = -32; x < 2 * T + 2; ++x) {
+                switch (depth) {
+                    case BitDepth::U16:
+                        if (!(rl->tiles16().pixel(x, y) == base->tiles16().pixel(x, y))) {
+                            ++mismatches;
+                        }
+                        break;
+                    case BitDepth::F32: {
+                        const Rgbaf a = rl->tilesF().pixel(x, y);
+                        const Rgbaf e = base->tilesF().pixel(x, y);
+                        if (a.r != e.r || a.g != e.g || a.b != e.b || a.a != e.a) ++mismatches;
+                        break;
+                    }
+                    case BitDepth::U8:
+                    default:
+                        if (!(rl->tiles().pixel(x, y) == base->tiles().pixel(x, y))) ++mismatches;
+                        break;
+                }
+                if (rl->mask() != nullptr && base->mask() != nullptr &&
+                    rl->mask()->buffer().value(x, y) != base->mask()->buffer().value(x, y)) {
+                    ++mismatches;
+                }
+            }
+        }
+        PE_CHECK_EQ(mismatches, 0);
+        // And re-serializing the reloaded document reproduces the same bytes, so the writer
+        // stays deterministic under the new policy.
+        PE_CHECK(serializeDocument(*back) == blob);
+    }
+}
+
+PE_TEST(native_format_stores_a_block_raw_rather_than_failing_when_it_cannot_shrink_it) {
+    // The failure contract, established rather than assumed. zlibDeflate returns empty on
+    // any zlib error, and incompressible data legitimately deflates larger than it started;
+    // writeBlock stores the block raw in both cases. Raw is a first-class encoding of this
+    // format, so the save succeeds and produces a correct, larger file. Refusing to save
+    // because a compressor was unhappy would lose the user's work.
+    auto doc = Document::createBlank(Size{600, 400});
+    auto* base = asPixel(*doc, 0);
+    for (int y = 0; y < 400; ++y) {
+        for (int x = 0; x < 600; ++x) {
+            const auto r = static_cast<std::uint32_t>(x) * 1103515245u +
+                           static_cast<std::uint32_t>(y) * 12345u;
+            base->tiles().setPixel(
+                x, y,
+                Rgba8{static_cast<std::uint8_t>(r >> 3), static_cast<std::uint8_t>(r >> 11),
+                      static_cast<std::uint8_t>(r >> 19), static_cast<std::uint8_t>(r >> 25)});
+        }
+    }
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK(!blob.empty());
+    // Bigger than the pixels it holds, which is only possible if a block went in raw.
+    PE_CHECK(blob.size() > static_cast<std::size_t>(600 * 400 * 4));
+
+    const auto back = deserializeDocument(blob);
+    PE_REQUIRE(back != nullptr);
+    const auto* rl = dynamic_cast<const PixelLayer*>(back->topLevelLayers()[0].get());
+    PE_REQUIRE(rl != nullptr);
+    int mismatches = 0;
+    for (int y = 0; y < 400; y += 7) {
+        for (int x = 0; x < 600; x += 5) {
+            if (!(rl->tiles().pixel(x, y) == base->tiles().pixel(x, y))) ++mismatches;
+        }
+    }
+    PE_CHECK_EQ(mismatches, 0);  // raw storage is lossless
 }
