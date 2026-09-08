@@ -508,12 +508,16 @@ PE_TEST(the_canvas_runs_its_long_tools_through_the_window_not_around_it) {
     // documentTaskInFlight_, so the window's close guard was inert for its whole duration,
     // and a wand click during a snapshot save (which deliberately leaves the canvas live)
     // started a second worker and a second nested event loop inside the first.
-    pe::app::CanvasView canvas;
-    canvas.resize(200, 200);
+    // The document is declared FIRST so it outlives the view: ~CanvasView drops the
+    // renderer, whose destructor calls removeObserver on the document. MainWindow keeps the
+    // same order deliberately (see its destructor); a test that reverses it is reading freed
+    // memory, which is what the shell's ASan lane caught here.
     auto doc = pe::Document::createBlank(pe::Size{64, 64});
     static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()))
         ->tiles()
         .fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{20, 40, 60, 255});
+    pe::app::CanvasView canvas;
+    canvas.resize(200, 200);
     canvas.setDocument(doc.get());
     canvas.setTool(pe::app::CanvasView::Tool::Wand);
 
