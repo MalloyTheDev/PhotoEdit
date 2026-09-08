@@ -32,6 +32,7 @@
 #include <vector>
 
 #include <QAction>
+#include <QApplication>
 #include <QCloseEvent>
 #include <QColor>
 #include <QCoreApplication>
@@ -46,6 +47,7 @@
 #include <QMouseEvent>
 #include <QObject>
 #include <QPointF>
+#include <QProgressDialog>
 #include <QResizeEvent>
 #include <QSize>
 #include <QString>
@@ -300,6 +302,44 @@ PE_TEST(a_task_refuses_its_own_windows_close_and_leaves_other_windows_alone) {
     PE_CHECK(r.ran);
     PE_CHECK_EQ(task.closes, 0);   // the document window still cannot go away mid-save
     PE_CHECK_EQ(other.closes, 1);  // everything else is left alone
+}
+
+PE_TEST(a_task_refuses_a_close_on_its_own_busy_dialog) {
+    // The busy dialog must not be dismissible while the task runs. Closing it leaves the
+    // application input-blocked, wait-cursored and the canvas frozen, with nothing on screen
+    // saying work is in progress: exactly the "it has hung" state this file exists to remove.
+    //
+    // Scoping the close refusal to the task's launching window is not enough to cover it. The
+    // dialog is a QDialog and therefore its own top-level window, so window() returns the
+    // dialog rather than the task window, and the scoped check waved its close straight
+    // through. It has to be named separately.
+    //
+    // The task must outlast kBusyDialogDelayMs or the dialog is never shown.
+    EventCounter host;
+    host.resize(60, 60);
+    host.show();
+
+    bool foundDialog = false;
+    bool stillVisibleAfterClose = false;
+    QTimer::singleShot(pe::app::kBusyDialogDelayMs + 150, &host, [&] {
+        for (QWidget* w : QApplication::topLevelWidgets()) {
+            auto* dlg = qobject_cast<QProgressDialog*>(w);
+            if (dlg == nullptr || !dlg->isVisible()) continue;
+            foundDialog = true;
+            QCloseEvent close;
+            QCoreApplication::sendEvent(dlg, &close);
+            dlg->close();  // the real route a title-bar X takes
+            stillVisibleAfterClose = dlg->isVisible();
+            break;
+        }
+    });
+
+    const TaskResult r =
+        pe::app::runDocumentTask(&host, nullptr, QStringLiteral("working"), TaskAccess::Detached,
+                                 [] { sleepMs(pe::app::kBusyDialogDelayMs + 400); });
+    PE_CHECK(r.ran);
+    PE_CHECK(foundDialog);             // the dialog really was up, so the test is not vacuous
+    PE_CHECK(stillVisibleAfterClose);  // and it refused to go away
 }
 
 PE_TEST(task_reports_work_that_throws_instead_of_terminating) {

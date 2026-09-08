@@ -29,10 +29,14 @@ namespace {
 // that inverted would stop the window repainting, which is the freeze this exists to fix.
 class InputBlocker final : public QObject {
 public:
-    // `taskWindow` is the window the task was launched from; only that window's close is
-    // refused. See the QEvent::Close case.
+    // `taskWindow` is the window the task was launched from. Only its close, and the task's
+    // own progress dialog's, are refused. See the QEvent::Close case.
     InputBlocker(bool blockUserInput, QWidget* taskWindow)
         : blockUserInput_(blockUserInput), taskWindow_(taskWindow) {}
+
+    // The busy dialog this task owns. Set after construction because runDocumentTask builds
+    // the dialog after installing the filter.
+    void setTaskDialog(QWidget* dialog) noexcept { taskDialog_ = dialog; }
 
     bool eventFilter(QObject* obj, QEvent* e) override {
         switch (e->type()) {
@@ -60,19 +64,31 @@ public:
                 // that the user carries on working while the worker writes.
                 return blockUserInput_;
             case QEvent::Close: {
-                // Refused in every mode, but only for the window the task belongs to:
-                // closing THAT would destroy the document, and the nested event loop, out
-                // from under the worker. Every other window is left alone. This filter is
-                // installed on the application, and refusing every close application-wide
-                // meant a dialog opened during a snapshot save (the Filter and Layer menus
-                // stay enabled, by design) could not be dismissed by its own title-bar
-                // button, which looks exactly like the hang this code exists to remove.
+                // Refused in every mode for TWO windows: the one the task was launched from,
+                // because closing it would destroy the document and the nested event loop out
+                // from under the worker; and the task's own busy dialog, because dismissing
+                // that leaves the application input-blocked, wait-cursored and frozen with
+                // nothing on screen saying why. Anything else is left alone.
+                //
+                // The dialog needs naming separately: it is a QDialog, so it is its own
+                // top-level window and window() returns the dialog, not taskWindow_. Scoping
+                // the refusal to taskWindow_ alone therefore let the busy dialog be closed
+                // mid-task, which restored precisely the hang this file exists to remove.
+                //
+                // Leaving OTHER windows alone is the point of the scoping: this filter is
+                // installed on the application, and refusing every close meant a dialog the
+                // user opened during a snapshot save (the Filter and Layer menus stay
+                // enabled, by design) could not be dismissed by its own title-bar button.
                 //
                 // With no window to compare against, fall back to refusing: that is the
                 // protective direction, and it is what every caller with a real parent got
                 // before.
                 auto* w = qobject_cast<QWidget*>(obj);
-                if (taskWindow_ != nullptr && (w == nullptr || w->window() != taskWindow_)) {
+                const bool isTaskWindow =
+                    w != nullptr && taskWindow_ != nullptr && w->window() == taskWindow_;
+                const bool isTaskDialog =
+                    w != nullptr && taskDialog_ != nullptr && w->window() == taskDialog_->window();
+                if (taskWindow_ != nullptr && !isTaskWindow && !isTaskDialog) {
                     return QObject::eventFilter(obj, e);
                 }
                 // ignore() and not merely "return true": a QCloseEvent is accepted by
@@ -90,6 +106,7 @@ public:
 private:
     bool blockUserInput_;
     QWidget* taskWindow_;
+    QWidget* taskDialog_ = nullptr;
 };
 
 // Installs the input block and (when input is blocked) the wait cursor, and takes them
@@ -103,6 +120,10 @@ public:
           blocker_(blockUserInput, taskWindow),
           cursor_(blockUserInput) {
         if (app_ != nullptr) app_->installEventFilter(&blocker_);
+    }
+    // The task's busy dialog, once runDocumentTask has built it.
+    void watchDialog(QWidget* dialog) noexcept {
+        blocker_.setTaskDialog(dialog);
         // No wait cursor for a snapshot task: the pointer is still a live brush.
         if (cursor_) QGuiApplication::setOverrideCursor(Qt::WaitCursor);
     }
@@ -144,7 +165,7 @@ TaskResult runDocumentTask(QWidget* parent, CanvasView* canvas, const QString& t
     if (!work) return result;  // nothing to run; not an error, and not a "ran" either
 
     const bool snapshotTask = access == TaskAccess::Snapshot;
-    const BlockScope block(!snapshotTask, parent != nullptr ? parent->window() : nullptr);
+    BlockScope block(!snapshotTask, parent != nullptr ? parent->window() : nullptr);
     const FreezeScope freeze(access == TaskAccess::LiveDocument ? canvas : nullptr);
 
     // Indeterminate on purpose: the codecs report no progress, so a percentage would be
@@ -162,6 +183,9 @@ TaskResult runDocumentTask(QWidget* parent, CanvasView* canvas, const QString& t
     dialog.setAutoClose(false);
     dialog.setAutoReset(false);
     dialog.reset();  // clears the internal show timer armed by the constructor
+    // The busy dialog is the task's own window, so its close is refused too: dismissing it
+    // would leave the application blocked and frozen with nothing explaining why.
+    block.watchDialog(&dialog);
 
     QEventLoop loop;
     // Only surface the dialog if the work is actually slow, so a fast save completes
