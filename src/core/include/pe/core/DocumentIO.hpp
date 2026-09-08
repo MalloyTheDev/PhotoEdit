@@ -73,6 +73,10 @@ enum class SaveError : std::uint8_t {
     UnsupportedFormat,  // extension not recognized
     CodecUnavailable,   // recognized, but that codec is not compiled into this build
     TooLargeToFlatten,  // over the composite cap; every raster format goes through it
+    ContentOutOfRange,  // native only: a layer's content reaches past the coordinate range
+                        // the format can store, so writing it would produce a file this
+                        // build's own reader refuses. Refused while the work is still in
+                        // memory rather than written and lost.
     CannotCreate,       // the temp file could not be created (permissions, read-only, path)
     WriteFailed,        // ran out of space, or the device reported an error mid-write
     ReplaceFailed,      // written, but could not replace the destination

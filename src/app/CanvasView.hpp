@@ -1,12 +1,16 @@
 #pragma once
 
+#include "BusyTask.hpp"
+
 #include "pe/core/Document.hpp"
 #include "pe/core/PaintToolController.hpp"
 #include "pe/core/Refusal.hpp"
 #include "pe/core/ViewTransform.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <QBrush>
@@ -146,6 +150,21 @@ public:
     void setFrozen(bool on);
     [[nodiscard]] bool isFrozen() const noexcept { return frozen_; }
 
+    // How this view runs a long operation.
+    //
+    // The canvas has long tools of its own (the Magic Wand samples and flood-fills a whole
+    // composite), and they used to call runDocumentTask directly. That skipped the window's
+    // re-entrancy guard entirely: a wand click during a snapshot save, which deliberately
+    // leaves the canvas live, started a second worker and a second nested event loop inside
+    // the first, and left the window's close guard inert for the wand's whole duration.
+    //
+    // MainWindow installs its guarded runner here, so the canvas takes the same guard as a
+    // File action. Left unset the view runs the work itself, which keeps CanvasView usable
+    // on its own and in tests that construct no window.
+    using TaskRunner =
+        std::function<TaskResult(const QString&, TaskAccess, const std::function<void()>&)>;
+    void setTaskRunner(TaskRunner runner) { taskRunner_ = std::move(runner); }
+
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
@@ -163,6 +182,12 @@ private:
     void zoomAroundCenter(double factor);  // zoom about the viewport center
     void maybeInitialFit();                // fit once the widget has a real size
     [[nodiscard]] pe::StrokePoint sampleAt(QPointF widgetPos) const;  // widget -> doc space
+    // Run `work` through the installed TaskRunner, or directly if none is installed. Every
+    // long operation this view starts goes through here, so the window's guard cannot be
+    // skipped by adding a second tool later.
+    [[nodiscard]] TaskResult runCanvasTask(const QString& title, TaskAccess access,
+                                           const std::function<void()>& work);
+
     [[nodiscard]] pe::Size canvasSize() const;  // doc_'s canvas size, or {0,0} if no document
     // Why a Bucket/Gradient fill returned no command, for status-bar feedback: the active layer
     // isn't paintable pixels, or the canvas exceeds the engine's per-op fill budget.
@@ -192,6 +217,7 @@ private:
 
     // While a worker owns the document, paint this instead of compositing. See setFrozen.
     bool frozen_ = false;
+    TaskRunner taskRunner_;  // unset: run the work directly (see setTaskRunner)
     QPixmap frozenFrame_;
 
     bool needsFit_ = true;  // fit-to-window pending until the widget has a valid size

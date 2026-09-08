@@ -29,7 +29,10 @@ namespace {
 // that inverted would stop the window repainting, which is the freeze this exists to fix.
 class InputBlocker final : public QObject {
 public:
-    explicit InputBlocker(bool blockUserInput) : blockUserInput_(blockUserInput) {}
+    // `taskWindow` is the window the task was launched from; only that window's close is
+    // refused. See the QEvent::Close case.
+    InputBlocker(bool blockUserInput, QWidget* taskWindow)
+        : blockUserInput_(blockUserInput), taskWindow_(taskWindow) {}
 
     bool eventFilter(QObject* obj, QEvent* e) override {
         switch (e->type()) {
@@ -56,16 +59,29 @@ public:
                 // Let through for a snapshot task: the whole point of taking a snapshot is
                 // that the user carries on working while the worker writes.
                 return blockUserInput_;
-            case QEvent::Close:
-                // Blocked in every mode. Closing would destroy the document, and the
-                // nested event loop, out from under the worker.
+            case QEvent::Close: {
+                // Refused in every mode, but only for the window the task belongs to:
+                // closing THAT would destroy the document, and the nested event loop, out
+                // from under the worker. Every other window is left alone. This filter is
+                // installed on the application, and refusing every close application-wide
+                // meant a dialog opened during a snapshot save (the Filter and Layer menus
+                // stay enabled, by design) could not be dismissed by its own title-bar
+                // button, which looks exactly like the hang this code exists to remove.
                 //
+                // With no window to compare against, fall back to refusing: that is the
+                // protective direction, and it is what every caller with a real parent got
+                // before.
+                auto* w = qobject_cast<QWidget*>(obj);
+                if (taskWindow_ != nullptr && (w == nullptr || w->window() != taskWindow_)) {
+                    return QObject::eventFilter(obj, e);
+                }
                 // ignore() and not merely "return true": a QCloseEvent is accepted by
                 // default, so swallowing it in a filter leaves QWidget::close() looking at
                 // an accepted event and hiding the window anyway. Marking it ignored is
                 // what actually refuses the close.
                 e->ignore();
                 return true;
+            }
             default:
                 return QObject::eventFilter(obj, e);
         }
@@ -73,6 +89,7 @@ public:
 
 private:
     bool blockUserInput_;
+    QWidget* taskWindow_;
 };
 
 // Installs the input block and (when input is blocked) the wait cursor, and takes them
@@ -81,8 +98,10 @@ private:
 // rest of the session, which is a harder lock than the freeze this code exists to remove.
 class BlockScope {
 public:
-    explicit BlockScope(bool blockUserInput)
-        : app_(QCoreApplication::instance()), blocker_(blockUserInput), cursor_(blockUserInput) {
+    BlockScope(bool blockUserInput, QWidget* taskWindow)
+        : app_(QCoreApplication::instance()),
+          blocker_(blockUserInput, taskWindow),
+          cursor_(blockUserInput) {
         if (app_ != nullptr) app_->installEventFilter(&blocker_);
         // No wait cursor for a snapshot task: the pointer is still a live brush.
         if (cursor_) QGuiApplication::setOverrideCursor(Qt::WaitCursor);
@@ -125,7 +144,7 @@ TaskResult runDocumentTask(QWidget* parent, CanvasView* canvas, const QString& t
     if (!work) return result;  // nothing to run; not an error, and not a "ran" either
 
     const bool snapshotTask = access == TaskAccess::Snapshot;
-    const BlockScope block(!snapshotTask);
+    const BlockScope block(!snapshotTask, parent != nullptr ? parent->window() : nullptr);
     const FreezeScope freeze(access == TaskAccess::LiveDocument ? canvas : nullptr);
 
     // Indeterminate on purpose: the codecs report no progress, so a percentage would be

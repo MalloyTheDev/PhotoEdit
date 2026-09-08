@@ -80,18 +80,31 @@ public:
     // Saved-state tracking: call after a successful save.
     void markSaved() noexcept;
 
-    // Mark a PARTICULAR depth as the one on disk, rather than wherever the stack is now.
+    // Saving a snapshot, in two halves.
     //
-    // A save serializes a snapshot taken at the moment the user asked for it, and the
-    // user keeps painting while the worker writes. Calling markSaved() when the worker
-    // finishes would then claim the strokes made DURING the save are on disk, and the
-    // window would stop offering to save them: silent data loss, in the one place the
-    // whole feature exists to protect. So the caller records undoDepth() when it takes
-    // the snapshot and passes it here.
+    // A save serializes a snapshot taken at the moment the user asked for it, and the user
+    // keeps painting while the worker writes. Calling markSaved() when the worker finishes
+    // would claim the strokes made DURING the save are on disk, and the window would stop
+    // offering to save them: silent data loss, in the one place the whole feature exists to
+    // protect.
     //
-    // A depth beyond the current stack (history was trimmed, or the branch was
-    // discarded) is unreachable and marked as such, which leaves the document dirty.
-    void markSavedAt(std::size_t depth) noexcept;
+    // The written state cannot be a depth the CALLER holds either. undo(), a new branch and
+    // trimToLimit() all reindex this stack while the worker runs, so a plain integer taken
+    // before the save silently comes to mean a different state: undo twice and repaint back
+    // to the same depth, or push one command onto a stack already at limit(), and committing
+    // that number marks unsaved work clean. beginSave() therefore records the point INSIDE
+    // the history, where every one of those operations already knows to shift or invalidate
+    // it, and hands back an opaque token.
+    //
+    // Pass that token to commitSave() once the bytes are on disk. It commits only if the
+    // point it named is still reachable and still the newest save in flight; otherwise the
+    // document stays dirty, which is the safe direction to be wrong in. A save that failed
+    // or threw calls abandonSave() instead. Both end the in-flight save, so exactly one of
+    // them must follow every beginSave().
+    [[nodiscard]] std::uint64_t beginSave() noexcept;
+    void commitSave(std::uint64_t token) noexcept;
+    void abandonSave(std::uint64_t token) noexcept;
+
     [[nodiscard]] bool isAtSavedState() const noexcept;
 
 private:
@@ -112,6 +125,12 @@ private:
     // done_.size() at the last save, or -1 if the saved state was trimmed away
     // (and thus can never be returned to → always dirty).
     std::ptrdiff_t savedDepth_ = 0;
+    // The save currently in flight: the depth it captured, tracked by the same rules as
+    // savedDepth_, and the token that names it. Depth -1 / token 0 means none, which is
+    // also what an invalidated point becomes.
+    std::ptrdiff_t pendingDepth_ = -1;
+    std::uint64_t pendingToken_ = 0;
+    std::uint64_t nextSaveToken_ = 1;  // 0 is reserved for "no save in flight"
 };
 
 }  // namespace pe

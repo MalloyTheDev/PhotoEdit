@@ -278,6 +278,30 @@ PE_TEST(a_snapshot_task_lets_input_through_and_still_refuses_a_close) {
     PE_CHECK_EQ(w.closes, 0);  // but the window does not go away mid-save
 }
 
+PE_TEST(a_task_refuses_its_own_windows_close_and_leaves_other_windows_alone) {
+    // The refusal is installed as an APPLICATION event filter, so it used to swallow every
+    // window's close rather than the one window whose destruction would take the document
+    // and the nested event loop with it. During a snapshot task the Image/Layer/Select and
+    // Filter menus stay enabled by design, so a dialog opened then could not be dismissed by
+    // its own title-bar X: the same dead-window symptom this code exists to remove.
+    EventCounter task;   // the window the task was launched from
+    EventCounter other;  // an unrelated top-level window, e.g. a filter dialog
+    task.resize(60, 60);
+    other.resize(60, 60);
+
+    QTimer::singleShot(20, &task, [&task, &other] {
+        QCloseEvent a;
+        QCoreApplication::sendEvent(&task, &a);
+        QCloseEvent b;
+        QCoreApplication::sendEvent(&other, &b);
+    });
+    const TaskResult r = pe::app::runDocumentTask(&task, nullptr, QStringLiteral("working"),
+                                                  TaskAccess::Snapshot, [] { sleepMs(kSlowMs); });
+    PE_CHECK(r.ran);
+    PE_CHECK_EQ(task.closes, 0);   // the document window still cannot go away mid-save
+    PE_CHECK_EQ(other.closes, 1);  // everything else is left alone
+}
+
 PE_TEST(task_reports_work_that_throws_instead_of_terminating) {
     // An exception crossing a thread boundary is std::terminate, so an out-of-memory encode
     // on a huge export would take the whole application down with the document unsaved.
@@ -476,6 +500,54 @@ PE_TEST(painting_during_a_save_stays_out_of_the_file_and_leaves_the_document_dir
     // And the stroke made during the save is unsaved work, so the document says so.
     PE_CHECK(raw->isDirty());
     QFile::remove(path);
+}
+
+PE_TEST(the_canvas_runs_its_long_tools_through_the_window_not_around_it) {
+    // The Magic Wand called runDocumentTask directly, which is the one thing MainWindow's
+    // comment on runGuardedTask says no call site may do. It meant the wand never set
+    // documentTaskInFlight_, so the window's close guard was inert for its whole duration,
+    // and a wand click during a snapshot save (which deliberately leaves the canvas live)
+    // started a second worker and a second nested event loop inside the first.
+    pe::app::CanvasView canvas;
+    canvas.resize(200, 200);
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()))
+        ->tiles()
+        .fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{20, 40, 60, 255});
+    canvas.setDocument(doc.get());
+    canvas.setTool(pe::app::CanvasView::Tool::Wand);
+
+    // A runner that records and refuses, standing in for a window with a task already in
+    // flight. If the wand went around it, `asked` would stay 0 and the work would run.
+    int asked = 0;
+    bool ranTheWork = false;
+    canvas.setTaskRunner(
+        [&asked, &ranTheWork](const QString&, TaskAccess access, const std::function<void()>&) {
+            ++asked;
+            PE_CHECK(access == TaskAccess::LiveDocument);  // the wand samples the live renderer
+            ranTheWork = false;
+            return TaskResult{};  // un-run, exactly what a refused re-entrant task returns
+        });
+
+    QMouseEvent press(QEvent::MouseButtonPress, QPointF(100, 100), QPointF(100, 100),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(&canvas, &press);
+
+    PE_CHECK_EQ(asked, 1);                 // it asked the window
+    PE_CHECK(!ranTheWork);                 // and took no for an answer
+    PE_CHECK(!doc->selection().active());  // so nothing was selected behind the running task
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));
+
+    // The inverse: with a runner that actually runs the work, the same click does select.
+    canvas.setTaskRunner(
+        [](const QString& title, TaskAccess access, const std::function<void()>& work) {
+            return pe::app::runDocumentTask(nullptr, nullptr, title, access, work);
+        });
+    QMouseEvent again(QEvent::MouseButtonPress, QPointF(100, 100), QPointF(100, 100),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(&canvas, &again);
+    PE_CHECK(doc->selection().active());
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
 }
 
 PE_TEST(file_operations_are_disabled_while_a_document_task_runs) {

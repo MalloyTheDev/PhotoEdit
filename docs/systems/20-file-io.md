@@ -258,16 +258,27 @@ purpose:
   unrepresentable: a negative extent, or an origin or far edge outside the engine's
   coordinate range. `Rect::right()` is `x + width` in `int`, so a rect that leaves that
   range would overflow on first use. That bound, not the canvas, is the safety limit.
-- **The area cap applies to storage, not to geometry.** A pixel or mask block allocates in
-  proportion to its area and is capped accordingly. A solid fill is procedural: it stores
-  four numbers and renders by intersecting each tile, so capping its area would refuse a
-  legal full-canvas fill on any document larger than the cap while protecting nothing. The
-  reader states which kind each record is at the call site.
+- **There is no area cap.** There used to be one of 64 MP per dense record, and it refused
+  rects the writer emits for ordinary documents: a 10000x10000 canvas with a filled layer
+  wrote 400 MB and would not reopen, and so did an 8000x8000 photo (exactly what the image
+  decoders accept) the moment one brush dab landed a pixel past the corner. It was also the
+  wrong tool. Memory is bounded by `readBlock`'s aggregate byte budget, which is checked
+  before every allocation and charges the resident tiled footprint rather than the packed
+  rect, so it bounds the transient buffer and the store together and does it accurately.
+  The coordinate range is what keeps the arithmetic safe, and unlike an area cap it is a
+  rule the writer can hold itself to.
+- **The writer holds itself to the same rule.** Before it emits anything, the writer checks
+  every rect it is about to write against the bound the reader will apply, and returns
+  nothing if one fails; `saveDocument` reports that as `SaveError::ContentOutOfRange` while
+  the work is still in memory. Two ordinary paths reach past the bound: a brush dab is only
+  limited to +/-2^26, and `SolidColorLayer::setBounds` is not limited at all.
 
-All of it lives in one function, `readContentRect`. #173 was the cost of not doing that:
-the solid-fill branch validated its own way, was missed when v7 widened the rules, and
-PhotoEdit wrote files its own reader refused. The save reported success, and opening the
-file lost the whole document rather than that one layer.
+Both halves live in one function each, `readContentRect` and `writableRect`, and they apply
+the same rule. #173 was the cost of not doing that on the read side: the solid-fill branch
+validated its own way, was missed when v7 widened the rules, and PhotoEdit wrote files its
+own reader refused. The save reported success, and opening the file lost the whole document
+rather than that one layer. The area cap and the unbounded writer were the same defect from
+the other direction, and are fixed the same way.
 
 **Compression policy for `.pedoc`.** Every block is DEFLATE at **level 1**
 (`Z_BEST_SPEED`), chosen rather than inherited: it was on zlib's default (level 6) because

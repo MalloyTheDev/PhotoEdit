@@ -395,5 +395,22 @@ PE_TEST(savedocument_reports_why_it_failed) {
     PE_CHECK(saveDocument(*big, (dir / "big.pedoc").string(), &err));
     PE_CHECK(err == SaveError::None);
 
+    // Content past the coordinate range the native format stores. The writer refuses it
+    // rather than producing a file its own reader would not take back, and the reason has
+    // to name the real problem: this used to report CodecUnavailable, which told the user
+    // their build was missing a codec that is in fact always compiled in.
+    auto out = Document::createBlank(Size{64, 64});
+    PE_CHECK(out != nullptr);
+    auto* pl = dynamic_cast<PixelLayer*>(out->topLevelLayers()[0].get());
+    PE_REQUIRE(pl != nullptr);
+    pl->tiles().setPixel(0, 0, Rgba8{1, 2, 3, 255});
+    pl->tiles().setPixel(kMaxCanvasDimension + 1000, 5, Rgba8{4, 5, 6, 255});
+    const std::string outPath = (dir / "out_of_range.pedoc").string();
+    err = SaveError::None;
+    PE_CHECK(!saveDocument(*out, outPath, &err));
+    PE_CHECK(err == SaveError::ContentOutOfRange);
+    // Refused before anything was written: no file, not even a partial or temp one.
+    PE_CHECK(!fs::exists(outPath));
+
     fs::remove_all(dir, ec);
 }

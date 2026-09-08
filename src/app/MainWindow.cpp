@@ -58,6 +58,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -94,6 +95,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     bgColor_ = QColor(255, 255, 255);  // white background
 
     canvas_ = new CanvasView(this);
+    // The canvas's own long tools take the window's re-entrancy guard, exactly as the File
+    // actions do. Without this the Magic Wand ran a second worker inside a running save.
+    canvas_->setTaskRunner(
+        [this](const QString& title, TaskAccess access, const std::function<void()>& work) {
+            return runGuardedTask(title, access, work);
+        });
     connect(canvas_, &CanvasView::colorPicked, this, &MainWindow::onColorPicked);
     connect(canvas_, &CanvasView::toolMessage, this, [this](const QString& msg) {
         statusBar()->showMessage(msg, 4000);
@@ -684,8 +691,15 @@ void MainWindow::reportRefusal(const pe::Refusal& r) {
 
 TaskResult MainWindow::runGuardedTask(const QString& title, TaskAccess access,
                                       const std::function<void()>& work) {
-    // Re-entrant task starts are what this guards, and the File actions are the only way to
-    // reach one. They come back however the task ends, including by exception.
+    // Refuse rather than nest. A task already in flight holds a snapshot and a nested event
+    // loop, and a second one started from inside it would run two workers against a
+    // single-threaded engine. The File actions are disabled for the duration, so the UI does
+    // not normally offer this; the canvas's own tools stay live during a snapshot task and
+    // reach here through CanvasView's runner, which is the path that made this reachable.
+    // An un-run TaskResult is what a caller already handles for work it did not perform.
+    if (documentTaskInFlight_) return {};
+
+    // The guard itself. It comes back however the task ends, including by exception.
     struct InFlight {
         MainWindow* window;
         explicit InFlight(MainWindow* w) : window(w) {
@@ -1156,6 +1170,11 @@ void MainWindow::openDocument() {
     const TaskResult task = runGuardedTask(
         QStringLiteral("Opening %1").arg(QFileInfo(path).fileName()), TaskAccess::Detached,
         [&doc, &path, &loadErr] { doc = pe::loadDocument(path.toStdString(), &loadErr); });
+    // Refused as re-entrant (see runGuardedTask): the work never ran, so there is no
+    // failure to report. Saying nothing is right here; the File actions are disabled while
+    // a task is in flight, so reaching this is a programming error rather than a user one,
+    // and a "Open failed" box would describe something that did not happen.
+    if (!task.ran && !task.threw) return;
     if (task.threw) {
         QMessageBox::warning(
             this, QStringLiteral("Open failed"),
@@ -1188,6 +1207,13 @@ QString saveFailureReason(const pe::Document* doc, const QString& path, pe::Save
                 .arg(area / 1'000'000)
                 .arg(pe::kMaxCompositeImagePixels / 1'000'000);
         }
+        case pe::SaveError::ContentOutOfRange:
+            return QStringLiteral(
+                       "A layer has content further than %1 pixels from the canvas, which is past "
+                       "what a .pedoc can store. Nothing was written and the document is "
+                       "unchanged. "
+                       "Move that layer back toward the canvas, or delete it, and save again.")
+                .arg(pe::kMaxCanvasDimension);
         case pe::SaveError::UnsupportedFormat:
             return QStringLiteral("\"%1\" has no extension this build can write.").arg(path);
         case pe::SaveError::CodecUnavailable:
@@ -1269,10 +1295,11 @@ bool MainWindow::writeTo(const QString& path) {
     // was at the moment they asked for it.
     const std::unique_ptr<const pe::Document> shot = doc_->snapshot();
     if (shot == nullptr) return false;
-    // The stack depth the file will represent. Strokes made DURING the save move the live
-    // stack past it, and marking the later depth saved would claim those strokes are on
-    // disk, so the window would never offer to save them.
-    const std::size_t savedDepth = doc_->history().undoDepth();
+    // Which state the file will represent. Recorded INSIDE the history rather than held here
+    // as a depth: undo, a new branch and history trimming all reindex the stack while the
+    // worker writes, so a number taken now would quietly come to mean a different state by
+    // the time the bytes are on disk, and committing it would mark unsaved work clean.
+    const std::uint64_t savePoint = doc_->history().beginSave();
 
     pe::SaveError saveErr = pe::SaveError::None;
     bool wrote = false;
@@ -1281,21 +1308,31 @@ bool MainWindow::writeTo(const QString& path) {
                        TaskAccess::Snapshot, [&shot, &path, &saveErr, &wrote] {
                            wrote = pe::saveDocument(*shot, path.toStdString(), &saveErr);
                        });
+    // Refused as re-entrant (see runGuardedTask): the work never ran, so there is no
+    // failure to report. Saying nothing is right here; the File actions are disabled while
+    // a task is in flight, so reaching this is a programming error rather than a user one,
+    // and a "Save failed" box would describe something that did not happen.
+    if (!task.ran && !task.threw) {
+        doc_->history().abandonSave(savePoint);
+        return false;
+    }
     if (task.threw) {
+        doc_->history().abandonSave(savePoint);
         QMessageBox::warning(
             this, QStringLiteral("Save failed"),
             QStringLiteral("Writing \"%1\" stopped with an error: %2").arg(path, task.error));
         return false;
     }
     if (!wrote) {
+        doc_->history().abandonSave(savePoint);
         QMessageBox::warning(this, QStringLiteral("Save failed"),
                              saveFailureReason(doc_.get(), path, saveErr));
         return false;
     }
     // Tell history WHICH state is now on disk: the one the snapshot captured, not wherever
     // the stack has reached. If the user painted while the worker wrote, the document is
-    // still dirty and markSavedAt says so.
-    doc_->history().markSavedAt(savedDepth);
+    // still dirty and commitSave says so.
+    doc_->history().commitSave(savePoint);
     currentPath_ = path;
     refreshTitle();
     statusBar()->showMessage(QStringLiteral("Saved %1").arg(path), 3000);
@@ -1732,6 +1769,11 @@ void MainWindow::exportDocumentAs() {
                        TaskAccess::Snapshot, [&shot, &path, &opts, &wrote] {
                            wrote = pe::saveDocument(*shot, path.toStdString(), opts);
                        });
+    // Refused as re-entrant (see runGuardedTask): the work never ran, so there is no
+    // failure to report. Saying nothing is right here; the File actions are disabled while
+    // a task is in flight, so reaching this is a programming error rather than a user one,
+    // and a "Export failed" box would describe something that did not happen.
+    if (!task.ran && !task.threw) return;
     if (task.threw) {
         QMessageBox::warning(
             this, QStringLiteral("Export failed"),
@@ -1801,29 +1843,36 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
 }
 
 bool MainWindow::confirmDiscard() {
-    // Nothing to lose: no document, or every change is already on disk.
-    if (doc_ == nullptr || !doc_->isDirty()) return true;
+    // Loop rather than ask once. A save started from here serializes a SNAPSHOT and leaves
+    // the canvas live, so the user can paint while it writes; history correctly reports the
+    // document still dirty afterwards, and returning true on the strength of "the save
+    // succeeded" would discard those strokes with no second prompt. Each pass re-tests what
+    // is actually unsaved now.
+    while (doc_ != nullptr && doc_->isDirty()) {
+        const QString name = currentPath_.isEmpty() ? QStringLiteral("Untitled")
+                                                    : QFileInfo(currentPath_).fileName();
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle(QStringLiteral("Unsaved changes"));
+        box.setText(QStringLiteral("Save changes to \"%1\" before closing?").arg(name));
+        box.setInformativeText(QStringLiteral("If you don't save, your changes will be lost."));
+        box.setStandardButtons(QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+        box.setDefaultButton(QMessageBox::Save);
 
-    const QString name =
-        currentPath_.isEmpty() ? QStringLiteral("Untitled") : QFileInfo(currentPath_).fileName();
-    QMessageBox box(this);
-    box.setIcon(QMessageBox::Warning);
-    box.setWindowTitle(QStringLiteral("Unsaved changes"));
-    box.setText(QStringLiteral("Save changes to \"%1\" before closing?").arg(name));
-    box.setInformativeText(QStringLiteral("If you don't save, your changes will be lost."));
-    box.setStandardButtons(QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
-    box.setDefaultButton(QMessageBox::Save);
-
-    switch (box.exec()) {
-        case QMessageBox::Save:
-            // Only proceed if the write actually succeeded; a failed or cancelled
-            // Save As must not fall through to discarding the document.
-            return saveDocument();
-        case QMessageBox::Discard:
-            return true;
-        default:
-            return false;  // Cancel, or the dialog was closed
+        switch (box.exec()) {
+            case QMessageBox::Save:
+                // Only proceed if the write actually succeeded; a failed or cancelled
+                // Save As must not fall through to discarding the document.
+                if (!saveDocument()) return false;
+                break;  // round again: anything painted during that write is still unsaved
+            case QMessageBox::Discard:
+                return true;
+            default:
+                return false;  // Cancel, or the dialog was closed
+        }
     }
+    // Nothing to lose: no document, or every change is already on disk.
+    return true;
 }
 
 void MainWindow::closeEvent(QCloseEvent* e) {

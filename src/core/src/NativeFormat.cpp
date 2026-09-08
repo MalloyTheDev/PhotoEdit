@@ -38,11 +38,10 @@ namespace {
 // readable by builds that predate it. A v7 file is correctly refused by those builds rather than
 // silently losing the content they cannot represent.
 constexpr char kMagicPrefix[5] = {'P', 'E', 'D', 'O', 'C'};
-constexpr std::uint32_t kVersion = 7;                 // newest this writer can emit
-constexpr std::uint32_t kVersionOnCanvas = 6;         // emitted when nothing is off-canvas
-constexpr std::uint32_t kMinReadVersion = 4;          // oldest format this reader accepts
-constexpr std::uint32_t kMinOffCanvasVersion = 7;     // first version allowed a negative origin
-constexpr std::int64_t kMaxLayerPixels = 64'000'000;  // per-layer content cap
+constexpr std::uint32_t kVersion = 7;              // newest this writer can emit
+constexpr std::uint32_t kVersionOnCanvas = 6;      // emitted when nothing is off-canvas
+constexpr std::uint32_t kMinReadVersion = 4;       // oldest format this reader accepts
+constexpr std::uint32_t kMinOffCanvasVersion = 7;  // first version allowed a negative origin
 // Text-raster caps live in TextLayer.hpp (pe::kMaxTextRasterDim / pe::kMaxTextRasterPixels) so the
 // app producer, the engine type, and this reader share one source of truth.
 constexpr std::uint32_t kMaxLayers = 100'000;
@@ -80,6 +79,10 @@ public:
     explicit Reader(std::span<const std::byte> data) : data_(data) {}
 
     [[nodiscard]] bool ok() const noexcept { return ok_; }
+    // Bytes still available to read. Lets a caller reject a declared length the input
+    // cannot possibly satisfy BEFORE it allocates for it; read() alone only finds out
+    // afterwards. Zero once the reader has failed, so a failed reader accepts nothing.
+    [[nodiscard]] std::size_t remaining() const noexcept { return ok_ ? data_.size() - pos_ : 0; }
 
     bool read(void* dst, std::size_t n) {
         if (!ok_ || pos_ + n > data_.size()) {
@@ -555,6 +558,13 @@ bool readBlock(Reader& r, std::size_t expectedSize, std::vector<std::byte>& out,
         return false;  // compressed, but this build has no zlib to read it
 #endif
     }
+    // Check the input actually holds this many bytes before committing them. The
+    // compressed branch above gets this for free: readSpan(clen) validates against the
+    // input before anything is allocated. The raw branch did not, so a 58-byte file could
+    // declare an 8000x8000 float block and cost a 1 GB assign-and-zero on the way to the
+    // read failing anyway. The budget does not catch it: such a file is within budget, it
+    // is simply lying about what it contains.
+    if (expectedSize > r.remaining()) return false;
     out.assign(expectedSize, std::byte{});
     return expectedSize == 0 || r.read(out.data(), expectedSize);
 }
@@ -708,6 +718,42 @@ PreparedTree prepareTree(const Document& doc) {
     return out;
 }
 
+// The PRODUCER half of the persisted-geometry contract, and the mirror of readContentRect.
+//
+// readContentRect refuses a rect that reaches past the engine's coordinate range, and until
+// now nothing stopped this writer emitting one. Three ways in, all measured: a brush dab is
+// only bounded at +/-2^26, so painting at x = 400000 wrote a 17 MB file that would not
+// reopen; SolidColorLayer::setBounds is unbounded, so a fill moved there wrote a 102-byte
+// file that would not reopen; and the fill and the pixels take different routes to the same
+// record. The save reported success each time. That is #173's failure mode again, so the
+// fix is again to give both halves ONE rule rather than to widen the reader.
+//
+// Checked before a single byte is written, so an unrepresentable document costs a refusal
+// rather than a file the user believes they have.
+bool writableRect(Rect r) noexcept {
+    if (r.isEmpty()) return true;  // no record is emitted for an empty rect
+    const std::int64_t lim = kMaxCanvasDimension;
+    const std::int64_t x0 = r.x;
+    const std::int64_t y0 = r.y;
+    return x0 >= -lim && y0 >= -lim && x0 + r.width <= lim && y0 + r.height <= lim;
+}
+
+// Every rect this writer will emit, checked in one place. prepareLayer keys the map by
+// every layer in the tree, nested ones included, so iterating it reaches all of them.
+bool treeIsWritable(const PreparedTree& prepared) {
+    for (const auto& [layer, p] : prepared) {
+        if (p.hasContent && !writableRect(p.content)) return false;
+        if (p.hasMask && !writableRect(p.mask)) return false;
+        // A solid fill's rect is procedural rather than gathered, so it is not in the
+        // prepared record, but it is persisted through the same reader and needs the same
+        // check. Taken from the layer the map is keyed by.
+        if (const auto* solid = dynamic_cast<const SolidColorLayer*>(layer)) {
+            if (!writableRect(solid->bounds())) return false;
+        }
+    }
+    return true;
+}
+
 // The prepared entry for a layer. Every layer the writer or the version decision can reach
 // was prepared by the walk above, so a miss means the two walks disagree about the tree;
 // an empty record is the conservative answer (no content, no mask) rather than a crash.
@@ -774,10 +820,13 @@ void writePixelBlock(Writer& w, const TileStoreT<Pixel>& store, Rect b) {
 template <class Pixel>
 bool readPixelBlock(Reader& r, TileStoreT<Pixel>& store, std::int32_t cx, std::int32_t cy,
                     std::int32_t cw, std::int32_t ch, std::int64_t& budget) {
-    // cw*ch is capped at kMaxLayerPixels (readContentRect), so rawSize <= 64MP*sizeof(Pixel)
-    // (<=1 GB even for 32-bit-float). Charge the budget the tiled footprint the scatter
-    // below actually commits (whole tiles), not the dense rawSize, so a thin strip cannot
-    // bypass the aggregate cap.
+    // readContentRect has bounded cw and ch to the engine's coordinate range, so rawSize
+    // cannot overflow size_t on a 64-bit build (the worst case is 600000^2 * 16 bytes). Its
+    // SIZE is bounded by readBlock, which rejects the block before allocating when the
+    // charge exceeds the remaining budget. Charge that budget the tiled footprint the
+    // scatter below actually commits (whole tiles), not the dense rawSize, so a thin strip
+    // cannot bypass the aggregate cap; the footprint is >= rawSize, so the one charge
+    // bounds the transient buffer too.
     const std::size_t rawSize =
         static_cast<std::size_t>(cw) * static_cast<std::size_t>(ch) * sizeof(Pixel);
     const std::int64_t charge =
@@ -796,16 +845,8 @@ bool readPixelBlock(Reader& r, TileStoreT<Pixel>& store, std::int32_t cx, std::i
     return true;
 }
 
-// Whether the record this rect describes allocates storage proportional to the rect's
-// AREA. A pixel or mask block does, and is capped at kMaxLayerPixels accordingly. A solid
-// fill does not: it is procedural, stores only the four coordinates, and renders by
-// intersecting each tile against them, so capping its area would refuse a legal
-// full-canvas fill on any document larger than the cap. The distinction is the record's
-// storage, not its geometry, so both kinds get the same coordinate validation below.
-enum class RectStorage : std::uint8_t { Dense, Procedural };
-
-// Read and validate a content rect. Returns false on an out-of-range, overflowing, or (for
-// a dense record) oversized rect; on success cx/cy/cw/ch are filled.
+// Read and validate a content rect. Returns false on an out-of-range or unrepresentable
+// rect; on success cx/cy/cw/ch are filled.
 //
 // From v7 a rect may lie outside the canvas, for pixel content, masks and a solid layer's
 // fill rect alike (see kMinOffCanvasVersion and the writer). Outside the canvas is not the
@@ -813,18 +854,27 @@ enum class RectStorage : std::uint8_t { Dense, Procedural };
 // cx+cw / cy+ch inside the engine's coordinate range, which is what stops Rect::right() and
 // the tile math overflowing an int, and pre-v7 files keep their original stricter rule.
 //
+// There is deliberately NO per-layer AREA cap here any more. There used to be one of
+// 64 MP, which refused rects this writer emits for ordinary documents: a 10000x10000
+// canvas with a filled layer wrote 400 MB and then would not reopen, and so did an
+// 8000x8000 photo the moment a single brush dab landed one pixel past the corner. The
+// document was saved and lost in one action, with the save reporting success. An area cap
+// was also the wrong tool: memory is bounded by readBlock's aggregate budget, which is
+// checked before every allocation and charges the RESIDENT tiled footprint
+// (tileFootprintBytes >= the packed rect), so it bounds the transient buffer and the
+// store together, and does it accurately. The coordinate range below is what keeps the
+// arithmetic safe, and it is a rule the writer can and now does hold itself to.
+//
 // EVERY persisted rect goes through here. #173 was one record kind validating its own way
-// and being missed when the rules changed underneath it.
-bool readContentRect(Reader& r, int canvasW, int canvasH, bool allowOffCanvas, RectStorage storage,
-                     std::int32_t& cx, std::int32_t& cy, std::int32_t& cw, std::int32_t& ch) {
+// and being missed when the rules changed underneath it; see writableRect for the other
+// half of the same contract.
+bool readContentRect(Reader& r, int canvasW, int canvasH, bool allowOffCanvas, std::int32_t& cx,
+                     std::int32_t& cy, std::int32_t& cw, std::int32_t& ch) {
     cx = r.i32();
     cy = r.i32();
     cw = r.i32();
     ch = r.i32();
     if (!r.ok() || cw < 0 || ch < 0) return false;
-    if (storage == RectStorage::Dense && static_cast<std::int64_t>(cw) * ch > kMaxLayerPixels) {
-        return false;
-    }
 
     const std::int64_t x0 = cx;
     const std::int64_t y0 = cy;
@@ -1046,8 +1096,7 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allow
         std::int32_t mw = 0;
         std::int32_t mh = 0;
         if (!r.ok() || mkind > static_cast<std::uint8_t>(Mask::Kind::Quick) ||
-            !readContentRect(r, canvasW, canvasH, allowOffCanvas, RectStorage::Dense, mx, my, mw,
-                             mh)) {
+            !readContentRect(r, canvasW, canvasH, allowOffCanvas, mx, my, mw, mh)) {
             return nullptr;
         }
         std::vector<std::byte> mraw;
@@ -1099,15 +1148,15 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allow
         // meant PhotoEdit wrote files its own reader refused, losing the whole document
         // with the save still reporting success. That was #173.
         //
-        // Procedural, not Dense: a solid fill stores only these four numbers, so the
-        // kMaxLayerPixels area cap would refuse a legal full-canvas fill on a large
-        // document while protecting nothing.
+        // A solid fill stores only these four numbers whatever its area, so it never needed
+        // the per-layer area cap that used to sit in readContentRect. Nor, as it turned
+        // out, did anything else: that cap is gone, and the aggregate byte budget bounds
+        // the records that do allocate.
         std::int32_t bx = 0;
         std::int32_t by = 0;
         std::int32_t bw = 0;
         std::int32_t bh = 0;
-        if (!readContentRect(r, canvasW, canvasH, allowOffCanvas, RectStorage::Procedural, bx, by,
-                             bw, bh)) {
+        if (!readContentRect(r, canvasW, canvasH, allowOffCanvas, bx, by, bw, bh)) {
             return nullptr;
         }
         layer = std::make_unique<SolidColorLayer>(Rgba8{cr, cg, cb, ca}, Rect{bx, by, bw, bh},
@@ -1167,8 +1216,7 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allow
         std::int32_t cy = 0;
         std::int32_t cw = 0;
         std::int32_t ch = 0;
-        if (!readContentRect(r, canvasW, canvasH, allowOffCanvas, RectStorage::Dense, cx, cy, cw,
-                             ch)) {
+        if (!readContentRect(r, canvasW, canvasH, allowOffCanvas, cx, cy, cw, ch)) {
             return nullptr;
         }
         // Read into the store matching the document depth (the active one); the per-pixel
@@ -1255,6 +1303,11 @@ std::vector<std::byte> serializeDocument(const Document& doc) {
     // One walk over the tree computes every expensive per-layer rectangle; the version
     // decision and the records below both read from it. See PreparedLayer.
     const PreparedTree prepared = prepareTree(doc);
+    // Refuse rather than write a file this format's own reader will not take back. An empty
+    // return is how serializeDocument reports failure; saveDocument turns it into
+    // SaveError::ContentOutOfRange so the user is told what is wrong while the work is
+    // still in memory.
+    if (!treeIsWritable(prepared)) return {};
     const bool offCanvas = hasOffCanvasContent(doc, prepared);
     const std::uint32_t version = offCanvas ? kVersion : kVersionOnCanvas;
     w.bytes(kMagicPrefix, sizeof(kMagicPrefix));

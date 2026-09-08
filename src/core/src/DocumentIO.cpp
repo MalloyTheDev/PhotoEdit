@@ -226,14 +226,18 @@ bool saveDocument(const Document& doc, const std::string& path, const ExportOpti
 
     const std::vector<std::byte> bytes = exportDocument(doc, fmt, opts);
     if (bytes.empty()) {
-        // Empty means the encode produced nothing. Two causes, and the user can act on
-        // only one of them: the canvas is over the composite cap that every raster format
-        // flattens through, or that codec is not compiled into this build.
+        // Empty means the encode produced nothing. Three causes, and which one it is
+        // decides whether the user can do anything about it.
         const Size canvas = doc.canvasSize();
         const std::int64_t area = static_cast<std::int64_t>(canvas.width) * canvas.height;
-        if (fmt != ImageFormat::Native && area > kMaxCompositeImagePixels) {
-            return fail(SaveError::TooLargeToFlatten);
+        if (fmt == ImageFormat::Native) {
+            // The native writer is always compiled in, so nothing it refuses is a missing
+            // codec. It returns empty for exactly one reason: a layer's content reaches
+            // past the coordinate range the format stores. Reporting CodecUnavailable here
+            // told the user their build was incomplete, which was never true.
+            return fail(SaveError::ContentOutOfRange);
         }
+        if (area > kMaxCompositeImagePixels) return fail(SaveError::TooLargeToFlatten);
         return fail(SaveError::CodecUnavailable);
     }
 

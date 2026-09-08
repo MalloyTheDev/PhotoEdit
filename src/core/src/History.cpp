@@ -12,6 +12,10 @@ void History::push(std::unique_ptr<Command> cmd) {
     // the same depth. Without this, undo×N then a fresh edit back up to the saved depth would
     // wrongly look saved and the app would skip its save-on-close prompt (silent data loss).
     if (savedDepth_ > static_cast<std::ptrdiff_t>(done_.size())) savedDepth_ = -1;
+    // A save in flight captured a point on that same discarded branch, so it is unreachable
+    // for the same reason. Dropping it here is what stops commitSave() from marking the NEW
+    // branch clean when it happens to reach the depth the old one was saved at.
+    if (pendingDepth_ > static_cast<std::ptrdiff_t>(done_.size())) pendingDepth_ = -1;
     // Reserve the slot BEFORE executing. After execute() the document is already mutated,
     // so a reallocation failure at that point would strand the command with nowhere to
     // live. With capacity in hand the push_back below is a noexcept move.
@@ -127,14 +131,40 @@ void History::markSaved() noexcept {
     doc_->setDirty(false);
 }
 
-void History::markSavedAt(std::size_t depth) noexcept {
-    if (depth > done_.size()) {
-        // The point that was written is no longer on the stack, so the document can never
-        // be returned to it. Same sentinel push() uses when the saved step is trimmed.
-        savedDepth_ = -1;
-    } else {
-        savedDepth_ = static_cast<std::ptrdiff_t>(depth);
+std::uint64_t History::beginSave() noexcept {
+    pendingDepth_ = static_cast<std::ptrdiff_t>(done_.size());
+    pendingToken_ = nextSaveToken_++;
+    return pendingToken_;
+}
+
+void History::abandonSave(std::uint64_t token) noexcept {
+    // The save did not produce a file, so nothing is marked. Clearing the point matters
+    // anyway: leaving it set would let a later commitSave() with a matching token mark a
+    // state no writer ever wrote.
+    if (token != 0 && token == pendingToken_) {
+        pendingDepth_ = -1;
+        pendingToken_ = 0;
     }
+}
+
+void History::commitSave(std::uint64_t token) noexcept {
+    // A token that does not own the pending point is stale: another save began after this
+    // one, or this one was already resolved. Mark nothing, and in particular do NOT clear
+    // the point, which belongs to the save still in flight.
+    if (token == 0 || token != pendingToken_) {
+        updateDirty();
+        return;
+    }
+    const std::ptrdiff_t depth = pendingDepth_;
+    pendingDepth_ = -1;
+    pendingToken_ = 0;
+
+    // -1 means the written state was undone away or trimmed off the stack while the worker
+    // ran, so nothing on this stack is what the file holds. Leave the saved marker where it
+    // was: wrong in the safe direction, since the window then offers to save again rather
+    // than discarding work it believes is already written.
+    if (depth >= 0) savedDepth_ = depth;
+
     // Through updateDirty, not setDirty(false): the stack may well have moved past this
     // depth while the save was running, and then the document is still dirty.
     updateDirty();
@@ -161,6 +191,11 @@ void History::dropFrontOfDone() noexcept {
         --savedDepth_;
         if (savedDepth_ < 0) savedDepth_ = -1;  // unreachable sentinel
     }
+    // The point a save in flight captured shifts with it. Trimming is how a stack already at
+    // limit() reindexes under a running save: without this, one stroke made during a save on
+    // a full history would leave the pending depth naming a state one command older than the
+    // one written, and committing it would mark that stroke clean.
+    if (pendingDepth_ >= 0) --pendingDepth_;  // -1 here means it fell off the front
 }
 
 void History::dropFurthestRedo() noexcept {

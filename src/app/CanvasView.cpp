@@ -491,6 +491,12 @@ pe::StrokePoint CanvasView::sampleAt(QPointF widgetPos) const {
     return pe::StrokePoint{{static_cast<float>(d.x), static_cast<float>(d.y)}, 1.0f};
 }
 
+TaskResult CanvasView::runCanvasTask(const QString& title, TaskAccess access,
+                                     const std::function<void()>& work) {
+    if (taskRunner_) return taskRunner_(title, access, work);
+    return runDocumentTask(this, this, title, access, work);
+}
+
 void CanvasView::setFrozen(bool on) {
     if (frozen_ == on) return;
     if (on) {
@@ -854,8 +860,8 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         // LiveDocument, not Snapshot: the wand deliberately samples the renderer's tile
         // cache, which the paint path has already warmed. A snapshot would arrive with a
         // cold renderer and pay back the full composite this change removed.
-        const TaskResult task = runDocumentTask(
-            this, this, QStringLiteral("Magic Wand"), TaskAccess::LiveDocument,
+        const TaskResult task = runCanvasTask(
+            QStringLiteral("Magic Wand"), TaskAccess::LiveDocument,
             [this, seed, &sel, &overBudget] {
                 const pe::PixelBuffer buf = renderer_->renderRegion(doc_->canvasBounds());
                 if (buf.isEmpty()) {

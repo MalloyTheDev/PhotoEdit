@@ -561,3 +561,110 @@ PE_TEST(history_byte_budget_trims_real_paint_commands) {
     PE_CHECK(h.retainedBytes() <= h.byteBudget());
     PE_CHECK(h.canUndo());  // and the most recent strokes are still undoable
 }
+
+PE_TEST(history_save_point_survives_edits_made_while_the_save_runs) {
+    // The ordinary case the two-phase save exists for: a snapshot is taken, the user paints
+    // while the worker writes, and the file holds the earlier state. Committing must mark
+    // THAT state saved and leave the later strokes dirty.
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.5f));
+
+    const std::uint64_t token = doc->history().beginSave();
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.4f));  // painted mid-save
+    doc->history().commitSave(token);
+
+    PE_CHECK(doc->isDirty());  // the stroke made during the save is not on disk
+    doc->history().undo();     // back to exactly what was written
+    PE_CHECK(!doc->isDirty());
+}
+
+PE_TEST(history_save_point_is_dropped_when_its_branch_is_discarded) {
+    // A save runs off a snapshot with the canvas live, and undo/redo stay enabled for the
+    // duration, so the stack can BRANCH while the worker writes. The saved depth used to be
+    // a plain integer the caller held across that: undo twice, paint back up to the same
+    // depth, and committing the number marked a document clean that shared nothing with the
+    // file but its depth. confirmDiscard then discarded the strokes with no prompt.
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.9f));
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.8f));
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(2));
+
+    const std::uint64_t token = doc->history().beginSave();  // branch X, depth 2
+    doc->history().undo();
+    doc->history().undo();
+    // Two fresh edits: the redo branch is discarded and the depth returns to 2 on branch Y.
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.7f));
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.6f));
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(2));
+
+    doc->history().commitSave(token);
+    PE_CHECK(doc->isDirty());  // branch Y was never written, whatever its depth
+}
+
+PE_TEST(history_save_point_follows_the_stack_when_trimming_reindexes_it) {
+    // The other way an absolute depth goes stale, and it needs no undo at all: one stroke
+    // pushed onto a stack already at limit() drops the oldest command, so every index shifts
+    // down by one. Committing the pre-shift number marked the stroke made DURING the save as
+    // saved. limit() is 100 by default and nothing raises it, so this is reachable from a
+    // long editing session.
+    auto doc = Document::createBlank(Size{16, 16});
+    doc->history().setLimit(2);
+    const LayerId base = doc->activeLayer();
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.9f));
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.8f));  // at the limit
+
+    const std::uint64_t token = doc->history().beginSave();
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.7f));  // trims the oldest
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(2));  // same depth, shifted
+
+    doc->history().commitSave(token);
+    PE_CHECK(doc->isDirty());  // the stroke made during the save is still unsaved
+    doc->history().undo();     // back to what the file holds
+    PE_CHECK(!doc->isDirty());
+}
+
+PE_TEST(history_save_point_is_dropped_when_it_falls_off_the_front) {
+    // Trimmed far enough that the written state is no longer on the stack at all. It can
+    // never be returned to, so it must not be marked: same sentinel the committed marker
+    // uses, and the document stays dirty.
+    auto doc = Document::createBlank(Size{16, 16});
+    doc->history().setLimit(2);
+    const LayerId base = doc->activeLayer();
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.9f));
+
+    const std::uint64_t token = doc->history().beginSave();  // depth 1
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.8f));
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.7f));
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.6f));
+
+    doc->history().commitSave(token);
+    PE_CHECK(doc->isDirty());
+    doc->history().undo();
+    PE_CHECK(doc->isDirty());  // and no depth on this stack reads clean
+    doc->history().undo();
+    PE_CHECK(doc->isDirty());
+}
+
+PE_TEST(history_abandoned_and_stale_save_tokens_mark_nothing) {
+    auto doc = Document::createBlank(Size{16, 16});
+    const LayerId base = doc->activeLayer();
+    doc->history().push(std::make_unique<SetOpacityCommand>(base, 0.5f));
+
+    // A save that failed or threw abandons its point; committing it afterwards must not
+    // mark the document clean on the strength of a write that never happened.
+    const std::uint64_t failed = doc->history().beginSave();
+    doc->history().abandonSave(failed);
+    doc->history().commitSave(failed);
+    PE_CHECK(doc->isDirty());
+
+    // A token superseded by a later beginSave() no longer owns the marker.
+    const std::uint64_t first = doc->history().beginSave();
+    const std::uint64_t second = doc->history().beginSave();
+    PE_CHECK(first != second);
+    doc->history().commitSave(first);
+    PE_CHECK(doc->isDirty());
+    doc->history().commitSave(second);
+    PE_CHECK(!doc->isDirty());  // the current one does mark it
+}

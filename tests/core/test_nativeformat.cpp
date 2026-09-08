@@ -772,12 +772,13 @@ PE_TEST(native_format_rejects_a_solid_fill_rect_that_is_not_representable) {
     }
 }
 
-PE_TEST(native_format_accepts_a_solid_fill_larger_than_the_dense_pixel_cap) {
+PE_TEST(native_format_accepts_a_solid_fill_of_any_area) {
     // A solid fill is procedural: it stores four numbers and renders by intersecting each
-    // tile, so it allocates nothing proportional to its area. Applying the dense
-    // per-layer pixel cap to it would refuse a legal full-canvas fill on any document
-    // bigger than the cap, which the project's target document size exceeds by 14x.
-    auto doc = Document::createBlank(Size{20'000, 20'000});  // 400 MP, over kMaxLayerPixels
+    // tile, so it allocates nothing proportional to its area. It was the first record kind
+    // to prove the reader's per-layer AREA cap was the wrong tool; that cap is gone now for
+    // every record kind, and memory is bounded by the aggregate budget instead. This still
+    // pins the cheap-whatever-the-area property, which is a fact about the record.
+    auto doc = Document::createBlank(Size{20'000, 20'000});  // 400 MP
     PE_CHECK(doc != nullptr);
     if (doc == nullptr) return;
     std::vector<LayerId> seeded;
@@ -1337,4 +1338,80 @@ PE_TEST(native_format_stores_a_block_raw_rather_than_failing_when_it_cannot_shri
         }
     }
     PE_CHECK_EQ(mismatches, 0);  // raw storage is lossless
+}
+
+PE_TEST(native_format_round_trips_a_layer_past_the_old_dense_area_cap) {
+    // The reader used to refuse any dense rect over 64 MP, and nothing stopped the writer
+    // emitting one, so PhotoEdit wrote files it could not read back. Not an exotic case: a
+    // 10000x10000 canvas with a filled layer wrote 400 MB and would not reopen, and so did
+    // an 8000x8000 photo (exactly the decoders' own cap) the moment one brush dab landed a
+    // pixel past the corner. The save reported success both times. Memory is bounded by
+    // readBlock's aggregate budget, which is checked before every allocation and charges the
+    // resident tiled footprint, so the area cap was protecting nothing the budget did not
+    // already cover more accurately. See native_format_budget_rejects_excess_allocation.
+    //
+    // 8000x8001 is the cheapest document that clears the old cap (64,008,000 px, 8,000 over)
+    // and the content is two pixels, so the tile store stays tiny; the dense gather is
+    // inherently ~256 MB and there is no way to exercise this boundary for less.
+    auto doc = Document::createBlank(Size{8000, 8001});
+    PE_REQUIRE(doc != nullptr);
+    auto* base = asPixel(*doc, 0);
+    PE_REQUIRE(base != nullptr);
+    base->tiles().setPixel(0, 0, Rgba8{1, 2, 3, 255});
+    base->tiles().setPixel(7999, 8000, Rgba8{4, 5, 6, 255});
+
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_CHECK(!blob.empty());
+    const auto back = deserializeDocument(blob);
+    PE_REQUIRE(back != nullptr);
+    const auto* rl = dynamic_cast<const PixelLayer*>(back->topLevelLayers()[0].get());
+    PE_REQUIRE(rl != nullptr);
+    PE_CHECK(rl->tiles().pixel(0, 0) == (Rgba8{1, 2, 3, 255}));
+    PE_CHECK(rl->tiles().pixel(7999, 8000) == (Rgba8{4, 5, 6, 255}));
+    PE_CHECK(rl->tiles().pixel(4000, 4000) == (Rgba8{0, 0, 0, 0}));
+}
+
+PE_TEST(native_format_refuses_to_write_a_rect_it_could_not_read_back) {
+    // The producer half of the persisted-geometry contract. readContentRect bounds every
+    // rect to the engine's coordinate range; the writer had no such rule, and two ordinary
+    // paths walk past it. A brush dab is bounded only at +/-2^26, and SolidColorLayer's
+    // bounds are not bounded at all, so either could put content 400,000 px out. Both wrote
+    // a file that reported success and then would not reopen: 17 MB for the pixels, 102
+    // bytes for the fill. Refusing while the work is still in memory is the whole point, so
+    // the assertion is that NOTHING was produced.
+    const int far = kMaxCanvasDimension + 100'000;
+    {
+        auto doc = Document::createBlank(Size{512, 512});
+        PE_REQUIRE(doc != nullptr);
+        auto* base = asPixel(*doc, 0);
+        PE_REQUIRE(base != nullptr);
+        base->tiles().setPixel(0, 0, Rgba8{1, 2, 3, 255});
+        // In range on its own, so this is not passing merely because the document is odd.
+        PE_CHECK(!serializeDocument(*doc).empty());
+        base->tiles().setPixel(far, 10, Rgba8{4, 5, 6, 255});
+        PE_CHECK(serializeDocument(*doc).empty());
+    }
+    {
+        auto doc = Document::createBlank(Size{512, 512});
+        PE_REQUIRE(doc != nullptr);
+        doc->cmdInsertTopLevel(
+            0, std::make_unique<SolidColorLayer>(Rgba8{9, 9, 9, 255}, Rect{0, 0, 50, 50}, "Fill"));
+        PE_CHECK(!serializeDocument(*doc).empty());
+        auto* solid = const_cast<SolidColorLayer*>(firstSolid(*doc));
+        PE_REQUIRE(solid != nullptr);
+        solid->setBounds(Rect{far, 0, 50, 50});
+        PE_CHECK(serializeDocument(*doc).empty());
+    }
+    {
+        // A mask reaching out of range is refused for the same reason, through the same rect.
+        auto doc = Document::createBlank(Size{512, 512});
+        PE_REQUIRE(doc != nullptr);
+        auto* base = asPixel(*doc, 0);
+        PE_REQUIRE(base != nullptr);
+        base->tiles().setPixel(0, 0, Rgba8{1, 2, 3, 255});
+        auto m = std::make_unique<Mask>();
+        m->buffer().fillRect(Rect{far, 0, 8, 8}, MaskBuffer::kClear);
+        base->setMask(std::move(m));
+        PE_CHECK(serializeDocument(*doc).empty());
+    }
 }
