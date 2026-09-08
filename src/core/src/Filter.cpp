@@ -315,6 +315,107 @@ void addNoise(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, fl
 }
 
 namespace {
+// Depth-generic core of moveLayerContent: shift a layer's pixels by (dx, dy) at their
+// NATIVE depth, one destination tile at a time.
+//
+// Why this exists rather than routing a Move through bakePixelEditImpl below. A Move is an
+// integer translation: no resampling, no premultiplication, no blending. The generic bake
+// reads the whole region into std::vector<Rgbaf>, copies it twice more and writes it back,
+// which costs about 48 bytes per pixel of transient float. kMaxFilterPixels (16 MP) exists
+// to bound exactly that (see the comment on it in Filter.hpp), so routing a Move through it
+// meant paying a filter's memory bill to do a copy, and then being REFUSED on the strength
+// of that bill: contentBounds() is tile-aligned, so a 4000x4000 canvas reports 16.78 MP and
+// a Move on any photograph from a modern camera silently did nothing (#180).
+//
+// Here nothing region-sized is allocated. Each destination tile is built on its own, so
+// peak transient memory is one tile, and the work is proportional to the tiles the move
+// touches rather than to the region's area. That is what lifts the cap.
+//
+// Reads are run-based, not per-pixel: within one destination row the source row is fixed and
+// the source columns are contiguous, so the source tile is resolved once per source tile
+// column and the run is walked with a local index. Resolving per pixel is the access pattern
+// #176 removed from the .pedoc writer, and it would be worse here.
+template <class Pixel>
+std::unique_ptr<PaintCommand> moveContentImpl(LayerId layerId, TileStoreT<Pixel>& store, Rect src,
+                                              int dx, int dy, std::string name) {
+    const Rect dst{src.x + dx, src.y + dy, src.width, src.height};
+    // Both the vacated source and the destination change, so the edit spans their union.
+    const Rect region = src.united(dst);
+
+    std::vector<PaintCommand::DeltaT<Pixel>> deltas;
+    Rect dirty{};
+    const TileSpan span = tilesForRect(region);
+    for (int row = span.rowBegin; row < span.rowEnd; ++row) {
+        for (int col = span.colBegin; col < span.colEnd; ++col) {
+            const TileCoord coord{col, row};
+            const Rect tb = tileBounds(coord);
+            const Rect vis = tb.intersected(region);
+            if (vis.isEmpty()) continue;
+
+            // Read the destination tile BEFORE any delta is applied. Nothing in this loop
+            // mutates the store (sharedTile only arms the copy-on-write flag), so every read
+            // below still sees the pre-move pixels, which is what makes reading the source
+            // through the same store correct.
+            std::shared_ptr<TileDataT<Pixel>> before = store.sharedTile(coord);
+            auto after = std::make_shared<TileDataT<Pixel>>();
+            if (before) *after = *before;
+
+            bool changed = false;
+            for (int y = vis.top(); y < vis.bottom(); ++y) {
+                const int sy = y - dy;
+                const std::size_t rowBase =
+                    static_cast<std::size_t>(y - tb.top()) * static_cast<std::size_t>(kTileSize);
+                // The x range in this row whose source lies inside `src`. Everything outside
+                // it is vacated and becomes transparent.
+                // CLAMPED to the tile, both ends. The source span can lie wholly left or
+                // wholly right of this tile, and an unclamped bound then sent the clearing
+                // loops below straight past the tile buffer.
+                const bool rowInSrc = sy >= src.top() && sy < src.bottom();
+                const int xLo =
+                    rowInSrc ? std::clamp(src.left() + dx, vis.left(), vis.right()) : vis.right();
+                const int xHi =
+                    rowInSrc ? std::clamp(src.right() + dx, vis.left(), vis.right()) : vis.right();
+
+                const auto put = [&](int x, Pixel np) {
+                    const std::size_t li = rowBase + static_cast<std::size_t>(x - tb.left());
+                    if (!pixelEqual(np, after->px[li])) {
+                        after->px[li] = np;
+                        changed = true;
+                    }
+                };
+                for (int x = vis.left(); x < xLo; ++x) put(x, Pixel{});
+                for (int x = xHi; x < vis.right(); ++x) put(x, Pixel{});
+                if (xLo >= xHi) continue;
+
+                // The covered span, walked one source tile column at a time.
+                const int syLocal = tileLocalOffset(sy);
+                const int srcRow = floorDiv(sy, kTileSize);
+                int x = xLo;
+                while (x < xHi) {
+                    const int sx = x - dx;
+                    const int srcCol = floorDiv(sx, kTileSize);
+                    // Last destination x still served by this source tile column.
+                    const int runEnd = std::min(xHi, (srcCol + 1) * kTileSize + dx);
+                    const TileDataT<Pixel>* stile = store.find(TileCoord{srcCol, srcRow});
+                    if (stile == nullptr) {
+                        for (; x < runEnd; ++x) put(x, Pixel{});  // absent source == clear
+                        continue;
+                    }
+                    int lx = tileLocalOffset(sx);
+                    for (; x < runEnd; ++x, ++lx) put(x, stile->at(lx, syLocal));
+                }
+            }
+            if (changed) {
+                deltas.push_back(
+                    PaintCommand::DeltaT<Pixel>{coord, std::move(before), std::move(after)});
+                dirty = dirty.united(vis);
+            }
+        }
+    }
+    if (deltas.empty()) return nullptr;
+    return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), std::move(name));
+}
+
 // Depth-generic core of bakePixelEdit: read the content rect from `store` at its
 // native depth into a working-float image, run `transform`, then write the result
 // back as native-depth tile deltas (with optional selection gating). One template
@@ -508,27 +609,33 @@ std::unique_ptr<PaintCommand> moveLayerContent(Document& doc, LayerId layerId, i
     }
     Layer* layer = doc.findLayer(layerId);
     if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
-    const Rect src = static_cast<PixelLayer*>(layer)->contentBounds();
+    auto* pl = static_cast<PixelLayer*>(layer);
+    const Rect src = pl->contentBounds();
     if (src.isEmpty()) return nullptr;  // empty layer: nothing to move
+
+    // Bounded by the TILES the move touches, not by the region's area. A Move allocates one
+    // destination tile at a time (see moveContentImpl), so kMaxFilterPixels, which exists to
+    // bound a filter's several full-region FLOAT buffers, is the wrong limit and used to
+    // refuse an ordinary photograph outright (#180). kMaxMoveTiles admits regions up to
+    // about 268 MP, seventeen times what the old cap allowed, while still bounding the undo
+    // record a full-layer move produces.
     const Rect dst{src.x + dx, src.y + dy, src.width, src.height};
-    // The edit region spans both the vacated source and the destination, so clearing the old
-    // pixels and writing the shifted ones is one self-contained in-region transform.
-    const Rect region = src.united(dst);
-    return bakePixelEditRegion(
-        doc, layerId, "Move", region,
-        [dx, dy](std::span<Rgbaf> img, int w, int h) {
-            const std::vector<Rgbaf> in(img.begin(), img.end());
-            for (int y = 0; y < h; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    const int sx = x - dx;  // region-local source of the pixel now at (x,y)
-                    const int sy = y - dy;
-                    img[idx(x, y, w)] = (sx >= 0 && sx < w && sy >= 0 && sy < h)
-                                            ? in[idx(sx, sy, w)]
-                                            : Rgbaf{};  // vacated area becomes transparent
-                }
-            }
-        },
-        /*selection=*/nullptr);  // the Move tool shifts the whole layer, not a gated region
+    const TileSpan span = tilesForRect(src.united(dst));
+    const std::int64_t tiles = static_cast<std::int64_t>(span.colEnd - span.colBegin) *
+                               static_cast<std::int64_t>(span.rowEnd - span.rowBegin);
+    if (tiles > kMaxMoveTiles) return nullptr;
+
+    // Native depth, no float round trip: a translation is a copy, so it neither needs the
+    // working-float image nor should pay for it.
+    switch (pl->depth()) {
+        case BitDepth::U16:
+            return moveContentImpl<Rgba16>(layerId, pl->tiles16(), src, dx, dy, "Move");
+        case BitDepth::F32:
+            return moveContentImpl<Rgbaf>(layerId, pl->tilesF(), src, dx, dy, "Move");
+        case BitDepth::U8:
+        default:
+            return moveContentImpl<Rgba8>(layerId, pl->tiles(), src, dx, dy, "Move");
+    }
 }
 
 std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layerId,

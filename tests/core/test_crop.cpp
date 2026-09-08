@@ -146,15 +146,48 @@ PE_TEST(crop_preserves_sparse_selection_with_huge_bbox) {
 PE_TEST(crop_refuses_when_content_exceeds_move_budget) {
     // A layer whose content exceeds the per-layer move budget can't be shifted; rather than
     // resize the canvas and leave content unmoved (half-cropped), the crop must be a no-op.
-    auto doc = Document::createBlank(Size{5000, 5000});
+    //
+    // The budget is now kMaxMoveTiles (4096 tiles), not an area in pixels: a Move is built
+    // one tile at a time at native depth, so what bounds it is the tiles it touches and the
+    // undo record they produce. This case used to use a 5120x5120 bbox, which was over the
+    // old 16 MP area cap; that document is now perfectly movable, and is asserted as such by
+    // crop_moves_content_that_the_old_area_cap_refused below. Content spanning 79x79 tiles
+    // is over the new bound.
+    auto doc = Document::createBlank(Size{20000, 20000});
+    PE_REQUIRE(doc != nullptr);
     auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
     pl->tiles().setPixel(10, 10, Rgba8{1, 2, 3, 255});
-    pl->tiles().setPixel(4990, 4990, Rgba8{4, 5, 6, 255});  // content bbox ~5120x5120 (>16 MP)
+    pl->tiles().setPixel(19990, 19990, Rgba8{4, 5, 6, 255});  // bbox ~20224^2 = 6241 tiles
 
     doc->history().push(std::make_unique<CropCommand>(Rect{1000, 1000, 1000, 1000}));
-    PE_CHECK_EQ(doc->canvasSize().width, 5000);  // refused: canvas unchanged
-    PE_CHECK_EQ(doc->canvasSize().height, 5000);
+    PE_CHECK_EQ(doc->canvasSize().width, 20000);  // refused: canvas unchanged
+    PE_CHECK_EQ(doc->canvasSize().height, 20000);
     PE_CHECK_EQ(pl->tiles().pixel(10, 10), (Rgba8{1, 2, 3, 255}));  // content not moved
+}
+
+PE_TEST(crop_moves_content_that_the_old_area_cap_refused) {
+    // The behaviour change, asserted deliberately rather than left to a test that stopped
+    // failing. A 5000x5000 document's content is a ~5120x5120 bbox: over the old 16 MP area
+    // cap, so a crop here used to be refused outright and the user's crop silently did
+    // nothing. It is 400 tiles, well inside the move budget, so it now works.
+    auto doc = Document::createBlank(Size{5000, 5000});
+    PE_REQUIRE(doc != nullptr);
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().setPixel(10, 10, Rgba8{1, 2, 3, 255});
+    pl->tiles().setPixel(4990, 4990, Rgba8{4, 5, 6, 255});
+
+    doc->history().push(std::make_unique<CropCommand>(Rect{1000, 1000, 1000, 1000}));
+    PE_CHECK_EQ(doc->canvasSize().width, 1000);
+    PE_CHECK_EQ(doc->canvasSize().height, 1000);
+    // Both pixels shifted by (-1000, -1000): the first lands off-canvas, the second at 3990.
+    PE_CHECK_EQ(pl->tiles().pixel(-990, -990), (Rgba8{1, 2, 3, 255}));
+    PE_CHECK_EQ(pl->tiles().pixel(3990, 3990), (Rgba8{4, 5, 6, 255}));
+    PE_CHECK_EQ(pl->tiles().pixel(10, 10), (Rgba8{0, 0, 0, 0}));  // vacated
+
+    doc->history().undo();
+    PE_CHECK_EQ(doc->canvasSize().width, 5000);
+    PE_CHECK_EQ(pl->tiles().pixel(10, 10), (Rgba8{1, 2, 3, 255}));
+    PE_CHECK_EQ(pl->tiles().pixel(4990, 4990), (Rgba8{4, 5, 6, 255}));
 }
 
 // ---------------------------------------------------------------------------

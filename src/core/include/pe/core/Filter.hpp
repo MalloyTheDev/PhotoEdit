@@ -28,6 +28,17 @@ class PixelBuffer;
 // why if it can name the limit.
 inline constexpr std::int64_t kMaxFilterPixels = 16'000'000;
 
+// The most tiles one Move may touch (source region united with destination).
+//
+// A Move is an integer translation, so it is built one destination tile at a time at the
+// layer's native depth and allocates nothing region-sized. kMaxFilterPixels does not apply
+// to it: that bounds a filter's full-region float buffers, and applying it to a Move refused
+// every document over about 15.6 MP, which is any photograph from a modern camera (#180).
+// What a Move does cost is its undo record, one replacement tile per changed tile, so the
+// limit is stated in tiles. 4096 admits a region of about 268 MP, matching the bound the
+// brush and the selection already use.
+inline constexpr std::int64_t kMaxMoveTiles = 4096;
+
 // Why a destructive pixel edit on `layerId` would be refused, or a Refusal with code None
 // if it would proceed. bakePixelEdit and everything built on it (every filter, every
 // destructive adjustment, bucket and gradient fill, stamp, move, transform) share these

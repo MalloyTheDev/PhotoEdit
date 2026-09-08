@@ -9,6 +9,7 @@
 #include "pe_test.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <vector>
 
@@ -323,6 +324,160 @@ PE_TEST(move_layer_content_edge_cases) {
     static_cast<PixelLayer*>(doc->findLayer(base))->tiles().setPixel(5, 5, Rgba8{1, 2, 3, 255});
     PE_CHECK(moveLayerContent(*doc, base, 0, 0) == nullptr);       // zero move: no command
     PE_CHECK(moveLayerContent(*doc, base, 999999, 0) == nullptr);  // offset beyond the size cap
+}
+
+namespace {
+
+// What a Move means, stated independently of how it is implemented: every pixel comes from
+// (x-dx, y-dy) if that lies in the pre-move content bounds, and is transparent otherwise.
+// The optimized path resolves a source tile once per run and clears whole spans at a time;
+// this reads one pixel at a time through the store's own accessor and so cannot share a bug
+// with it. Same role the per-pixel oracle played for the .pedoc gather in #176.
+void checkMoveMatchesReference(Document& doc, LayerId id, int dx, int dy, Rect probe) {
+    auto* pl = static_cast<PixelLayer*>(doc.findLayer(id));
+    const Rect src = pl->contentBounds();
+    std::vector<Rgba8> want;
+    want.reserve(static_cast<std::size_t>(probe.width) * static_cast<std::size_t>(probe.height));
+    for (int y = probe.top(); y < probe.bottom(); ++y) {
+        for (int x = probe.left(); x < probe.right(); ++x) {
+            const int sx = x - dx;
+            const int sy = y - dy;
+            want.push_back(src.contains(Point{sx, sy}) ? pl->tiles().pixel(sx, sy) : Rgba8{});
+        }
+    }
+    auto cmd = moveLayerContent(doc, id, dx, dy);
+    PE_REQUIRE(cmd != nullptr);
+    doc.history().push(std::move(cmd));
+
+    std::size_t i = 0;
+    int mismatches = 0;
+    for (int y = probe.top(); y < probe.bottom(); ++y) {
+        for (int x = probe.left(); x < probe.right(); ++x, ++i) {
+            if (!(pl->tiles().pixel(x, y) == want[i])) ++mismatches;
+        }
+    }
+    PE_CHECK_EQ(mismatches, 0);
+}
+
+}  // namespace
+
+PE_TEST(move_matches_a_per_pixel_reference_across_tile_boundaries) {
+    // The shift is built one destination tile at a time, resolving the source tile once per
+    // run, so every interesting case is a run that starts or ends on a tile edge. Offsets
+    // cover: inside one tile, exactly one tile, one past a tile, negative on each axis, and
+    // a diagonal that crosses in both at once.
+    constexpr int T = kTileSize;
+    for (const Point d : {Point{5, 3}, Point{-5, -3}, Point{T, 0}, Point{0, T}, Point{T + 1, T - 1},
+                          Point{-T, T}, Point{1, -1}, Point{-(T + 7), T + 7}}) {
+        auto doc = Document::createBlank(Size{3 * T, 2 * T});
+        PE_REQUIRE(doc != nullptr);
+        const LayerId base = doc->activeLayer();
+        auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+        // Content that spans several tiles, has gaps, and lands on the tile grid: a block
+        // straddling the first boundary, lone pixels at exact edges, and a far corner.
+        pl->tiles().fillRect(Rect{T - 4, T - 4, 9, 9}, Rgba8{200, 50, 50, 255});
+        pl->tiles().setPixel(T, T, Rgba8{9, 9, 9, 255});
+        pl->tiles().setPixel(T - 1, 0, Rgba8{7, 7, 7, 255});
+        pl->tiles().setPixel(2 * T + 5, T + 5, Rgba8{3, 4, 5, 255});
+        checkMoveMatchesReference(*doc, base, d.x, d.y, Rect{-T, -T, 5 * T, 4 * T});
+    }
+}
+
+PE_TEST(move_round_trips_exactly_at_every_depth) {
+    constexpr int T = kTileSize;
+    for (const BitDepth depth : {BitDepth::U8, BitDepth::U16, BitDepth::F32}) {
+        auto doc = Document::createBlank(Size{2 * T, T}, ColorMode::RGB, depth, 96);
+        PE_REQUIRE(doc != nullptr);
+        const LayerId base = doc->activeLayer();
+        auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+        switch (depth) {
+            case BitDepth::U16:
+                pl->tiles16().fillRect(Rect{T - 3, 4, 7, 7}, Rgba16{1000, 2000, 3000, 65535});
+                break;
+            case BitDepth::F32:
+                pl->tilesF().fillRect(Rect{T - 3, 4, 7, 7}, Rgbaf{0.25f, 0.5f, 0.75f, 1.0f});
+                break;
+            case BitDepth::U8:
+            default:
+                pl->tiles().fillRect(Rect{T - 3, 4, 7, 7}, Rgba8{10, 20, 30, 255});
+                break;
+        }
+        auto cmd = moveLayerContent(*doc, base, T + 2, 5);
+        PE_REQUIRE(cmd != nullptr);
+        doc->history().push(std::move(cmd));
+        switch (depth) {
+            case BitDepth::U16:
+                PE_CHECK(pl->tiles16().pixel(2 * T - 1, 9) == (Rgba16{1000, 2000, 3000, 65535}));
+                PE_CHECK(pl->tiles16().pixel(T - 3, 4) == (Rgba16{0, 0, 0, 0}));
+                break;
+            case BitDepth::F32: {
+                const Rgbaf p = pl->tilesF().pixel(2 * T - 1, 9);
+                PE_CHECK(p.r == 0.25f && p.g == 0.5f && p.b == 0.75f && p.a == 1.0f);
+                PE_CHECK(pl->tilesF().pixel(T - 3, 4).a == 0.0f);
+                break;
+            }
+            case BitDepth::U8:
+            default:
+                PE_CHECK(pl->tiles().pixel(2 * T - 1, 9) == (Rgba8{10, 20, 30, 255}));
+                PE_CHECK(pl->tiles().pixel(T - 3, 4) == (Rgba8{0, 0, 0, 0}));
+                break;
+        }
+        doc->history().undo();
+        switch (depth) {
+            case BitDepth::U16:
+                PE_CHECK(pl->tiles16().pixel(T - 3, 4) == (Rgba16{1000, 2000, 3000, 65535}));
+                break;
+            case BitDepth::F32:
+                PE_CHECK(pl->tilesF().pixel(T - 3, 4).a == 1.0f);
+                break;
+            case BitDepth::U8:
+            default:
+                PE_CHECK(pl->tiles().pixel(T - 3, 4) == (Rgba8{10, 20, 30, 255}));
+                break;
+        }
+    }
+}
+
+PE_TEST(move_works_on_a_document_the_old_area_cap_refused) {
+    // #180. A Move used to run through the generic float bake, whose kMaxFilterPixels limit
+    // exists to bound several full-region float buffers. contentBounds() is tile-aligned, so
+    // a 4000x4000 canvas reported 16.78 MP, over the 16 MP cap, and the Move tool silently
+    // did nothing on any photograph from a modern camera. A translation allocates one tile
+    // at a time and needs no float image, so that limit never applied to it.
+    for (const Size canvas : {Size{4000, 4000}, Size{6000, 4000}}) {
+        auto doc = Document::createBlank(canvas);
+        PE_REQUIRE(doc != nullptr);
+        const LayerId base = doc->activeLayer();
+        auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+        pl->tiles().setPixel(10, 10, Rgba8{1, 2, 3, 255});
+        pl->tiles().setPixel(canvas.width - 10, canvas.height - 10, Rgba8{4, 5, 6, 255});
+        // Over the old cap, and by construction: tile-aligned bounds exceed 16 MP.
+        const Rect bounds = pl->contentBounds();
+        PE_CHECK(static_cast<std::int64_t>(bounds.width) * bounds.height > kMaxFilterPixels);
+
+        auto cmd = moveLayerContent(*doc, base, 25, 25);
+        PE_REQUIRE(cmd != nullptr);  // used to be nullptr, with no message to the user
+        doc->history().push(std::move(cmd));
+        PE_CHECK_EQ(pl->tiles().pixel(35, 35), (Rgba8{1, 2, 3, 255}));
+        PE_CHECK_EQ(pl->tiles().pixel(10, 10), (Rgba8{0, 0, 0, 0}));
+        doc->history().undo();
+        PE_CHECK_EQ(pl->tiles().pixel(10, 10), (Rgba8{1, 2, 3, 255}));
+    }
+}
+
+PE_TEST(move_refuses_past_the_tile_budget) {
+    // The bound that replaced it is stated in tiles, because tiles are what a Move allocates
+    // and what its undo record costs. Just past the budget must still be refused, and
+    // refused cleanly rather than by running out of memory.
+    constexpr int T = kTileSize;
+    auto doc = Document::createBlank(Size{70 * T, 70 * T});
+    PE_REQUIRE(doc != nullptr);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().setPixel(1, 1, Rgba8{1, 2, 3, 255});
+    pl->tiles().setPixel(69 * T, 69 * T, Rgba8{4, 5, 6, 255});  // 70x70 = 4900 tiles
+    PE_CHECK(moveLayerContent(*doc, base, 4, 4) == nullptr);
+    PE_CHECK_EQ(pl->tiles().pixel(1, 1), (Rgba8{1, 2, 3, 255}));  // and nothing moved
 }
 
 PE_TEST(bucket_fill_floods_contiguous_region) {
