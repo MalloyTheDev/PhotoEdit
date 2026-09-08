@@ -44,6 +44,26 @@ PE_TEST(webp_decode_garbage_is_nullopt) {
     PE_CHECK(!decodeWebp(std::span<const std::byte>{}).has_value());  // empty input
 }
 
+PE_TEST(webp_encode_refuses_a_side_the_format_cannot_hold) {
+    // WEBP_MAX_DIMENSION is 16383 and there is no encoder API, incremental or otherwise,
+    // that exceeds it.
+    //
+    // What this pins, precisely: encodeWebp yields nothing for an over-limit side. It does
+    // NOT pin encodeWebp's own early return, because libwebp refuses the same input anyway,
+    // so removing our check leaves this test green. The check is still worth having, since
+    // it refuses before allocating and states the constraint at our own layer rather than
+    // relying on a library's failure mode. The thing that actually pins our constant to
+    // libwebp's is the static_assert in Webp.cpp: if the library ever raised its limit, the
+    // build would stop rather than this test.
+    PixelBuffer tall(1, kMaxWebpDimension + 1);
+    PE_CHECK(encodeWebp(tall).empty());
+    PixelBuffer wide(kMaxWebpDimension + 1, 1);
+    PE_CHECK(encodeWebp(wide).empty());
+    // And exactly at the limit is still fine, so the comparison is not off by one.
+    PixelBuffer edge(1, kMaxWebpDimension);
+    PE_CHECK(!encodeWebp(edge).empty());
+}
+
 PE_TEST(webp_encode_empty_is_empty) {
     PE_CHECK(encodeWebp(PixelBuffer{}).empty());
 }

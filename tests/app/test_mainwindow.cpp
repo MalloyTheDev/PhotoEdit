@@ -503,6 +503,31 @@ PE_TEST(mainwindow_undo_and_redo_track_the_history) {
     PE_CHECK(redo->isEnabled());  // and now there is something to redo
 }
 
+PE_TEST(mainwindow_failure_message_separates_a_format_limit_from_a_memory_limit) {
+    // Two different refusals that used to give the same answer. A canvas over the composite
+    // cap is a MEMORY limit, and the message rightly sends the user to .pedoc. WebP capping a
+    // side at 16383 is a limit of the FORMAT: no bigger budget and no other build helps, so
+    // offering .pedoc there answers a question the user did not ask.
+    auto doc = pe::Document::createBlank(pe::Size{20000, 3000});  // 60 MP: UNDER the flatten cap
+    PE_CHECK(doc != nullptr);
+
+    const QString webp = pe::app::saveFailureReason(doc.get(), QStringLiteral("C:/tmp/wide.webp"),
+                                                    pe::SaveError::ExceedsFormatLimit);
+    PE_CHECK(webp.contains(QStringLiteral("16383")));  // the actual constraint, by number
+    PE_CHECK(webp.contains(QStringLiteral("20000")));  // and what the document actually is
+    PE_CHECK(webp.contains(QStringLiteral("format")));
+    PE_CHECK(!webp.contains(QStringLiteral("megapixel")));  // not a memory story
+    PE_CHECK(!webp.contains(QStringLiteral(".pedoc")));     // and .pedoc is not the answer
+
+    // The memory case still reads as a memory case.
+    auto big = pe::Document::createBlank(pe::Size{9000, 9000});
+    PE_CHECK(big != nullptr);
+    const QString flat = pe::app::saveFailureReason(big.get(), QStringLiteral("C:/tmp/big.png"),
+                                                    pe::SaveError::TooLargeToFlatten);
+    PE_CHECK(flat.contains(QStringLiteral("megapixel")));
+    PE_CHECK(!flat.contains(QStringLiteral("16383")));
+}
+
 PE_TEST(mainwindow_save_failure_names_the_flatten_limit) {
     // "Could not save" sent the user looking at disk permissions when the real cause was
     // that the canvas is too large to flatten. Every raster format goes through

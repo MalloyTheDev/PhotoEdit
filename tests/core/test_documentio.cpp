@@ -1,6 +1,7 @@
 #include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
+#include "pe/core/ImageIO.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe_test.hpp"
 
@@ -394,6 +395,27 @@ PE_TEST(savedocument_reports_why_it_failed) {
     err = SaveError::UnsupportedFormat;  // deliberately dirty
     PE_CHECK(saveDocument(*big, (dir / "big.pedoc").string(), &err));
     PE_CHECK(err == SaveError::None);
+
+    // A document too wide for WebP's format, but comfortably UNDER the composite cap, so
+    // nothing about memory explains it. This used to report CodecUnavailable, telling the
+    // user their build lacked a codec that is in fact compiled in.
+    auto wide = Document::createBlank(Size{kMaxWebpDimension + 1, 100});
+    PE_CHECK(wide != nullptr);
+    if (wide != nullptr) {
+        const std::int64_t wideArea =
+            static_cast<std::int64_t>(wide->canvasSize().width) * wide->canvasSize().height;
+        PE_CHECK(wideArea < kMaxCompositeImagePixels);  // not a flatten-limit case
+        err = SaveError::None;
+        PE_CHECK(!saveDocument(*wide, (dir / "wide.webp").string(), &err));
+        PE_CHECK(err == SaveError::ExceedsFormatLimit);
+#ifdef PHOTOEDIT_HAVE_PNG
+        // The same document as PNG is refused by nothing: PNG has no such side limit. Guarded
+        // because a build without libpng refuses it for an unrelated reason.
+        err = SaveError::UnsupportedFormat;
+        PE_CHECK(saveDocument(*wide, (dir / "wide.png").string(), &err));
+        PE_CHECK(err == SaveError::None);
+#endif
+    }
 
     // Content past the coordinate range the native format stores. The writer refuses it
     // rather than producing a file its own reader would not take back, and the reason has

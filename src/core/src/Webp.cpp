@@ -21,8 +21,16 @@ namespace {
 constexpr std::int64_t kMaxImagePixels = 64'000'000;
 }  // namespace
 
+static_assert(kMaxWebpDimension == WEBP_MAX_DIMENSION,
+              "pe::kMaxWebpDimension must track libwebp's own limit");
+
 std::vector<std::byte> encodeWebp(const PixelBuffer& image) {
     if (image.isEmpty()) return {};
+    // Refuse here rather than handing libwebp a size it cannot represent. The format caps a
+    // side at 16383; no memory budget and no incremental API changes that, so a document
+    // wider than this is simply not a WebP file. saveDocument turns the empty return into
+    // SaveError::ExceedsFormatLimit, which says so in terms of the side length.
+    if (image.width() > kMaxWebpDimension || image.height() > kMaxWebpDimension) return {};
 
     std::uint8_t* output = nullptr;  // allocated by libwebp
     const std::size_t n =

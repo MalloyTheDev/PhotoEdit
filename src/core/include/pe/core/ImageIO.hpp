@@ -33,8 +33,19 @@ class Document;
 // nullopt on malformed input or if the dimensions exceed the decode safety cap.
 [[nodiscard]] std::optional<PixelBuffer> decodeJpeg(std::span<const std::byte> data);
 
-// Encode an 8-bit RGBA image to the bytes of a (lossless) WebP file. Empty on failure
-// or for an empty image. Only built with libwebp (PHOTOEDIT_HAVE_WEBP).
+// The largest side length a WebP file can have. This is a limit of the FORMAT, not of this
+// build or of any memory budget: libwebp's WEBP_MAX_DIMENSION is 16383, and there is no
+// encoder API, incremental or otherwise, that can exceed it. Webp.cpp static_asserts that
+// this matches the library's own value.
+//
+// It is public because the failure has to be explained in terms of the side length. Reporting
+// a too-wide document as "over the composite cap, save as .pedoc" implied a bigger memory
+// limit would help, and it never will.
+inline constexpr int kMaxWebpDimension = 16383;
+
+// Encode an 8-bit RGBA image to the bytes of a (lossless) WebP file. Empty on failure, for
+// an empty image, or for one whose width or height exceeds kMaxWebpDimension. Only built
+// with libwebp (PHOTOEDIT_HAVE_WEBP).
 [[nodiscard]] std::vector<std::byte> encodeWebp(const PixelBuffer& image);
 
 // Decode the bytes of a WebP file to an 8-bit RGBA image. Returns nullopt on malformed

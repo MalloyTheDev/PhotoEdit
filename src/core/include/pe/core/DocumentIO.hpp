@@ -70,16 +70,19 @@ enum class LoadError : std::uint8_t {
 // extension this build cannot write.
 enum class SaveError : std::uint8_t {
     None,
-    UnsupportedFormat,  // extension not recognized
-    CodecUnavailable,   // recognized, but that codec is not compiled into this build
-    TooLargeToFlatten,  // over the composite cap; every raster format goes through it
-    ContentOutOfRange,  // native only: a layer's content reaches past the coordinate range
-                        // the format can store, so writing it would produce a file this
-                        // build's own reader refuses. Refused while the work is still in
-                        // memory rather than written and lost.
-    CannotCreate,       // the temp file could not be created (permissions, read-only, path)
-    WriteFailed,        // ran out of space, or the device reported an error mid-write
-    ReplaceFailed,      // written, but could not replace the destination
+    UnsupportedFormat,   // extension not recognized
+    CodecUnavailable,    // recognized, but that codec is not compiled into this build
+    TooLargeToFlatten,   // over the composite cap; every raster format goes through it
+    ExceedsFormatLimit,  // the format itself cannot represent a document this large, whatever
+                         // the memory budget. WebP caps a side at kMaxWebpDimension (16383),
+                         // so a wider document is not a WebP file and no bigger limit helps.
+    ContentOutOfRange,   // native only: a layer's content reaches past the coordinate range
+                         // the format can store, so writing it would produce a file this
+                         // build's own reader refuses. Refused while the work is still in
+                         // memory rather than written and lost.
+    CannotCreate,        // the temp file could not be created (permissions, read-only, path)
+    WriteFailed,         // ran out of space, or the device reported an error mid-write
+    ReplaceFailed,       // written, but could not replace the destination
 };
 
 // Load a document from a file on disk; the format is inferred from the extension.

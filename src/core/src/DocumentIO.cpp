@@ -237,6 +237,14 @@ bool saveDocument(const Document& doc, const std::string& path, const ExportOpti
             // told the user their build was incomplete, which was never true.
             return fail(SaveError::ContentOutOfRange);
         }
+        // Before the memory explanation, the one that memory cannot fix: WebP's format caps
+        // a side at 16383. A 20000x3000 document is only 60 MP, so it is under the composite
+        // cap and reaches the encoder, which refuses it; blaming the flatten limit there
+        // would point the user at the wrong thing entirely.
+        if (fmt == ImageFormat::WebP &&
+            (canvas.width > kMaxWebpDimension || canvas.height > kMaxWebpDimension)) {
+            return fail(SaveError::ExceedsFormatLimit);
+        }
         if (area > kMaxCompositeImagePixels) return fail(SaveError::TooLargeToFlatten);
         return fail(SaveError::CodecUnavailable);
     }

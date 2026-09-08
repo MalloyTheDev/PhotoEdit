@@ -24,6 +24,7 @@
 #include "pe/core/Document.hpp"
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Filter.hpp"
+#include "pe/core/ImageIO.hpp"
 #include "pe/core/TextLayer.hpp"  // pe::TextLayer / TextModel / EditTextCommand
 #include "pe/core/Version.hpp"
 
@@ -1207,6 +1208,20 @@ QString saveFailureReason(const pe::Document* doc, const QString& path, pe::Save
                 .arg(area / 1'000'000)
                 .arg(pe::kMaxCompositeImagePixels / 1'000'000);
         }
+        case pe::SaveError::ExceedsFormatLimit: {
+            // Not a memory limit, so do not offer .pedoc or a bigger budget as the way out:
+            // the format itself cannot describe a side this long, and never will.
+            const pe::Size c = doc != nullptr ? doc->canvasSize() : pe::Size{0, 0};
+            return QStringLiteral(
+                       "\"%1\" is %2 x %3, and that format cannot store a side longer than %4 "
+                       "pixels. That is a limit of the file format itself, not of this "
+                       "computer, so a smaller image or a different format is the only way "
+                       "round it. PNG and TIFF have no such limit.")
+                .arg(path)
+                .arg(c.width)
+                .arg(c.height)
+                .arg(pe::kMaxWebpDimension);
+        }
         case pe::SaveError::ContentOutOfRange:
             return QStringLiteral(
                        "A layer has content further than %1 pixels from the canvas, which is past "
@@ -1763,11 +1778,12 @@ void MainWindow::exportDocumentAs() {
     const std::unique_ptr<const pe::Document> shot = doc_->snapshot();
     if (shot == nullptr) return;
     bool wrote = false;
+    pe::SaveError saveErr = pe::SaveError::None;
     const pe::ExportOptions opts = dlg.options();
     const TaskResult task =
         runGuardedTask(QStringLiteral("Exporting %1").arg(QFileInfo(path).fileName()),
-                       TaskAccess::Snapshot, [&shot, &path, &opts, &wrote] {
-                           wrote = pe::saveDocument(*shot, path.toStdString(), opts);
+                       TaskAccess::Snapshot, [&shot, &path, &opts, &wrote, &saveErr] {
+                           wrote = pe::saveDocument(*shot, path.toStdString(), opts, &saveErr);
                        });
     // Refused as re-entrant (see runGuardedTask): the work never ran, so there is no
     // failure to report. Saying nothing is right here; the File actions are disabled while
@@ -1781,8 +1797,13 @@ void MainWindow::exportDocumentAs() {
         return;
     }
     if (!wrote) {
+        // The same explanation Save As gives. This used to discard the SaveError and say
+        // "Could not export", which sent the user to check disk permissions when the real
+        // answer was that the canvas is over the flatten limit, or too wide for the format.
+        // Export is the path someone takes to make a PNG, so it is the path that most needs
+        // to say why.
         QMessageBox::warning(this, QStringLiteral("Export failed"),
-                             QStringLiteral("Could not export \"%1\".").arg(path));
+                             saveFailureReason(doc_.get(), path, saveErr));
         return;
     }
     // An export is a flattened copy: unlike Save/Save As it does not change the document's
