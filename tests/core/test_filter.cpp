@@ -465,10 +465,130 @@ PE_TEST(move_works_on_a_document_the_old_area_cap_refused) {
     }
 }
 
-PE_TEST(move_refuses_past_the_tile_budget) {
-    // The bound that replaced it is stated in tiles, because tiles are what a Move allocates
-    // and what its undo record costs. Just past the budget must still be refused, and
-    // refused cleanly rather than by running out of memory.
+PE_TEST(move_leaves_no_empty_tiles_behind_so_the_layer_stays_filterable) {
+    // A vacated tile used to be written back as a fully transparent tile rather than
+    // removed, so contentBounds() became the source united with the destination and stayed
+    // there. Every destructive filter is bounded by that rect, so one Move could leave a
+    // layer permanently unfilterable over pixels that are all transparent.
+    constexpr int T = kTileSize;
+    auto doc = Document::createBlank(Size{8 * T, 8 * T});
+    PE_REQUIRE(doc != nullptr);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, T, T}, Rgba8{10, 20, 30, 255});
+    PE_CHECK(pl->contentBounds() == (Rect{0, 0, T, T}));
+
+    auto cmd = moveLayerContent(*doc, base, 4 * T, 4 * T);
+    PE_REQUIRE(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    // Only the destination remains. Before the fix this was {0,0,5T,5T}, twenty-five times
+    // the area, of which twenty-four twenty-fifths was transparent.
+    PE_CHECK(pl->contentBounds() == (Rect{4 * T, 4 * T, T, T}));
+    PE_CHECK_EQ(pl->tiles().tileCount(), static_cast<std::size_t>(1));
+    PE_CHECK_EQ(pl->tiles().pixel(4 * T + 5, 4 * T + 5), (Rgba8{10, 20, 30, 255}));
+    PE_CHECK_EQ(pl->tiles().pixel(5, 5), (Rgba8{0, 0, 0, 0}));
+
+    // And undo restores the tile that was removed, not merely a transparent stand-in.
+    doc->history().undo();
+    PE_CHECK(pl->contentBounds() == (Rect{0, 0, T, T}));
+    PE_CHECK_EQ(pl->tiles().tileCount(), static_cast<std::size_t>(1));
+    PE_CHECK_EQ(pl->tiles().pixel(5, 5), (Rgba8{10, 20, 30, 255}));
+}
+
+PE_TEST(move_costs_what_it_touches_not_the_span_between_source_and_destination) {
+    // The budget and the work both used to be driven by the bounding box of source and
+    // destination, which for a long drag is almost entirely empty space. A small layer
+    // dragged a long way was refused for its DISTANCE rather than its content, and when
+    // accepted it allocated and swept every tile in between.
+    constexpr int T = kTileSize;
+    auto doc = Document::createBlank(Size{4 * T, 4 * T});
+    PE_REQUIRE(doc != nullptr);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{1, 2, 3, 255});  // one tile of content
+
+    // A drag whose bounding box is 200x1 tiles. Only the source and destination tiles can
+    // change, and only those two may be BUILT: sweeping the 198 empty tiles between them is
+    // the defect. touchedTileCount reports tiles that changed, which is two either way, so
+    // the cost needs its own counter to be observable at all.
+    const std::uint64_t buildsBefore = moveTileBuildCount();
+    auto cmd = moveLayerContent(*doc, base, 199 * T, 0);
+    PE_REQUIRE(cmd != nullptr);
+    PE_CHECK_EQ(moveTileBuildCount() - buildsBefore, static_cast<std::uint64_t>(2));
+    PE_CHECK_EQ(cmd->touchedTileCount(), static_cast<std::size_t>(2));
+    doc->history().push(std::move(cmd));
+    PE_CHECK_EQ(pl->tiles().pixel(199 * T + 3, 3), (Rgba8{1, 2, 3, 255}));
+    PE_CHECK_EQ(pl->tiles().pixel(3, 3), (Rgba8{0, 0, 0, 0}));
+
+    // The same content dragged far enough that the bounding box alone would have exceeded
+    // the old 4096-tile count is still accepted, because two tiles is what it costs.
+    auto doc2 = Document::createBlank(Size{4 * T, 4 * T});
+    PE_REQUIRE(doc2 != nullptr);
+    auto* pl2 = static_cast<PixelLayer*>(doc2->findLayer(doc2->activeLayer()));
+    pl2->tiles().fillRect(Rect{0, 0, 8, 8}, Rgba8{4, 5, 6, 255});
+    const std::uint64_t farBefore = moveTileBuildCount();
+    auto far = moveLayerContent(*doc2, doc2->activeLayer(), 100 * T, 100 * T);
+    PE_REQUIRE(far != nullptr);  // bounding box 101x101 = 10201 tiles, content is 2
+    PE_CHECK_EQ(moveTileBuildCount() - farBefore, static_cast<std::uint64_t>(2));
+    PE_CHECK_EQ(far->touchedTileCount(), static_cast<std::size_t>(2));
+}
+
+PE_TEST(move_budget_counts_bytes_so_a_float_layer_is_bounded_like_one) {
+    // A Move's tiles are the layer's own pixels: 256 KB at U8, 1 MB at F32. A flat tile
+    // count let a float layer commit four times the memory of an 8-bit layer with the same
+    // geometry, so the budget is stated in bytes and the same document refuses at F32 while
+    // it is accepted at U8.
+    constexpr int T = kTileSize;
+    // 24x24 tiles of content: 576 at the source plus 625 at the destination (the shift puts
+    // it across one more tile column and row) is 1201 tiles. At U8 that is 315 MB, inside
+    // the 1 GiB budget; at F32 it is 1.26 GB, outside it. Same geometry, same tile count.
+    const int side = 24 * T;
+    auto u8 = Document::createBlank(Size{side, side}, ColorMode::RGB, BitDepth::U8, 96);
+    PE_REQUIRE(u8 != nullptr);
+    auto* p8 = static_cast<PixelLayer*>(u8->findLayer(u8->activeLayer()));
+    p8->tiles().setPixel(0, 0, Rgba8{1, 2, 3, 255});
+    p8->tiles().setPixel(side - 1, side - 1, Rgba8{4, 5, 6, 255});
+
+    auto f32 = Document::createBlank(Size{side, side}, ColorMode::RGB, BitDepth::F32, 96);
+    PE_REQUIRE(f32 != nullptr);
+    auto* pf = static_cast<PixelLayer*>(f32->findLayer(f32->activeLayer()));
+    pf->tilesF().setPixel(0, 0, Rgbaf{0.1f, 0.2f, 0.3f, 1.0f});
+    pf->tilesF().setPixel(side - 1, side - 1, Rgbaf{0.4f, 0.5f, 0.6f, 1.0f});
+
+    // Same geometry, same tile count, four times the bytes.
+    PE_CHECK(p8->contentBounds() == pf->contentBounds());
+    PE_CHECK(moveLayerContent(*f32, f32->activeLayer(), 4, 4) == nullptr);
+    PE_CHECK(moveLayerContent(*u8, u8->activeLayer(), 4, 4) != nullptr);
+}
+
+PE_TEST(move_refuses_content_outside_the_representable_coordinate_range) {
+    // The generic bake used to range-check the region on the way past, and moving off that
+    // path took the check with it, leaving only the offset bound. Rect::right() is x + width
+    // in int, so an out-of-range origin overflows on first use, including inside tilesForRect
+    // while computing the budget. Reachable because PixelLayer::tiles() is public and
+    // mutable, which is how the tests themselves build fixtures.
+    auto doc = Document::createBlank(Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().setPixel(kMaxCanvasDimension + 1000, 5, Rgba8{1, 2, 3, 255});
+    PE_CHECK(moveLayerContent(*doc, base, 4, 4) == nullptr);
+
+    // And a source in range whose DESTINATION would leave it is refused too.
+    auto ok = Document::createBlank(Size{64, 64});
+    PE_REQUIRE(ok != nullptr);
+    auto* pl2 = static_cast<PixelLayer*>(ok->findLayer(ok->activeLayer()));
+    pl2->tiles().setPixel(kMaxCanvasDimension - 10, 5, Rgba8{1, 2, 3, 255});
+    PE_CHECK(moveLayerContent(*ok, ok->activeLayer(), 5000, 0) == nullptr);
+}
+
+PE_TEST(move_refuses_past_the_memory_budget) {
+    // The bound that replaced the area cap is stated in bytes, because what a Move commits
+    // is one replacement tile per touched tile at the layer's own pixel size. Just past the
+    // budget must still be refused, and refused cleanly rather than by running out of
+    // memory. 70x70 tiles at the source plus as many at the destination is about 2.4 GB at
+    // 8 bit, well past kMaxMoveBytes.
     constexpr int T = kTileSize;
     auto doc = Document::createBlank(Size{70 * T, 70 * T});
     PE_REQUIRE(doc != nullptr);

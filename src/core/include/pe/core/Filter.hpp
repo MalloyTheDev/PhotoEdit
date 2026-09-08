@@ -28,22 +28,46 @@ class PixelBuffer;
 // why if it can name the limit.
 inline constexpr std::int64_t kMaxFilterPixels = 16'000'000;
 
-// The most tiles one Move may touch (source region united with destination).
+// The most memory one Move may commit: the tiles it touches at the source plus the tiles it
+// touches at the destination, at the layer's own pixel size.
 //
-// A Move is an integer translation, so it is built one destination tile at a time at the
-// layer's native depth and allocates nothing region-sized. kMaxFilterPixels does not apply
-// to it: that bounds a filter's full-region float buffers, and applying it to a Move refused
-// every document over about 15.6 MP, which is any photograph from a modern camera (#180).
-// What a Move does cost is its undo record, one replacement tile per changed tile, so the
-// limit is stated in tiles. 4096 admits a region of about 268 MP, matching the bound the
-// brush and the selection already use.
-inline constexpr std::int64_t kMaxMoveTiles = 4096;
+// A Move is an integer translation, so it is built one destination tile at a time at native
+// depth and allocates nothing region-sized. kMaxFilterPixels does not apply to it: that
+// bounds a filter's full-region float buffers, and applying it to a Move refused every
+// document over about 15.6 MP, which is any photograph from a modern camera (#180).
+//
+// Stated in BYTES rather than tiles, and this matters. A Move's tiles are the layer's own
+// pixels, so one tile is 256 KB at 8 bit but 1 MB at 32-bit float. A flat tile count would
+// have let a one-pixel nudge on a large float layer build a four-gigabyte undo record while
+// the identical count at 8 bit cost a quarter of that. The brush and the selection can count
+// tiles because theirs hold one byte per pixel; this one cannot.
+//
+// 1 GiB matches kDefaultHistoryBytes, so the largest single Move is bounded by the same
+// figure as the whole undo stack rather than by an unrelated one.
+inline constexpr std::int64_t kMaxMoveBytes = 1LL << 30;
+
+// Diagnostics: how many destination tiles a Move has BUILT since the process started.
+//
+// A Move emits one sample per pixel it relocates either way; what must not scale is the
+// number of tiles it allocates and sweeps. The first version of the native-depth Move swept
+// every tile in the bounding box of the source and the destination, so a small layer dragged
+// a long way built a thousand tiles to relocate one, and nothing could observe it: the
+// command's own touchedTileCount() reports tiles that CHANGED, which was two either way.
+// Same purpose and same idiom as NativeFormat's gatherTileLookupCount.
+[[nodiscard]] std::uint64_t moveTileBuildCount() noexcept;
 
 // Why a destructive pixel edit on `layerId` would be refused, or a Refusal with code None
 // if it would proceed. bakePixelEdit and everything built on it (every filter, every
-// destructive adjustment, bucket and gradient fill, stamp, move, transform) share these
-// preconditions, and they return a bare nullptr, so a caller has no way to tell the cases
-// apart from the null alone.
+// destructive adjustment, bucket and gradient fill, stamp, and the RESAMPLING half of
+// transform) share these preconditions, and they return a bare nullptr, so a caller has no
+// way to tell the cases apart from the null alone.
+//
+// moveLayerContent is NOT among them any more and this function must not be used to explain
+// it. A Move is bounded by kMaxMoveBytes and validates its own rects, so asking here about a
+// layer a Move declined gives a confidently wrong answer: a 4000x4000 layer reports
+// "OverSizeBudget, 16 megapixels" while the Move on it in fact succeeds. Explaining a
+// refused Move needs its own predicate against its own constants; until that exists a Move
+// still declines silently past its budget, which is tracked in the follow-ups to #180.
 //
 // This puts the reasons in the engine, beside the code that enforces them and using the
 // same constants, so the two cannot drift. It is deliberately a PREDICATE rather than an

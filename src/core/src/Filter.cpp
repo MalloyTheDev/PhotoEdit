@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -315,6 +316,38 @@ void addNoise(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, fl
 }
 
 namespace {
+std::atomic<std::uint64_t> g_moveTileBuilds{0};
+
+// Is every edge of `r` inside the engine's representable coordinate range? An empty rect is
+// trivially fine: no record is emitted for one.
+bool withinCoordinateRange(Rect r) noexcept {
+    if (r.isEmpty()) return true;
+    const std::int64_t lim = kMaxCanvasDimension;
+    const std::int64_t x0 = r.x;
+    const std::int64_t y0 = r.y;
+    return x0 >= -lim && y0 >= -lim && x0 + r.width <= lim && y0 + r.height <= lim;
+}
+
+// Tiles `r` spans, as int64 so the product cannot overflow.
+std::int64_t tileCountOf(Rect r) noexcept {
+    if (r.isEmpty()) return 0;
+    const TileSpan span = tilesForRect(r);
+    return static_cast<std::int64_t>(span.colEnd - span.colBegin) *
+           static_cast<std::int64_t>(span.rowEnd - span.rowBegin);
+}
+
+std::int64_t bytesPerPixelOf(BitDepth depth) noexcept {
+    switch (depth) {
+        case BitDepth::U16:
+            return static_cast<std::int64_t>(sizeof(Rgba16));
+        case BitDepth::F32:
+            return static_cast<std::int64_t>(sizeof(Rgbaf));
+        case BitDepth::U8:
+        default:
+            return static_cast<std::int64_t>(sizeof(Rgba8));
+    }
+}
+
 // Depth-generic core of moveLayerContent: shift a layer's pixels by (dx, dy) at their
 // NATIVE depth, one destination tile at a time.
 //
@@ -351,11 +384,18 @@ std::unique_ptr<PaintCommand> moveContentImpl(LayerId layerId, TileStoreT<Pixel>
             const Rect tb = tileBounds(coord);
             const Rect vis = tb.intersected(region);
             if (vis.isEmpty()) continue;
+            // A tile touching neither the source nor the destination cannot change: it holds
+            // no content to vacate (contentBounds bounds every occupied tile) and receives no
+            // shifted pixel. Skipping it before the allocation below is what makes the cost
+            // proportional to the CONTENT rather than to the bounding box of src and dst,
+            // which for a long drag is mostly empty space between them.
+            if (!tb.intersects(src) && !tb.intersects(dst)) continue;
 
             // Read the destination tile BEFORE any delta is applied. Nothing in this loop
             // mutates the store (sharedTile only arms the copy-on-write flag), so every read
             // below still sees the pre-move pixels, which is what makes reading the source
             // through the same store correct.
+            g_moveTileBuilds.fetch_add(1, std::memory_order_relaxed);
             std::shared_ptr<TileDataT<Pixel>> before = store.sharedTile(coord);
             auto after = std::make_shared<TileDataT<Pixel>>();
             if (before) *after = *before;
@@ -406,8 +446,22 @@ std::unique_ptr<PaintCommand> moveContentImpl(LayerId layerId, TileStoreT<Pixel>
                 }
             }
             if (changed) {
-                deltas.push_back(
-                    PaintCommand::DeltaT<Pixel>{coord, std::move(before), std::move(after)});
+                // A tile the move emptied is removed, not stored as a transparent one.
+                // setTile treats a null pointer as "erase", and DeltaT already documents that
+                // a null `before` means the tile was absent, so undo restores it either way.
+                // Storing it instead would leave contentBounds() permanently spanning the
+                // vacated source as well as the destination, and since every destructive
+                // filter is bounded by that rect, one Move could leave a layer unfilterable
+                // over pixels that are all transparent.
+                bool empty = true;
+                for (const Pixel& px : after->px) {
+                    if (!pixelEqual(px, Pixel{})) {
+                        empty = false;
+                        break;
+                    }
+                }
+                deltas.push_back(PaintCommand::DeltaT<Pixel>{coord, std::move(before),
+                                                             empty ? nullptr : std::move(after)});
                 dirty = dirty.united(vis);
             }
         }
@@ -599,6 +653,10 @@ std::unique_ptr<PaintCommand> bakePixelEdit(
                                selection);
 }
 
+std::uint64_t moveTileBuildCount() noexcept {
+    return g_moveTileBuilds.load(std::memory_order_relaxed);
+}
+
 std::unique_ptr<PaintCommand> moveLayerContent(Document& doc, LayerId layerId, int dx, int dy) {
     if (dx == 0 && dy == 0) return nullptr;  // no movement, nothing to commit
     // Bound the offset so src+offset cannot overflow int and a pathological drag is rejected
@@ -613,17 +671,33 @@ std::unique_ptr<PaintCommand> moveLayerContent(Document& doc, LayerId layerId, i
     const Rect src = pl->contentBounds();
     if (src.isEmpty()) return nullptr;  // empty layer: nothing to move
 
-    // Bounded by the TILES the move touches, not by the region's area. A Move allocates one
-    // destination tile at a time (see moveContentImpl), so kMaxFilterPixels, which exists to
-    // bound a filter's several full-region FLOAT buffers, is the wrong limit and used to
-    // refuse an ordinary photograph outright (#180). kMaxMoveTiles admits regions up to
-    // about 268 MP, seventeen times what the old cap allowed, while still bounding the undo
-    // record a full-layer move produces.
+    // Validate the SOURCE rect, not just the offset. The generic bake used to do this on the
+    // way past, and its comment explains why it matters: Rect::right() is x + width in int,
+    // so an origin or far edge outside the engine's coordinate range overflows on first use,
+    // including inside tilesForRect just below. Moving off that path took the check with it
+    // and left only the offset bound, which is not enough on its own.
     const Rect dst{src.x + dx, src.y + dy, src.width, src.height};
-    const TileSpan span = tilesForRect(src.united(dst));
-    const std::int64_t tiles = static_cast<std::int64_t>(span.colEnd - span.colBegin) *
-                               static_cast<std::int64_t>(span.rowEnd - span.rowBegin);
-    if (tiles > kMaxMoveTiles) return nullptr;
+    if (!withinCoordinateRange(src) || !withinCoordinateRange(dst)) return nullptr;
+
+    // Bounded by the tiles the move actually TOUCHES, and by their bytes.
+    //
+    // Not by the region's area: kMaxFilterPixels exists to bound a filter's several
+    // full-region float buffers, and a translation allocates none of them, which is why it
+    // used to refuse an ordinary photograph outright (#180).
+    //
+    // Not by the bounding box of src and dst either: a small layer dragged a long way spans
+    // a huge box that is almost entirely empty, and charging for that refuses the drag for
+    // its distance rather than for its content.
+    //
+    // And counted in BYTES rather than tiles, because a Move's tiles are the layer's own
+    // pixels: 256 KB at U8 but 1 MB at F32. A flat tile count would have let a one-pixel
+    // nudge on a large float layer build a multi-gigabyte undo record, four times what the
+    // same count costs at 8 bit.
+    const std::int64_t srcTiles = tileCountOf(src);
+    const std::int64_t dstTiles = tileCountOf(dst);
+    const std::int64_t bytesPerTile =
+        static_cast<std::int64_t>(kTilePixels) * bytesPerPixelOf(pl->depth());
+    if ((srcTiles + dstTiles) * bytesPerTile > kMaxMoveBytes) return nullptr;
 
     // Native depth, no float round trip: a translation is a copy, so it neither needs the
     // working-float image nor should pay for it.
