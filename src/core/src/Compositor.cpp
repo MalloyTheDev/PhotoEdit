@@ -24,7 +24,17 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
 
     // Coverage of the most recent non-clipped (base) layer, so clipped layers above
     // can be confined to it. baseValid is false until a base layer is seen.
-    std::vector<float> baseClipAlpha(static_cast<std::size_t>(kTilePixels), 0.0f);
+    //
+    // Only a CLIPPED layer ever reads this, and clipping never crosses a group boundary (the
+    // recursion below hands each child stack its own), so one pass over this stack settles
+    // whether it is needed at all. Most documents have no clipped layer, and this used to be
+    // allocated and zero-filled unconditionally, per tile, per stack level, then written once
+    // per pixel for every visible base layer and never read. A full pass over a document at
+    // the project's target size is about 3.6 GB of allocate-and-write for nothing.
+    const bool anyClipped = std::any_of(stack.begin(), stack.end(),
+                                        [](const auto& l) { return l != nullptr && l->clipped(); });
+    std::vector<float> baseClipAlpha;
+    if (anyClipped) baseClipAlpha.assign(static_cast<std::size_t>(kTilePixels), 0.0f);
     bool baseValid = false;
 
     for (const auto& layerPtr : stack) {
@@ -132,12 +142,14 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
         // that is HIDDEN or has no content on this tile records ZERO coverage, so a
         // clipped run above it is hidden here (per the layer-system spec).
         if (hidden || !touches) {
-            std::fill(baseClipAlpha.begin(), baseClipAlpha.end(), 0.0f);
+            if (anyClipped) std::fill(baseClipAlpha.begin(), baseClipAlpha.end(), 0.0f);
             baseValid = true;
             continue;
         }
         renderSrc(layer);
-        for (std::size_t i = 0; i < src.size(); ++i) baseClipAlpha[i] = src[i].a;
+        if (anyClipped) {
+            for (std::size_t i = 0; i < src.size(); ++i) baseClipAlpha[i] = src[i].a;
+        }
         baseValid = true;
         blendSrcInto(layer);
     }

@@ -229,6 +229,32 @@ PE_TEST(composite_clipping_hidden_base_hides_run) {
     PE_CHECK(near8(img.at(0, 0), kBlue));  // red hidden with its base -> blue shows
 }
 
+PE_TEST(composite_clipping_does_not_cross_a_group_boundary) {
+    // The clip buffer is now allocated only when a layer at THAT stack level is clipped,
+    // which makes the group boundary load-bearing: a clipped layer inside a group must clip
+    // to a base inside the same group, and must not reach a base outside it. If clipping did
+    // cross the boundary, skipping the buffer at the outer level would change output.
+    //
+    // [white base OUTSIDE, group[ blue base covering the left half, red clipped ]]. The red
+    // clips to the blue inside the group, so it shows on the left and not on the right, and
+    // the outer white is what remains on the right. Were it clipping to the outer white it
+    // would cover the whole canvas.
+    std::vector<std::unique_ptr<Layer>> stack;
+    stack.push_back(solid(kWhite));  // outer base, full canvas
+
+    auto group = std::make_unique<GroupLayer>("G");
+    group->addChild(solid(kBlue, Rect{0, 0, 4, kH}));  // inner base: left half only
+    auto clip = solid(kRed);                           // full canvas, clipped
+    clip->setClipped(true);
+    group->addChild(std::move(clip));
+    stack.push_back(std::move(group));
+
+    PixelBuffer img = compositeToImage(stack, kCanvas);
+    PE_CHECK(near8(img.at(0, 0), kRed));    // left: clipped onto the group's own base
+    PE_CHECK(near8(img.at(6, 0), kWhite));  // right: outside the inner base, so the outer
+                                            // white shows through, not red
+}
+
 PE_TEST(composite_clipping_without_base_is_normal) {
     // A clipped layer with nothing below it behaves like a normal layer.
     std::vector<std::unique_ptr<Layer>> stack;
