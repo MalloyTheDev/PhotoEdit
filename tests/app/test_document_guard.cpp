@@ -172,6 +172,14 @@ PE_TEST(mainwindow_exit_action_is_not_wired_straight_to_quit) {
 
     // Triggering it on a clean window must close that window, not terminate the
     // process, which would take the rest of the suite with it.
+    //
+    // The window has to be SHOWN first. This previously asserted !isVisible() on a window
+    // that was never shown, so the condition was already true before the action ran: rewiring
+    // Exit straight back to QApplication::quit left the test green, since quit() is a no-op
+    // in a suite with no running event loop. That is exactly the regression the test names in
+    // its own first line.
+    w.show();
+    PE_CHECK(w.isVisible());  // and the premise really holds before we trigger
     exitAction->trigger();
     PE_CHECK(!w.isVisible());
 }

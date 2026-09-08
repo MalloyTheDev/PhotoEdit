@@ -20,6 +20,8 @@
 #include "pe/core/Selection.hpp"
 #include "pe_test.hpp"
 
+#include <iterator>
+
 #include <QAction>
 #include <QColor>
 #include <QDockWidget>
@@ -756,38 +758,62 @@ PE_TEST(mainwindow_an_accepted_operation_emits_no_refusal) {
 }
 
 PE_TEST(refusal_code_category_and_retry_cannot_disagree) {
-    // pe::refuse derives the category and the retry semantics from the code, so a caller
-    // cannot file one under the wrong class. Checked over every code rather than a sample,
-    // since the mapping is the thing a new code is most likely to get wrong.
-    const pe::RefusalCode codes[] = {
-        pe::RefusalCode::NoDocument,
-        pe::RefusalCode::NoActiveLayer,
-        pe::RefusalCode::NoSelection,
-        pe::RefusalCode::LayerNotPixel,
-        pe::RefusalCode::LayerHasNoMask,
-        pe::RefusalCode::LayerAlreadyHasMask,
-        pe::RefusalCode::LayerNotAdjustment,
-        pe::RefusalCode::LayerNotText,
-        pe::RefusalCode::LayerNotTopLevel,
-        pe::RefusalCode::LayerNotGroup,
-        pe::RefusalCode::NoEffect,
-        pe::RefusalCode::StrokeInProgress,
-        pe::RefusalCode::TransformInProgress,
-        pe::RefusalCode::PointOutsideCanvas,
-        pe::RefusalCode::OverSizeBudget,
-        pe::RefusalCode::Unsupported,
+    // Every code's expected classification, written out BY HAND.
+    //
+    // This test used to compute the expectation the way pe::refuse computes it, asserting
+    // `r.category == pe::categoryOf(c)` and re-deriving retryMeaningful and fixableByState
+    // from the same expressions the implementation uses. That is the implementation as its
+    // own oracle: change categoryOf so NoSelection returns Unsupported and every no-selection
+    // refusal in the shell is filed under the wrong class, fixableByState flips to false so
+    // the UI stops telling the user the state is fixable, and the test stays green.
+    //
+    // A literal table is the only thing that catches that, and it is the mapping a NEW code
+    // is most likely to get wrong, which is what the old comment claimed to be testing.
+    struct Expected {
+        pe::RefusalCode code;
+        pe::RefusalCategory category;
+        bool retryMeaningful;
+        bool fixableByState;
     };
-    for (const pe::RefusalCode c : codes) {
-        const pe::Refusal r = pe::refuse("t", c, "a", "e");
+    using C = pe::RefusalCode;
+    using K = pe::RefusalCategory;
+    const Expected table[] = {
+        // nothing to act on
+        {C::NoDocument, K::NoTarget, false, true},
+        {C::NoActiveLayer, K::NoTarget, false, true},
+        {C::NoSelection, K::NoTarget, false, true},
+        // wrong kind of target, or wrong state
+        {C::LayerNotPixel, K::WrongTarget, false, true},
+        {C::LayerHasNoMask, K::WrongTarget, false, true},
+        {C::LayerAlreadyHasMask, K::WrongTarget, false, true},
+        {C::LayerNotAdjustment, K::WrongTarget, false, true},
+        {C::LayerNotText, K::WrongTarget, false, true},
+        {C::LayerNotTopLevel, K::WrongTarget, false, true},
+        {C::LayerNotGroup, K::WrongTarget, false, true},
+        {C::PointOutsideCanvas, K::WrongTarget, false, true},
+        // would change nothing
+        {C::NoEffect, K::NoEffect, false, true},
+        // an edit is in flight: the only category worth retrying unchanged
+        {C::StrokeInProgress, K::Busy, true, true},
+        {C::TransformInProgress, K::Busy, true, true},
+        // beyond the user's reach
+        {C::OverSizeBudget, K::OverBudget, false, false},
+        {C::Unsupported, K::Unsupported, false, false},
+    };
+    for (const Expected& e : table) {
+        const pe::Refusal r = pe::refuse("t", e.code, "a", "e");
         PE_CHECK(r.isRefusal());
-        PE_CHECK(r.category == pe::categoryOf(c));
-        PE_CHECK_EQ(r.retryMeaningful, r.category == pe::RefusalCategory::Busy);
+        PE_CHECK(r.category == e.category);
+        PE_CHECK_EQ(r.retryMeaningful, e.retryMeaningful);
         // Over budget is not fixable by re-aiming at a different layer: it stays over
         // budget. The over-budget message says retrying is pointless, and the flag has to
         // agree with the sentence.
-        PE_CHECK_EQ(r.fixableByState, r.category != pe::RefusalCategory::Unsupported &&
-                                          r.category != pe::RefusalCategory::OverBudget);
+        PE_CHECK_EQ(r.fixableByState, e.fixableByState);
     }
+    // Only Busy is worth retrying, and only Unsupported and OverBudget are beyond the user's
+    // reach. Asserted over the table rather than assumed, so a code added without a row here
+    // shows up as a count mismatch rather than passing silently.
+    PE_CHECK_EQ(std::size(table), static_cast<std::size_t>(16));
     // None is not a refusal, so a default-constructed value cannot be mistaken for one.
     PE_CHECK(!pe::Refusal{}.isRefusal());
 }

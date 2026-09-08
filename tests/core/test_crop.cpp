@@ -7,6 +7,8 @@
 #include "pe/core/TextLayer.hpp"
 #include "pe_test.hpp"
 
+#include <cstdint>
+
 #include <memory>
 
 using namespace pe;
@@ -219,6 +221,47 @@ PE_TEST(crop_shifts_a_layer_mask_with_its_pixels) {
     const MaskBuffer& back = base(*doc)->mask()->buffer();
     PE_CHECK_EQ(static_cast<int>(back.value(20, 18)), static_cast<int>(MaskBuffer::kClear));
     PE_CHECK_EQ(static_cast<int>(back.value(10, 10)), static_cast<int>(MaskBuffer::kOpaque));
+}
+
+PE_TEST(crop_shifts_a_mask_on_a_document_the_old_area_cap_refused) {
+    // A crop refuses as a WHOLE when any part of the geometry cannot be shifted, so the mask
+    // budget must never be tighter than the pixel-move budget. It briefly was: the move
+    // budget became a byte budget and this one stayed at the old 16 MP area cap, so a
+    // 5000x5000 document could have its pixels shifted and not its masks. One mask then made
+    // the crop refuse outright and the #180 fix evaporated for any masked document, which is
+    // most real ones.
+    auto doc = Document::createBlank(Size{5000, 5000});
+    PE_REQUIRE(doc != nullptr);
+    PixelLayer* pl = base(*doc);
+    pl->tiles().setPixel(1200, 1200, Rgba8{200, 50, 50, 255});
+    pl->tiles().setPixel(4990, 4990, Rgba8{9, 9, 9, 255});  // bbox ~5120x5120, over 16 MP
+
+    // The mask must SPAN a large box, not merely exist: canTranslate budgets the mask's
+    // tile-granular contentBounds, so a mask with one small rect never approaches the cap
+    // however big the document is. Two marks at opposite corners give a ~5120x5120 box,
+    // which is over the old 16 MP number and under the current one.
+    auto mask = std::make_unique<Mask>();
+    mask->buffer().fillRect(Rect{1200, 1200, 4, 4}, MaskBuffer::kClear);
+    mask->buffer().setValue(4995, 4995, MaskBuffer::kClear);
+    pl->setMask(std::move(mask));
+    PE_CHECK(static_cast<std::int64_t>(pl->mask()->buffer().contentBounds().width) *
+                 pl->mask()->buffer().contentBounds().height >
+             16'000'000);
+
+    // A shift that is NOT a whole-tile multiple, so canTranslate takes the budgeted path
+    // rather than the free rekey.
+    doc->history().push(std::make_unique<CropCommand>(Rect{1000, 1000, 1000, 1000}));
+    PE_CHECK_EQ(doc->canvasSize().width, 1000);  // the crop happened at all
+    PE_CHECK_EQ(base(*doc)->tiles().pixel(200, 200), (Rgba8{200, 50, 50, 255}));
+    // And the mask moved with the pixels rather than staying at the pre-crop coordinates.
+    const MaskBuffer& mb = base(*doc)->mask()->buffer();
+    PE_CHECK_EQ(static_cast<int>(mb.value(200, 200)), static_cast<int>(MaskBuffer::kClear));
+    PE_CHECK_EQ(static_cast<int>(mb.value(1200, 1200)), static_cast<int>(MaskBuffer::kOpaque));
+
+    doc->history().undo();
+    PE_CHECK_EQ(doc->canvasSize().width, 5000);
+    PE_CHECK_EQ(static_cast<int>(base(*doc)->mask()->buffer().value(1200, 1200)),
+                static_cast<int>(MaskBuffer::kClear));
 }
 
 PE_TEST(crop_shifts_a_text_layer_raster_origin) {

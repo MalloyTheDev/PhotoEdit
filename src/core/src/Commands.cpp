@@ -34,10 +34,17 @@ DocumentChange structureChange(Rect region, LayerId id) {
 
 // Collect every PIXEL layer id in the tree (descending into groups), for the crop content
 // shift — a group's pixel children live in document space and must move with everything else.
-// Budget for shifting a mask during a crop. Matched to the pixel-move budget the
-// crop already depends on (kMaxFilterPixels), so a document that can have its pixels
-// shifted can have its masks shifted too, and the crop refuses as a whole otherwise.
-constexpr int64_t kMaxCropGeometryPixels = 16'000'000;
+// Budget for shifting a mask during a crop.
+//
+// It must not be TIGHTER than the pixel-move budget, or a crop whose pixel shift succeeds is
+// refused as a whole the moment any layer carries a mask. That is what happened when the move
+// budget moved to kMaxMoveBytes and this one stayed at kMaxFilterPixels: a 5000x5000 document
+// could have its pixels shifted and not its masks, so one mask made the crop refuse and the
+// #180 fix evaporated.
+//
+// Expressed in the same terms as the move budget, at a mask's one byte per pixel, so the two
+// stay tied together rather than being two numbers someone has to remember to update.
+constexpr int64_t kMaxCropGeometryPixels = kMaxMoveBytes;  // 1 byte per pixel of coverage
 
 // Every layer in the tree, groups included. collectPixelLayers deliberately returns
 // only paintable leaves; geometry shifting has to consider masks (which live on the
