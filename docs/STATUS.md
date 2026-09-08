@@ -137,10 +137,13 @@ every path; verified against truncation / garbage / oversized / extreme-aspect i
 
 - **PNG** (libpng simplified API), **JPEG** (libjpeg-turbo / TurboJPEG), **TIFF**
   (libtiff, in-memory client + magic-validated), **WebP** (libwebp, lossless).
-- **Native `.pedoc`** (v4) — a self-contained, bounds-checked binary format that
+- **Native `.pedoc`** — a self-contained, bounds-checked binary format that
   preserves the layer **tree**: canvas metadata, recursive groups, per-layer
   properties, nested active layer, **layer masks**, and **zlib-compressed** pixel
-  blocks. The reader is fuzz-tested against every prefix truncation.
+  blocks. The writer emits v6, or v7 when a layer holds content outside the canvas;
+  the reader accepts v4 and up. Blocks are written at DEFLATE level 1 and stored raw
+  when compression would not shrink them. The reader is fuzz-tested against every
+  prefix truncation.
 - **Document I/O** — `importDocument`/`exportDocument` + path-level
   `loadDocument`/`saveDocument` (see App above).
 

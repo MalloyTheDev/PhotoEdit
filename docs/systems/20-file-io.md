@@ -35,13 +35,13 @@ are the source of truth — a format never dictates the model, it serves it.
   for web, batch export, asset export, local save, and cloud-document save. Each
   resolves to an importer or exporter plus a target (path, stream, or cloud
   handle).
-- **Formats (read/write):** the **native PhotoEdit format** (`.peb`), **PSD**,
+- **Formats (read/write):** the **native PhotoEdit format** (`.pedoc`), **PSD**,
   **PSB**, **PNG**, **JPEG**, **WebP**, **TIFF**, **GIF**, **BMP**, **PDF**,
   **TGA**, **EXR**. Each obeys its own rules (the table below is normative):
 
   | Format | Layers | Depth | Alpha | Lossy | Notes |
   | --- | --- | --- | --- | --- | --- |
-  | Native `.peb` | full tree | 8/16/32f | yes | no | full-fidelity round-trip; versioned |
+  | Native `.pedoc` | full tree | 8/16/32f | yes | no | full-fidelity round-trip; versioned |
   | PSD | common tree | 8/16/32 | yes | no | interchange, not bit-parity; ≤30k px |
   | PSB | common tree | 8/16/32 | yes | no | like PSD for **huge** docs (>30k px) |
   | PNG | flatten | 8/16 | yes | no | lossless; transparency |
@@ -235,7 +235,7 @@ export(doc, opts):
 quantizing to ≤256 colors for GIF, collapsing layers for PNG/BMP, splitting named
 channels for EXR, keeping layers for native/PSD/layered-TIFF.
 
-**The native format (`.peb`) round-trip.** Write each model part as a chunk;
+**The native format (`.pedoc`) round-trip.** Write each model part as a chunk;
 `LayerTiles` walks each pixel layer's populated tiles and writes a compressed
 block per `TileCoord` (so a 30k×30k document with sparse content stays small and
 streams). Read reverses it, faulting tiles lazily so opening a huge document does
@@ -358,7 +358,7 @@ documents/presets as a queue on the worker pool, reusing the same `ImageExporter
 artboard** (named by layer/artboard) into a folder, each through the exporter with
 its own scale/format. Both are "many small exports," so they reuse one path.
 
-**Cloud vs. local save.** *Local save* writes a `.peb` (or chosen format) to the
+**Cloud vs. local save.** *Local save* writes a `.pedoc` (or chosen format) to the
 filesystem. *Cloud-document save* serializes the **same native model** to the
 cloud store ([cloud / account](28-cloud-account.md)) — possibly chunk-delta'd for
 sync — but the bytes are the native format; the cloud is a transport, not a second
@@ -425,16 +425,16 @@ format.
   refuses to silently destroy HDR range and asks for an explicit conversion.
 - **Native format version newer than the app:** open is gated with a clear message;
   known additive bumps still load (unknown chunks skipped).
-- **Smart objects / linked sources:** embedded sources serialize into `.peb`;
+- **Smart objects / linked sources:** embedded sources serialize into `.pedoc`;
   linked sources store a path + checksum and re-link (or warn) on open.
 
 ## Testing strategy
 
 - **Native round-trip (the headline test):** build a document exercising every
   model feature (all layer kinds, masks, channels, paths, smart objects + smart
-  filters, 8/16/32-bit, profile, metadata), write `.peb`, read back, and assert
+  filters, 8/16/32-bit, profile, metadata), write `.pedoc`, read back, and assert
   **structural and pixel equality** — zero loss.
-- **Streaming / huge documents:** write and re-read a sparse 30k×30k `.peb` (and a
+- **Streaming / huge documents:** write and re-read a sparse 30k×30k `.pedoc` (and a
   PSB) with a capped RAM budget; assert peak memory stays bounded and tiles fault
   lazily.
 - **Format-rule tests:** per format, assert capabilities are honored — JPEG drops
@@ -471,7 +471,7 @@ format.
 - **Native container substrate:** a fully bespoke chunk format vs. a structured
   container (zip-of-parts / SQLite) under the same chunk semantics — ADR-0007 calls
   this an implementation detail; we'll settle it with streaming/perf data.
-- **History in `.peb`:** optional today; what's the default, and how do we bound the
+- **History in `.pedoc`:** optional today; what's the default, and how do we bound the
   size when included?
 - **PSD passthrough blocks:** how much exotic structure do we round-trip opaquely
   vs. drop with a report?
