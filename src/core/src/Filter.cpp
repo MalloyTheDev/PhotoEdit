@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace pe {
@@ -470,6 +471,127 @@ std::unique_ptr<PaintCommand> moveContentImpl(LayerId layerId, TileStoreT<Pixel>
     return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), std::move(name));
 }
 
+// Depth-generic core of transformLayerContent: resample a layer through `inv` (the DESTINATION
+// to SOURCE map) one destination tile at a time, at the layer's native depth.
+//
+// Why this exists rather than routing a transform through bakePixelEditImpl. The generic bake
+// reads the whole region into std::vector<Rgbaf> and copies it twice more, about 48 bytes per
+// pixel of transient float, and kMaxFilterPixels (16 MP) exists to bound exactly that. Unlike
+// a Move, a resample genuinely needs float and genuinely needs interpolated reads, so it
+// cannot simply skip them. What it does NOT need is the whole region at once: a destination
+// pixel reads a 2x2 neighbourhood of the SOURCE, so each destination tile can be built on its
+// own straight out of the tile store.
+//
+// That is what lifts the cap. Free Transform used to decline in silence on any layer whose
+// content bounds exceeded 16 MP, which is every photograph from a modern camera: the handles
+// moved and the pixels did not (#180).
+//
+// Source reads go through a one-entry tile memo. The four bilinear taps of one destination
+// pixel almost always land in the same source tile, and consecutive destination pixels land in
+// the same tile as each other, so this turns four map lookups per pixel into roughly one per
+// tile crossing. Resolving per tap is the access pattern #176 removed from the .pedoc writer
+// and #168 removed from Selection, and it is not being reintroduced here.
+template <class Pixel>
+std::unique_ptr<PaintCommand> transformContentImpl(LayerId layerId, TileStoreT<Pixel>& store,
+                                                   Rect src, Rect region, const Affine2D& inv,
+                                                   std::string name) {
+    // Nothing in this pass mutates the store, so a resolved tile pointer stays valid
+    // throughout. sharedTile below only arms the copy-on-write flag.
+    TileCoord memoCoord{std::numeric_limits<int>::min(), std::numeric_limits<int>::min()};
+    const TileDataT<Pixel>* memoTile = nullptr;
+    const auto sourceAt = [&](int sx, int sy) -> Rgbaf {
+        if (sx < src.left() || sx >= src.right() || sy < src.top() || sy >= src.bottom()) {
+            return Rgbaf{};  // outside the content: transparent, never a stale colour
+        }
+        const TileCoord c{floorDiv(sx, kTileSize), floorDiv(sy, kTileSize)};
+        if (c.col != memoCoord.col || c.row != memoCoord.row) {
+            memoCoord = c;
+            memoTile = store.find(c);
+        }
+        if (memoTile == nullptr) return Rgbaf{};
+        return premultiply(toFloat(memoTile->at(tileLocalOffset(sx), tileLocalOffset(sy))));
+    };
+
+    // Bilinear in PREMULTIPLIED space, so the arbitrary colour of a transparent pixel cannot
+    // bleed into its neighbours, then back to straight alpha. Identical arithmetic to the
+    // region-based sampler this replaces; only where the taps come from has changed.
+    const auto lerp = [](const Rgbaf& a, const Rgbaf& b, float t) {
+        return Rgbaf{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t,
+                     a.a + (b.a - a.a) * t};
+    };
+    const auto sample = [&](double fx, double fy) -> Rgbaf {
+        if (!std::isfinite(fx) || !std::isfinite(fy)) return Rgbaf{};
+        const double flx = std::floor(fx);
+        const double fly = std::floor(fy);
+        // One pixel of slack on every side, so a destination pixel whose centre maps just
+        // outside the content still receives its fractional edge tap and the anti-aliased
+        // fringe survives. Also keeps the casts below in range.
+        if (flx < static_cast<double>(src.left()) - 2.0 ||
+            flx > static_cast<double>(src.right()) + 1.0 ||
+            fly < static_cast<double>(src.top()) - 2.0 ||
+            fly > static_cast<double>(src.bottom()) + 1.0) {
+            return Rgbaf{};
+        }
+        const int x0 = static_cast<int>(flx);
+        const int y0 = static_cast<int>(fly);
+        const float tx = static_cast<float>(fx - flx);
+        const float ty = static_cast<float>(fy - fly);
+        const Rgbaf top = lerp(sourceAt(x0, y0), sourceAt(x0 + 1, y0), tx);
+        const Rgbaf bot = lerp(sourceAt(x0, y0 + 1), sourceAt(x0 + 1, y0 + 1), tx);
+        return unpremultiply(lerp(top, bot, ty));
+    };
+
+    std::vector<PaintCommand::DeltaT<Pixel>> deltas;
+    Rect dirty{};
+    const TileSpan span = tilesForRect(region);
+    for (int row = span.rowBegin; row < span.rowEnd; ++row) {
+        for (int col = span.colBegin; col < span.colEnd; ++col) {
+            const TileCoord coord{col, row};
+            const Rect tb = tileBounds(coord);
+            const Rect vis = tb.intersected(region);
+            if (vis.isEmpty()) continue;
+
+            std::shared_ptr<TileDataT<Pixel>> before = store.sharedTile(coord);
+            auto after = std::make_shared<TileDataT<Pixel>>();
+            if (before) *after = *before;
+
+            bool changed = false;
+            for (int y = vis.top(); y < vis.bottom(); ++y) {
+                const std::size_t rowBase =
+                    static_cast<std::size_t>(y - tb.top()) * static_cast<std::size_t>(kTileSize);
+                for (int x = vis.left(); x < vis.right(); ++x) {
+                    const double ddx = static_cast<double>(x) + 0.5;  // pixel CENTRE
+                    const double ddy = static_cast<double>(y) + 0.5;
+                    const Pixel np = fromFloat<Pixel>(
+                        sample(inv.applyX(ddx, ddy) - 0.5, inv.applyY(ddx, ddy) - 0.5));
+                    const std::size_t li = rowBase + static_cast<std::size_t>(x - tb.left());
+                    if (!pixelEqual(np, after->px[li])) {
+                        after->px[li] = np;
+                        changed = true;
+                    }
+                }
+            }
+            if (changed) {
+                // An emptied tile is removed rather than stored transparent, for the same
+                // reason as a Move: otherwise contentBounds permanently spans the vacated
+                // source as well as the destination, and every filter is bounded by that.
+                bool empty = true;
+                for (const Pixel& px : after->px) {
+                    if (!pixelEqual(px, Pixel{})) {
+                        empty = false;
+                        break;
+                    }
+                }
+                deltas.push_back(PaintCommand::DeltaT<Pixel>{coord, std::move(before),
+                                                             empty ? nullptr : std::move(after)});
+                dirty = dirty.united(vis);
+            }
+        }
+    }
+    if (deltas.empty()) return nullptr;
+    return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), std::move(name));
+}
+
 // Depth-generic core of bakePixelEdit: read the content rect from `store` at its
 // native depth into a working-float image, run `transform`, then write the result
 // back as native-depth tile deltas (with optional selection gating). One template
@@ -816,54 +938,33 @@ std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layer
     const Rect dst{dl, dt, dr - dl, db - dt};
     if (dst.isEmpty()) return nullptr;
 
-    // The edit spans both the vacated source and the destination: clear the old pixels and write
-    // the resampled ones in one reversible in-region transform. bakePixelEditRegion caps the area
-    // (kMaxFilterPixels) and the origin/extent, so the destination size is bounded there.
+    // The edit spans both the vacated source and the destination: clear the old pixels and
+    // write the resampled ones in one reversible in-region transform.
     const Rect region = src.united(dst);
+    if (!withinCoordinateRange(region)) return nullptr;
+
+    // Bounded in BYTES by the tiles it touches, exactly as a Move is, rather than by
+    // kMaxFilterPixels. The resample builds one destination tile at a time out of the store,
+    // so it allocates nothing region-sized and the filter budget never applied to it. That
+    // budget is what made Free Transform decline in silence on any photograph (#180).
+    auto* pl = static_cast<PixelLayer*>(layer);
+    const std::int64_t bytes = (tileCountOf(src) + tileCountOf(dst)) *
+                               static_cast<std::int64_t>(kTilePixels) *
+                               bytesPerPixelOf(pl->depth());
+    if (bytes > kMaxMoveBytes) return nullptr;
+
     const Affine2D inv = srcToDst.inverted();
-    const int rx = region.x;
-    const int ry = region.y;
-    return bakePixelEditRegion(
-        doc, layerId, "Transform", region,
-        [inv, rx, ry](std::span<Rgbaf> img, int w, int h) {
-            const std::vector<Rgbaf> orig(img.begin(), img.end());
-            // Premultiplied bilinear sample of `orig` at continuous pixel index (fx, fy); fully
-            // outside (or non-finite) reads transparent, so the transform never bleeds the
-            // arbitrary color of transparent pixels and the int casts below can't go out of range.
-            const auto sample = [&](double fx, double fy) -> Rgbaf {
-                if (!std::isfinite(fx) || !std::isfinite(fy) || fx < -1.0 || fy < -1.0 ||
-                    fx > static_cast<double>(w) || fy > static_cast<double>(h)) {
-                    return Rgbaf{};
-                }
-                const int x0 = static_cast<int>(std::floor(fx));
-                const int y0 = static_cast<int>(std::floor(fy));
-                const float tx = static_cast<float>(fx - x0);
-                const float ty = static_cast<float>(fy - y0);
-                const auto at = [&](int xi, int yi) -> Rgbaf {
-                    if (xi < 0 || xi >= w || yi < 0 || yi >= h) return Rgbaf{};
-                    return premultiply(orig[idx(xi, yi, w)]);
-                };
-                const auto lerp = [](const Rgbaf& a, const Rgbaf& b, float t) {
-                    return Rgbaf{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
-                                 a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
-                };
-                const Rgbaf top = lerp(at(x0, y0), at(x0 + 1, y0), tx);
-                const Rgbaf bot = lerp(at(x0, y0 + 1), at(x0 + 1, y0 + 1), tx);
-                return unpremultiply(lerp(top, bot, ty));
-            };
-            for (int y = 0; y < h; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    // Inverse-map this destination pixel's CENTER to a source document coordinate,
-                    // then to a region-local pixel index (center of index i sits at rx+i+0.5).
-                    const double ddx = static_cast<double>(rx) + x + 0.5;
-                    const double ddy = static_cast<double>(ry) + y + 0.5;
-                    const double sxDoc = inv.applyX(ddx, ddy);
-                    const double syDoc = inv.applyY(ddx, ddy);
-                    img[idx(x, y, w)] = sample(sxDoc - rx - 0.5, syDoc - ry - 0.5);
-                }
-            }
-        },
-        /*selection=*/nullptr);  // the Transform tool transforms the whole layer
+    switch (pl->depth()) {
+        case BitDepth::U16:
+            return transformContentImpl<Rgba16>(layerId, pl->tiles16(), src, region, inv,
+                                                "Transform");
+        case BitDepth::F32:
+            return transformContentImpl<Rgbaf>(layerId, pl->tilesF(), src, region, inv,
+                                               "Transform");
+        case BitDepth::U8:
+        default:
+            return transformContentImpl<Rgba8>(layerId, pl->tiles(), src, region, inv, "Transform");
+    }
 }
 
 std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const Filter& filter,

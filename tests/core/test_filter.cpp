@@ -643,6 +643,186 @@ PE_TEST(move_refuses_past_the_memory_budget) {
     PE_CHECK_EQ(pl->tiles().pixel(1, 1), (Rgba8{1, 2, 3, 255}));  // and nothing moved
 }
 
+namespace {
+
+// What a resample means, computed independently of how it is implemented: read the whole
+// region into float once, and bilinearly sample THAT. This is the shape the tile-streamed
+// path replaced, so it cannot share a traversal bug with it. Same role the per-pixel oracle
+// played for the .pedoc gather in #176 and for Selection's run writer in #168.
+std::vector<Rgbaf> transformReference(const TileStoreT<Rgba8>& store, Rect src, Rect region,
+                                      const Affine2D& inv) {
+    const int w = region.width;
+    const int h = region.height;
+    std::vector<Rgbaf> orig(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            orig[static_cast<std::size_t>(y) * w + x] =
+                toFloat(store.pixel(region.left() + x, region.top() + y));
+        }
+    }
+    const auto at = [&](int xi, int yi) -> Rgbaf {
+        const int lx = xi - region.left();
+        const int ly = yi - region.top();
+        if (lx < 0 || lx >= w || ly < 0 || ly >= h) return Rgbaf{};
+        if (xi < src.left() || xi >= src.right() || yi < src.top() || yi >= src.bottom()) {
+            return Rgbaf{};
+        }
+        return premultiply(orig[static_cast<std::size_t>(ly) * w + lx]);
+    };
+    const auto lerp = [](const Rgbaf& a, const Rgbaf& b, float t) {
+        return Rgbaf{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t,
+                     a.a + (b.a - a.a) * t};
+    };
+    std::vector<Rgbaf> out(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const double fx = inv.applyX(region.left() + x + 0.5, region.top() + y + 0.5) - 0.5;
+            const double fy = inv.applyY(region.left() + x + 0.5, region.top() + y + 0.5) - 0.5;
+            Rgbaf v{};
+            if (std::isfinite(fx) && std::isfinite(fy)) {
+                const double flx = std::floor(fx);
+                const double fly = std::floor(fy);
+                const int x0 = static_cast<int>(flx);
+                const int y0 = static_cast<int>(fly);
+                const float tx = static_cast<float>(fx - flx);
+                const float ty = static_cast<float>(fy - fly);
+                const Rgbaf top = lerp(at(x0, y0), at(x0 + 1, y0), tx);
+                const Rgbaf bot = lerp(at(x0, y0 + 1), at(x0 + 1, y0 + 1), tx);
+                v = unpremultiply(lerp(top, bot, ty));
+            }
+            out[static_cast<std::size_t>(y) * w + x] = v;
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+PE_TEST(transform_matches_a_whole_region_reference_across_tile_boundaries) {
+    // The resample is now built one destination tile at a time out of the tile store, with a
+    // one-entry memo over the source. Every interesting case is therefore a destination tile
+    // whose inverse image straddles a source tile boundary, or lands outside the content
+    // entirely, which is where a memo that failed to invalidate would show up.
+    constexpr int T = kTileSize;
+    const Affine2D cases[] = {
+        Affine2D::rotation(0.30),  Affine2D::scaling(1.7, 0.6),  Affine2D::translation(12.5, -7.25),
+        Affine2D::rotation(-0.15), Affine2D::scaling(0.45, 2.1),
+    };
+    for (const Affine2D& m : cases) {
+        auto doc = Document::createBlank(Size{3 * T, 2 * T});
+        PE_REQUIRE(doc != nullptr);
+        const LayerId base = doc->activeLayer();
+        auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+        // Content straddling the first tile boundary, with gaps and a far corner, so the
+        // inverse image of a destination tile lands on several source tiles and on none.
+        pl->tiles().fillRect(Rect{T - 20, T - 20, 45, 45}, Rgba8{200, 50, 50, 255});
+        pl->tiles().fillRect(Rect{5, 5, 12, 12}, Rgba8{20, 180, 90, 255});
+        pl->tiles().setPixel(2 * T + 9, T + 9, Rgba8{9, 9, 240, 255});
+
+        const Rect src = pl->contentBounds();
+        const TileStoreT<Rgba8> snapshot = pl->tiles();  // the pre-transform pixels
+
+        auto cmd = transformLayerContent(*doc, base, m);
+        PE_REQUIRE(cmd != nullptr);
+        doc->history().push(std::move(cmd));
+
+        // Recompute the region the implementation used, from the same corners it uses.
+        const Rect after = pl->contentBounds();
+        const Rect probe = src.united(after);
+        const std::vector<Rgbaf> want = transformReference(snapshot, src, probe, m.inverted());
+
+        int mismatches = 0;
+        for (int y = 0; y < probe.height; ++y) {
+            for (int x = 0; x < probe.width; ++x) {
+                const Rgba8 got = pl->tiles().pixel(probe.left() + x, probe.top() + y);
+                const Rgba8 exp =
+                    fromFloat<Rgba8>(want[static_cast<std::size_t>(y) * probe.width + x]);
+                if (!(got == exp)) ++mismatches;
+            }
+        }
+        PE_CHECK_EQ(mismatches, 0);
+    }
+}
+
+PE_TEST(transform_works_on_a_document_the_filter_cap_refused) {
+    // #180's other half. A resample was routed through the generic float bake, whose
+    // kMaxFilterPixels limit bounds several full-region float buffers. contentBounds is
+    // tile-aligned, so a 4000x4000 canvas reported 16.78 MP, over the cap, and Free Transform
+    // silently did nothing on any photograph: the handles moved and the pixels did not.
+    //
+    // A resample cannot skip float the way a Move can, but it does not need the whole region
+    // at once: one destination tile reads a 2x2 source neighbourhood, so the region-sized
+    // buffers the cap exists for never have to be allocated.
+    for (const Size canvas : {Size{4000, 4000}, Size{6000, 4000}}) {
+        auto doc = Document::createBlank(canvas);
+        PE_REQUIRE(doc != nullptr);
+        const LayerId base = doc->activeLayer();
+        auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+        pl->tiles().setPixel(10, 10, Rgba8{1, 2, 3, 255});
+        pl->tiles().setPixel(canvas.width - 10, canvas.height - 10, Rgba8{4, 5, 6, 255});
+        const Rect bounds = pl->contentBounds();
+        PE_CHECK(static_cast<std::int64_t>(bounds.width) * bounds.height > kMaxFilterPixels);
+
+        // A rotation, and a translation with a fractional part: neither takes the integer
+        // fast path, so both used to be refused outright.
+        PE_CHECK(transformLayerContent(*doc, base, Affine2D::rotation(0.1)) != nullptr);
+        auto cmd = transformLayerContent(*doc, base, Affine2D::translation(25.5, 25.5));
+        PE_REQUIRE(cmd != nullptr);
+        doc->history().push(std::move(cmd));
+        // The mark moved: 10 + 25.5 rounds through the sampler to land at 35 or 36.
+        const bool moved = pl->tiles().pixel(35, 35).a != 0 || pl->tiles().pixel(36, 36).a != 0;
+        PE_CHECK(moved);
+        doc->history().undo();
+        PE_CHECK_EQ(pl->tiles().pixel(10, 10), (Rgba8{1, 2, 3, 255}));
+    }
+}
+
+PE_TEST(transform_leaves_no_empty_tiles_behind_so_the_layer_stays_filterable) {
+    // Same rule as a Move, and it needs its own test because the two paths build their deltas
+    // separately. A vacated tile stored as fully transparent leaves contentBounds spanning the
+    // source as well as the destination forever, and every destructive filter is bounded by
+    // that rect, so one transform could make a layer permanently unfilterable over pixels that
+    // are all transparent.
+    constexpr int T = kTileSize;
+    auto doc = Document::createBlank(Size{8 * T, 8 * T});
+    PE_REQUIRE(doc != nullptr);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().fillRect(Rect{4, 4, 40, 40}, Rgba8{10, 20, 30, 255});
+    const std::size_t tilesBefore = pl->tiles().tileCount();
+    PE_CHECK_EQ(tilesBefore, static_cast<std::size_t>(1));
+
+    // A fractional translation, so it resamples rather than taking the integer fast path, far
+    // enough that the source tile empties completely.
+    auto cmd = transformLayerContent(*doc, base, Affine2D::translation(4 * T + 0.5, 4 * T + 0.5));
+    PE_REQUIRE(cmd != nullptr);
+    doc->history().push(std::move(cmd));
+
+    // Whatever tiles the resampled content lands in, the vacated one is not among them.
+    const Rect after = pl->contentBounds();
+    PE_CHECK(after.left() >= 4 * T);
+    PE_CHECK(after.top() >= 4 * T);
+    PE_CHECK_EQ(static_cast<int>(pl->tiles().pixel(20, 20).a), 0);  // source really is clear
+
+    doc->history().undo();
+    PE_CHECK_EQ(pl->tiles().tileCount(), tilesBefore);  // and undo restores the removed tile
+    PE_CHECK_EQ(pl->tiles().pixel(20, 20), (Rgba8{10, 20, 30, 255}));
+}
+
+PE_TEST(transform_refuses_past_the_memory_budget) {
+    // Bounded by the same byte budget a Move is, because it allocates the same thing: one
+    // replacement tile per touched tile, at the layer's own pixel size.
+    constexpr int T = kTileSize;
+    auto doc = Document::createBlank(Size{70 * T, 70 * T});
+    PE_REQUIRE(doc != nullptr);
+    const LayerId base = doc->activeLayer();
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(base));
+    pl->tiles().setPixel(1, 1, Rgba8{1, 2, 3, 255});
+    pl->tiles().setPixel(69 * T, 69 * T, Rgba8{4, 5, 6, 255});
+    PE_CHECK(transformLayerContent(*doc, base, Affine2D::rotation(0.1)) == nullptr);
+    PE_CHECK_EQ(pl->tiles().pixel(1, 1), (Rgba8{1, 2, 3, 255}));  // and nothing changed
+}
+
 PE_TEST(bucket_fill_floods_contiguous_region) {
     auto doc = Document::createBlank(Size{16, 16});
     const LayerId base = doc->activeLayer();
