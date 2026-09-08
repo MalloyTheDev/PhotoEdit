@@ -101,6 +101,36 @@ private:
 
     [[nodiscard]] uint8_t stored(int x, int y) const noexcept;  // 0 if absent
     void setValue(int x, int y, uint8_t v);
+
+    // Write one horizontal run of coverage, resolving the tile ONCE instead of once per
+    // pixel.
+    //
+    // PRECONDITION: the run lies wholly inside one tile, i.e. xEnd > xBegin and
+    // floorDiv(xBegin, kTileSize) == floorDiv(xEnd - 1, kTileSize). forEachRun below is the
+    // only intended caller and guarantees it.
+    //
+    // `src(x, y, current)` returns the new value; `current` is the stored coverage there, or
+    // 0 when the tile is absent, so a read-modify-write caller such as invert() reuses the
+    // one resolution for both halves. It must be pure and must not read back through
+    // stored()/value().
+    //
+    // Semantics are setValue's, byte for byte. An absent tile is created only when the run
+    // holds at least one non-zero value; once the tile exists every value is written
+    // verbatim, zeros included. That is what keeps tiles_ free of all-zero tiles, which
+    // selectedBounds() and the defaulted operator== both read directly. It does NOT replace
+    // dropEmptyTiles(): zeros written into an EXISTING tile can empty it, and only a
+    // full-tile scan sees that.
+    template <class Src>
+    void setRun(int y, int xBegin, int xEnd, Src&& src);
+
+    // Walk `r` as runs that each lie wholly inside one tile, calling setRun for each.
+    //
+    // The column range is computed once and iterated FIXED, rather than advancing x to a
+    // computed run end. That is the shape #176 established for the .pedoc gather, and the
+    // reason is recorded there: an off-by-one in such an advance livelocks rather than
+    // corrupting, and no test can tell a hang from a slow operation.
+    template <class Src>
+    void forEachRun(Rect r, Src&& src);
     // Replace coverage inside the mask's region, leaving coverage outside it untouched.
     // loadMask() clears everything first, which is only safe when the region provably
     // covers the whole selection.
@@ -116,6 +146,20 @@ private:
 // seed pixel whose color is within `tolerance` (max per-channel difference, 0..255) of the
 // seed's. Returns an inactive selection for an out-of-bounds seed, an empty image, or an
 // image past the engine's selection size cap. Sample from the composited canvas.
+// Diagnostics: how many coordinate-to-tile resolutions the mask WRITE paths have performed
+// since the process started. A write emits one value per pixel of its rect either way; what
+// must not scale with the pixel count is this. Same purpose and idiom as NativeFormat's
+// gatherTileLookupCount. Atomic because the wand runs on a worker thread.
+[[nodiscard]] std::uint64_t maskWriteTileLookupCount() noexcept;
+
+// Diagnostics: how many coverage tiles the mask write paths have ALLOCATED since the process
+// started. Separate from the lookup count because it answers a different question, and the
+// answer is invisible in the finished selection: dropEmptyTiles() erases an all-zero tile
+// after the fact, so a writer that materialises the whole region and then throws most of it
+// away produces exactly the same result. What it does not produce is the same peak, and on a
+// canvas-sized write that difference is hundreds of megabytes.
+[[nodiscard]] std::uint64_t maskTileAllocCount() noexcept;
+
 [[nodiscard]] Selection magicWandSelection(const PixelBuffer& image, int seedX, int seedY,
                                            int tolerance);
 

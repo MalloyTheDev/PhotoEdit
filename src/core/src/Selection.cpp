@@ -1,8 +1,11 @@
 #include "pe/core/Selection.hpp"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -16,6 +19,10 @@ namespace {
 constexpr int64_t kMaxSelectionPixels = 64'000'000;
 constexpr int64_t kMaxSelectionTiles = 4096;  // ~256 MB worst case
 constexpr int kCoordBound = 1 << 26;          // ~67M; keeps right()/bottom() in int
+
+// Diagnostics: coordinate-to-tile resolutions performed by the mask WRITE paths.
+std::atomic<uint64_t> g_maskWriteLookups{0};
+std::atomic<uint64_t> g_maskTileAllocs{0};
 
 int localIndex(int coord) noexcept {
     int m = coord % kTileSize;
@@ -65,13 +72,57 @@ void Selection::setValue(int x, int y, uint8_t v) {
                static_cast<std::size_t>(localIndex(x))] = v;
 }
 
-void Selection::fillRect(Rect r, uint8_t v) {
-    if (rejectFill(r)) return;
+template <class Src>
+void Selection::setRun(int y, int xBegin, int xEnd, Src&& src) {
+    if (xEnd <= xBegin) return;
+    const TileCoord c{floorDiv(xBegin, kTileSize), floorDiv(y, kTileSize)};
+    g_maskWriteLookups.fetch_add(1, std::memory_order_relaxed);
+    auto it = tiles_.find(keyOf(c));  // ONE lookup for the whole run
+    const std::size_t row = static_cast<std::size_t>(localIndex(y)) * kTileSize;
+    const int lx0 = localIndex(xBegin);
+
+    if (it != tiles_.end()) {  // present: write through, zeros included
+        GrayTile& tile = it->second;
+        int lx = lx0;
+        for (int x = xBegin; x < xEnd; ++x, ++lx) {
+            const std::size_t i = row + static_cast<std::size_t>(lx);
+            tile[i] = src(x, y, tile[i]);
+        }
+        return;
+    }
+    // Absent: `current` is 0 across the whole run, so the values are known without touching
+    // the map. setValue's rule, applied to a run: never allocate a tile to store only zeros.
+    std::array<uint8_t, kTileSize> out{};
+    const int n = xEnd - xBegin;
+    bool anyNonZero = false;
+    for (int i = 0; i < n; ++i) {
+        out[static_cast<std::size_t>(i)] = src(xBegin + i, y, static_cast<uint8_t>(0));
+        anyNonZero = anyNonZero || out[static_cast<std::size_t>(i)] != 0;
+    }
+    if (!anyNonZero) return;
+    g_maskTileAllocs.fetch_add(1, std::memory_order_relaxed);
+    GrayTile& tile = tiles_.emplace(keyOf(c), GrayTile{}).first->second;
+    std::copy_n(out.begin(), n,
+                tile.begin() + static_cast<std::ptrdiff_t>(row) + static_cast<std::ptrdiff_t>(lx0));
+}
+
+template <class Src>
+void Selection::forEachRun(Rect r, Src&& src) {
+    if (r.isEmpty()) return;
+    const int colBegin = floorDiv(r.left(), kTileSize);
+    const int colEnd = floorDiv(r.right() - 1, kTileSize) + 1;
     for (int y = r.top(); y < r.bottom(); ++y) {
-        for (int x = r.left(); x < r.right(); ++x) {
-            setValue(x, y, v);
+        for (int col = colBegin; col < colEnd; ++col) {
+            const int runBegin = std::max(r.left(), col * kTileSize);
+            const int runEnd = std::min(r.right(), (col + 1) * kTileSize);
+            setRun(y, runBegin, runEnd, src);
         }
     }
+}
+
+void Selection::fillRect(Rect r, uint8_t v) {
+    if (rejectFill(r)) return;
+    forEachRun(r, [v](int, int, uint8_t) { return v; });
 }
 
 void Selection::dropEmptyTiles() {
@@ -126,11 +177,9 @@ void Selection::writeMaskRegion(const PixelBuffer& mask, int originX, int origin
     // canvas on purpose, so it is the one caller whose region can be smaller.
     const Rect region{originX, originY, mask.width(), mask.height()};
     if (mask.isEmpty() || rejectFill(region)) return;
-    for (int y = 0; y < mask.height(); ++y) {
-        for (int x = 0; x < mask.width(); ++x) {
-            setValue(originX + x, originY + y, mask.at(x, y).r);
-        }
-    }
+    forEachRun(region, [&mask, originX, originY](int x, int y, uint8_t) {
+        return mask.at(x - originX, y - originY).r;
+    });
     dropEmptyTiles();  // keep selectedBounds tight (don't retain all-zero tiles)
 }
 
@@ -144,11 +193,9 @@ void Selection::loadMask(const PixelBuffer& mask, int originX, int originY) {
         return;
     }
     active_ = true;
-    for (int y = 0; y < mask.height(); ++y) {
-        for (int x = 0; x < mask.width(); ++x) {
-            setValue(originX + x, originY + y, mask.at(x, y).r);
-        }
-    }
+    forEachRun(region, [&mask, originX, originY](int x, int y, uint8_t) {
+        return mask.at(x - originX, y - originY).r;
+    });
     dropEmptyTiles();  // keep selectedBounds tight (don't retain all-zero tiles)
 }
 
@@ -226,12 +273,13 @@ void Selection::invert(Rect canvas) {
     // inverting Select All leave everything selected.
     const bool wasActive = active_;
     active_ = true;
-    for (int y = canvas.top(); y < canvas.bottom(); ++y) {
-        for (int x = canvas.left(); x < canvas.right(); ++x) {
-            const uint8_t current = wasActive ? stored(x, y) : static_cast<uint8_t>(255);
-            setValue(x, y, static_cast<uint8_t>(255 - current));
-        }
-    }
+    // One tile resolution serves both the read and the write of each run: `current` is the
+    // stored coverage the run walk already has in hand, where the old code paid a separate
+    // stored() lookup per pixel on top of the setValue one.
+    forEachRun(canvas, [wasActive](int, int, uint8_t current) {
+        const uint8_t cur = wasActive ? current : static_cast<uint8_t>(255);
+        return static_cast<uint8_t>(255 - cur);
+    });
     dropEmptyTiles();
 }
 
@@ -511,6 +559,14 @@ Rect Selection::tightBounds() const noexcept {
     }
     if (!any) return Rect{};
     return Rect{minX, minY, maxX - minX + 1, maxY - minY + 1};
+}
+
+std::uint64_t maskWriteTileLookupCount() noexcept {
+    return g_maskWriteLookups.load(std::memory_order_relaxed);
+}
+
+std::uint64_t maskTileAllocCount() noexcept {
+    return g_maskTileAllocs.load(std::memory_order_relaxed);
 }
 
 Selection magicWandSelection(const PixelBuffer& image, int seedX, int seedY, int tolerance) {

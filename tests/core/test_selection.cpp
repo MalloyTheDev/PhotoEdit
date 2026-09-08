@@ -1,7 +1,14 @@
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <iterator>
+#include <map>
+#include <utility>
 #include "pe/core/Brush.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Selection.hpp"
+#include "pe/core/Tile.hpp"
 #include "pe_test.hpp"
 
 #include <vector>
@@ -445,4 +452,244 @@ PE_TEST(selection_grow_and_feather_agree_about_off_canvas) {
     b.selectRect(Rect{-10, 20, 40, 20});
     b.feather(2.0f, canvas);
     PE_CHECK_EQ(static_cast<int>(b.value(-8, 30)), 255);  // feather leaves it alone
+}
+
+namespace {
+
+// The per-pixel semantics the run-based writer replaces, written out independently so a bug
+// in the new traversal cannot also be in the reference. Mirrors setValue exactly, including
+// "never allocate a tile just to write a zero", plus dropEmptyTiles.
+//
+// Same role the per-pixel accessor played as an oracle for the .pedoc gather in #176: the
+// abandoned path is the thing that says what the fast path must agree with.
+struct RefSelection {
+    std::map<std::pair<int, int>, std::array<std::uint8_t, kTilePixels>> tiles;
+
+    static int local(int c) {
+        int m = c % kTileSize;
+        if (m < 0) m += kTileSize;
+        return m;
+    }
+    void set(int x, int y, std::uint8_t v) {
+        const std::pair<int, int> k{floorDiv(x, kTileSize), floorDiv(y, kTileSize)};
+        auto it = tiles.find(k);
+        if (it == tiles.end()) {
+            if (v == 0) return;  // do not allocate a tile to store a zero
+            it = tiles.emplace(k, std::array<std::uint8_t, kTilePixels>{}).first;
+        }
+        it->second[static_cast<std::size_t>(local(y)) * kTileSize +
+                   static_cast<std::size_t>(local(x))] = v;
+    }
+    [[nodiscard]] std::uint8_t at(int x, int y) const {
+        const auto it = tiles.find({floorDiv(x, kTileSize), floorDiv(y, kTileSize)});
+        if (it == tiles.end()) return 0;
+        return it->second[static_cast<std::size_t>(local(y)) * kTileSize +
+                          static_cast<std::size_t>(local(x))];
+    }
+    void dropEmpty() {
+        for (auto it = tiles.begin(); it != tiles.end();) {
+            const bool allZero = std::all_of(it->second.begin(), it->second.end(),
+                                             [](std::uint8_t v) { return v == 0; });
+            it = allZero ? tiles.erase(it) : std::next(it);
+        }
+    }
+};
+
+// Compare coverage AND the tile set. tileCount is the canonical-form half: a spurious
+// all-zero tile is invisible to value() and to tightBounds(), but the defaulted operator==
+// compares the whole map, so two selections with identical coverage can still differ.
+bool matchesOracle(const Selection& sel, const RefSelection& ref, Rect probe) {
+    if (sel.tileCount() != ref.tiles.size()) return false;
+    for (int y = probe.top(); y < probe.bottom(); ++y) {
+        for (int x = probe.left(); x < probe.right(); ++x) {
+            if (sel.value(x, y) != ref.at(x, y)) return false;
+        }
+    }
+    return true;
+}
+
+Rect grown(Rect r, int by) {
+    return Rect{r.x - by, r.y - by, r.width + 2 * by, r.height + 2 * by};
+}
+
+// The geometries that matter for a run-splitting writer: edges landing exactly on, just
+// before and just after a tile boundary; spans crossing several tiles on each axis; and
+// negative coordinates, where a truncating divide lands in the wrong tile.
+std::vector<Rect> boundaryRects() {
+    constexpr int T = kTileSize;
+    return {
+        Rect{T - 1, T - 1, 1, 1},
+        Rect{T, T, 1, 1},
+        Rect{T + 1, T + 1, 1, 1},
+        Rect{T - 1, 0, 2, 1},
+        Rect{T - 1, 0, 2, T + 2},
+        Rect{0, 0, T, T},
+        Rect{0, 0, T + 1, T + 1},
+        Rect{5, 5, 1, 3 * T},
+        Rect{5, 5, 3 * T, 1},
+        Rect{-1, -1, 2, 2},
+        Rect{-T, -T, 1, 1},
+        Rect{-T - 1, -T - 1, 1, 1},
+        Rect{-T - 1, -T - 1, T + 2, T + 2},
+    };
+}
+
+}  // namespace
+
+PE_TEST(selection_fill_matches_the_per_pixel_oracle_at_tile_boundaries) {
+    for (const Rect r : boundaryRects()) {
+        Selection s;
+        s.selectRect(r);
+        RefSelection ref;
+        for (int y = r.top(); y < r.bottom(); ++y) {
+            for (int x = r.left(); x < r.right(); ++x) ref.set(x, y, 255);
+        }
+        ref.dropEmpty();
+        // Probe two pixels beyond every edge, so a run that emitted one pixel too many or
+        // too few shows up rather than hiding inside the filled area.
+        PE_CHECK(matchesOracle(s, ref, grown(r, 2)));
+    }
+}
+
+PE_TEST(selection_load_mask_matches_the_oracle_at_tile_boundaries) {
+    // The mask path is the harder one: the source stride and the tile stride disagree, and
+    // the origin is not tile-aligned. Origins include a negative one, which is the shape a
+    // crop produces.
+    constexpr int T = kTileSize;
+    for (const Point origin : {Point{0, 0}, Point{7, 3}, Point{T - 1, 1}, Point{-T - 7, -5}}) {
+        for (const Rect r : boundaryRects()) {
+            if (r.width > 3 * T || r.height > 3 * T) continue;  // keep the buffers small
+            PixelBuffer mask(r.width, r.height);
+            for (int y = 0; y < r.height; ++y) {
+                for (int x = 0; x < r.width; ++x) {
+                    // A value that varies, so a misplaced run is visible as a wrong VALUE and
+                    // not merely as wrong coverage.
+                    const auto v = static_cast<std::uint8_t>(((x * 7 + y * 13) % 255) + 1);
+                    mask.set(x, y, Rgba8{v, v, v, 255});
+                }
+            }
+            Selection s;
+            s.loadMask(mask, origin.x, origin.y);
+            RefSelection ref;
+            for (int y = 0; y < r.height; ++y) {
+                for (int x = 0; x < r.width; ++x) {
+                    ref.set(origin.x + x, origin.y + y, mask.at(x, y).r);
+                }
+            }
+            ref.dropEmpty();
+            PE_CHECK(matchesOracle(s, ref, grown(Rect{origin.x, origin.y, r.width, r.height}, 2)));
+        }
+    }
+}
+
+PE_TEST(selection_invert_matches_the_oracle_across_tiles) {
+    // invert reads and writes the same run, so one tile resolution now serves both. Checked
+    // for an active selection straddling tiles and for an inactive one, whose polarity is
+    // the case that once made inverting Select All leave everything selected.
+    constexpr int T = kTileSize;
+    const Rect canvas{-T - 3, -T - 3, 3 * T + 7, 2 * T + 5};
+
+    Selection active;
+    active.selectRect(Rect{-5, -5, T + 20, T + 9});
+    Selection inactive;
+
+    for (Selection* sel : {&active, &inactive}) {
+        const bool wasActive = sel->active();
+        const Rect probe = grown(canvas, 2 * kTileSize);
+        RefSelection ref;
+        // Seed the oracle with the state that already exists. invert() only rewrites the rect
+        // it is given, and part of the selection deliberately lies outside it: that coverage
+        // must survive untouched, which an oracle built from nothing would miss.
+        for (int y = probe.top(); y < probe.bottom(); ++y) {
+            for (int x = probe.left(); x < probe.right(); ++x) {
+                if (wasActive) ref.set(x, y, sel->value(x, y));
+            }
+        }
+        for (int y = canvas.top(); y < canvas.bottom(); ++y) {
+            for (int x = canvas.left(); x < canvas.right(); ++x) {
+                const auto cur = wasActive ? sel->value(x, y) : static_cast<std::uint8_t>(255);
+                ref.set(x, y, static_cast<std::uint8_t>(255 - cur));
+            }
+        }
+        ref.dropEmpty();
+        sel->invert(canvas);
+        PE_CHECK(matchesOracle(*sel, ref, probe));
+    }
+}
+
+PE_TEST(selection_never_allocates_a_tile_for_a_zero_run) {
+    // The canonical-form rule. tiles_ must hold no all-zero tile, because selectedBounds()
+    // and the defaulted operator== both read the map directly. dropEmptyTiles() erases them
+    // after the fact, so the OUTPUT was always right; what the rule prevents is materialising
+    // the whole region first, which on a large canvas is hundreds of megabytes.
+    constexpr int T = kTileSize;
+
+    // A non-empty but entirely black mask selects nothing and allocates nothing.
+    PixelBuffer black(3 * T, 3 * T);
+    Selection s;
+    s.loadMask(black, 0, 0);
+    PE_CHECK(s.active());
+    PE_CHECK_EQ(s.tileCount(), static_cast<std::size_t>(0));
+    PE_CHECK(s.selectedBounds().isEmpty());
+
+    // Inverting an INACTIVE selection writes 255 - 255 == 0 for every pixel of the canvas.
+    // And it must not allocate them and then drop them: dropEmptyTiles() would hide that in
+    // the final count, while the peak on a canvas-sized write is what the rule is for.
+    const std::uint64_t allocsBefore = maskTileAllocCount();
+    Selection inv;
+    inv.invert(Rect{0, 0, 3 * T, 3 * T});
+    PE_CHECK_EQ(inv.tileCount(), static_cast<std::size_t>(0));
+    PE_CHECK_EQ(maskTileAllocCount() - allocsBefore, static_cast<std::uint64_t>(0));
+
+    // A sparse mask allocates only the tiles its content touches, not the tiles its bounding
+    // box spans. Two small blobs with three whole tiles of gap between them.
+    PixelBuffer sparse(6 * T, 2 * T);
+    for (int y = 4; y < 12; ++y) {
+        for (int x = 4; x < 12; ++x) sparse.set(x, y, Rgba8{255, 255, 255, 255});
+        for (int x = 5 * T + 4; x < 5 * T + 12; ++x) sparse.set(x, y, Rgba8{255, 255, 255, 255});
+    }
+    const std::uint64_t sparseBefore = maskTileAllocCount();
+    Selection two;
+    two.loadMask(sparse, 0, 0);
+    PE_CHECK_EQ(two.tileCount(), static_cast<std::size_t>(2));  // not the 12 the bbox spans
+    // Two allocated, not twelve allocated and ten erased.
+    PE_CHECK_EQ(maskTileAllocCount() - sparseBefore, static_cast<std::uint64_t>(2));
+    PE_CHECK_EQ(static_cast<int>(two.value(3 * T, 8)), 0);  // and the gap really is empty
+}
+
+PE_TEST(selection_write_resolves_one_tile_per_run_not_per_pixel) {
+    // The defect this replaces: every mask write did one std::map::find PER PIXEL, over a
+    // canvas-sized rect. A magic wand click on a 24 MP document therefore performed 24
+    // million tree walks, over a map whose nodes each hold a 64 KiB tile inline. The lookup
+    // count must scale with rows times tile COLUMNS, never with the pixel count.
+    constexpr int T = kTileSize;
+    const auto columnsSpanned = [](int x, int width) {
+        if (width <= 0) return 0;
+        return floorDiv(x + width - 1, kTileSize) - floorDiv(x, kTileSize) + 1;
+    };
+
+    for (const Rect r : {Rect{0, 0, 4 * T, 3 * T}, Rect{7, 9, 2 * T + 40, T + 5}, Rect{0, 0, 1, 1},
+                         Rect{T - 1, 0, 2, 40}, Rect{-T - 3, -T - 3, 2 * T, 40}}) {
+        const std::uint64_t before = maskWriteTileLookupCount();
+        Selection s;
+        s.selectRect(r);
+        const std::uint64_t used = maskWriteTileLookupCount() - before;
+        const auto want = static_cast<std::uint64_t>(r.height) *
+                          static_cast<std::uint64_t>(columnsSpanned(r.x, r.width));
+        PE_CHECK_EQ(used, want);
+    }
+
+    // And the shape that matters in practice: a full-canvas fill is rows times columns, not
+    // rows times pixels. 4000 x 24 rather than 24,000,000.
+    const std::uint64_t before = maskWriteTileLookupCount();
+    Selection big;
+    big.selectRect(Rect{0, 0, 6000, 4000});
+    const std::uint64_t used = maskWriteTileLookupCount() - before;
+    PE_CHECK_EQ(used, static_cast<std::uint64_t>(4000) * 24);  // 96,000
+    // 24,000,000 / 96,000 == 250, the same ratio the .pedoc gather saw in #176 and for the
+    // same reason: one lookup covers up to kTileSize samples. Guarded, because a writer that
+    // stopped using setRun entirely would leave `used` at zero and divide by it, and a test
+    // that crashes says far less than one that fails.
+    PE_REQUIRE(used > 0);
+    PE_CHECK_EQ(static_cast<std::uint64_t>(6000) * 4000 / used, static_cast<std::uint64_t>(250));
 }
