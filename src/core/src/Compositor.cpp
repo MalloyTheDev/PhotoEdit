@@ -5,6 +5,7 @@
 #include "pe/core/Mask.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <vector>
 
@@ -153,6 +154,94 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
         baseValid = true;
         blendSrcInto(layer);
     }
+}
+
+namespace {
+std::atomic<std::uint64_t> g_scaledCompositeTiles{0};
+}  // namespace
+
+std::uint64_t scaledCompositeTileCount() noexcept {
+    return g_scaledCompositeTiles.load(std::memory_order_relaxed);
+}
+
+PixelBuffer compositeToImageScaled(std::span<const std::unique_ptr<Layer>> stack, Rect region,
+                                   int divisor, std::int64_t maxSourceTiles) {
+    if (region.isEmpty() || divisor < 1) return PixelBuffer{};
+
+    // Same coordinate guard compositeToBuffer applies: an enormous offset would overflow the
+    // int tile and rect arithmetic even though the OUTPUT here is small.
+    constexpr int kCoordBound = 1 << 26;
+    if (region.x < -kCoordBound || region.y < -kCoordBound ||
+        static_cast<int64_t>(region.x) + region.width > kCoordBound ||
+        static_cast<int64_t>(region.y) + region.height > kCoordBound) {
+        return PixelBuffer{};
+    }
+
+    const TileSpan span = tilesForRect(region);
+    const int64_t srcTiles = static_cast<int64_t>(span.rowEnd - span.rowBegin) *
+                             static_cast<int64_t>(span.colEnd - span.colBegin);
+    if (srcTiles > maxSourceTiles) return PixelBuffer{};
+
+    const int ow = (region.width + divisor - 1) / divisor;
+    const int oh = (region.height + divisor - 1) / divisor;
+    const std::size_t outCount = static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh);
+    std::vector<double> sumR(outCount, 0.0);
+    std::vector<double> sumG(outCount, 0.0);
+    std::vector<double> sumB(outCount, 0.0);
+    std::vector<double> sumA(outCount, 0.0);
+
+    std::vector<Rgbaf> acc(static_cast<std::size_t>(kTilePixels));
+    const std::span<Rgbaf> accSpan(acc);
+    for (int row = span.rowBegin; row < span.rowEnd; ++row) {
+        for (int col = span.colBegin; col < span.colEnd; ++col) {
+            const TileCoord coord{col, row};
+            const Rect tb = tileBounds(coord);
+            const Rect vis = tb.intersected(region);
+            if (vis.isEmpty()) continue;
+            g_scaledCompositeTiles.fetch_add(1, std::memory_order_relaxed);
+            std::fill(acc.begin(), acc.end(), Rgbaf{});
+            compositeStack(stack, coord, accSpan, 0);
+            for (int y = vis.top(); y < vis.bottom(); ++y) {
+                const int oy = (y - region.top()) / divisor;
+                for (int x = vis.left(); x < vis.right(); ++x) {
+                    const int ox = (x - region.left()) / divisor;
+                    const std::size_t bin =
+                        static_cast<std::size_t>(oy) * static_cast<std::size_t>(ow) +
+                        static_cast<std::size_t>(ox);
+                    const Rgbaf& c = acc[static_cast<std::size_t>(y - tb.top()) * kTileSize +
+                                         static_cast<std::size_t>(x - tb.left())];
+                    sumR[bin] += static_cast<double>(c.r) * c.a;  // premultiplied
+                    sumG[bin] += static_cast<double>(c.g) * c.a;
+                    sumB[bin] += static_cast<double>(c.b) * c.a;
+                    sumA[bin] += c.a;
+                }
+            }
+        }
+    }
+
+    PixelBuffer out(ow, oh, Rgba8{});
+    for (int oy = 0; oy < oh; ++oy) {
+        // Samples this output row actually covers, clipped at the region's edge, so a partial
+        // final row is not divided by a full one.
+        const int srcH = std::min((oy + 1) * divisor, region.height) - oy * divisor;
+        for (int ox = 0; ox < ow; ++ox) {
+            const int srcW = std::min((ox + 1) * divisor, region.width) - ox * divisor;
+            const std::size_t bin = static_cast<std::size_t>(oy) * static_cast<std::size_t>(ow) +
+                                    static_cast<std::size_t>(ox);
+            const double n = static_cast<double>(srcW) * static_cast<double>(srcH);
+            Rgbaf px{};
+            if (n > 0.0) {
+                px.a = static_cast<float>(sumA[bin] / n);
+                if (sumA[bin] > 0.0) {  // un-premultiply back to straight alpha
+                    px.r = static_cast<float>(sumR[bin] / sumA[bin]);
+                    px.g = static_cast<float>(sumG[bin] / sumA[bin]);
+                    px.b = static_cast<float>(sumB[bin] / sumA[bin]);
+                }
+            }
+            out.set(ox, oy, toRgba8(px));
+        }
+    }
+    return out;
 }
 
 namespace {

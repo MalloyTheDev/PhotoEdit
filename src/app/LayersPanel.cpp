@@ -57,6 +57,8 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     root->addLayout(topRow);
 
     tree_ = new QTreeWidget(this);
+    // Named so a test can reach it, the idiom the shell already uses for its other widgets.
+    tree_->setObjectName(QStringLiteral("LayerTree"));
     tree_->setHeaderHidden(true);
     tree_->setColumnCount(2);           // col 0: visibility + layer thumb + name; col 1: mask thumb
     tree_->setIconSize(QSize(26, 26));  // per-layer preview thumbnails
@@ -136,7 +138,17 @@ void LayersPanel::onDocumentChanged(const pe::Document&, const pe::DocumentChang
                 const pe::Layer* t = doc_->findLayer(maskTarget_);
                 if (t == nullptr || t->mask() == nullptr) setMaskTarget(pe::kNoLayer);
             }
-            rebuild();
+            // A property change names its layer, so refresh that ONE row rather than
+            // destroying and rebuilding the whole tree. A rebuild recomposites every layer's
+            // thumbnail, so toggling one layer's visibility on a twenty-layer document did
+            // twenty composites and threw away the selection and the expanded/collapsed state
+            // on the way. Structure changes still rebuild: rows have appeared or moved.
+            if (change.kind == pe::DocumentChange::Kind::LayerProps &&
+                change.layer != pe::kNoLayer && itemForId(change.layer) != nullptr) {
+                refreshRow(change.layer);
+            } else {
+                rebuild();
+            }
             break;
         case pe::DocumentChange::Kind::Pixels:
             // Paint hot path: only the edited layer's thumbnail changed. Refresh just
@@ -173,6 +185,22 @@ void LayersPanel::onDocumentChanged(const pe::Document&, const pe::DocumentChang
         default:
             break;  // DirtyState / Profile / Selection don't affect the layer tree
     }
+}
+
+void LayersPanel::refreshRow(pe::LayerId id) {
+    QTreeWidgetItem* item = itemForId(id);
+    const pe::Layer* layer = doc_ != nullptr ? doc_->findLayer(id) : nullptr;
+    if (item == nullptr || layer == nullptr) return;
+    // Everything a LayerProps change can alter on the row itself: the name (rename), the
+    // check state (visibility), and the two previews (opacity, blend, mask flags).
+    updating_ = true;
+    item->setText(0, QString::fromStdString(layer->name()));
+    item->setCheckState(0, layer->visible() ? Qt::Checked : Qt::Unchecked);
+    updating_ = false;
+    updateLayerThumbnail(id);
+    updateMaskThumbnail(id);
+    syncActiveControls();
+    updateButtons();
 }
 
 void LayersPanel::push(std::unique_ptr<pe::Command> cmd) {
@@ -291,15 +319,46 @@ QIcon LayersPanel::layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> si
                                   std::size_t index) const {
     constexpr int kThumb = 26;
     if (doc_ == nullptr || index >= siblings.size()) return QIcon();
-    const pe::Rect bounds = doc_->canvasBounds();
-    const std::int64_t area = static_cast<std::int64_t>(bounds.width) * bounds.height;
-    if (area <= 0 || area > 4'000'000) return QIcon();  // bound preview-composite cost
+    const pe::Rect canvas = doc_->canvasBounds();
+    if (canvas.isEmpty()) return QIcon();
 
-    // Composite this layer alone over the canvas, then fit it onto a small checker.
-    const pe::PixelBuffer buf = pe::compositeToImage(siblings.subspan(index, 1), bounds);
+    // No canvas-area cap any more, and no whole-canvas composite.
+    //
+    // This used to refuse outright above 4 MP, so a document from any real camera had NO
+    // layer thumbnails at all, and behind that guard sat a second silent cliff where
+    // compositeToImage returns nothing above kMaxCompositeImagePixels. It also composited the
+    // WHOLE canvas at full resolution for a 26x26 icon, roughly six thousand source pixels per
+    // output pixel, on the GUI thread, for every committed edit.
+    //
+    // Two things fix it. The downscale is chosen from the canvas, so the framing is unchanged
+    // and a mark still appears where it sits on the canvas rather than filling the icon. And
+    // only the layer's own content is composited, so an empty layer or a small dab costs a
+    // tile or two instead of the whole document.
+    const int divisor =
+        std::max({1, (canvas.width + kThumb - 1) / kThumb, (canvas.height + kThumb - 1) / kThumb});
+    const pe::Rect content = siblings[index]->contentBounds().intersected(canvas);
+    if (content.isEmpty()) return checkerThumbnail(QImage(), 0, 0);  // nothing on this layer
+
+    // Snap outward to whole divisor-blocks of the CANVAS grid, so an output pixel never
+    // straddles the region edge and the placement below stays exact.
+    const int ax = canvas.left() + ((content.left() - canvas.left()) / divisor) * divisor;
+    const int ay = canvas.top() + ((content.top() - canvas.top()) / divisor) * divisor;
+    const int aw = ((content.right() - ax) + divisor - 1) / divisor * divisor;
+    const int ah = ((content.bottom() - ay) + divisor - 1) / divisor * divisor;
+    const pe::Rect region{ax, ay, aw, ah};
+
+    const pe::PixelBuffer buf =
+        pe::compositeToImageScaled(siblings.subspan(index, 1), region, divisor);
     if (buf.isEmpty()) return QIcon();
     const QImage src(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),
                      buf.width() * 4, QImage::Format_RGBA8888);
+    return checkerThumbnail(src, (ax - canvas.left()) / divisor, (ay - canvas.top()) / divisor);
+}
+
+// The checkerboard, the border, and `img` placed at (offX, offY) within it. Split out so the
+// empty-layer case shows the same checker as a transparent one rather than no icon at all.
+QIcon LayersPanel::checkerThumbnail(const QImage& img, int offX, int offY) {
+    constexpr int kThumb = 26;
 
     QPixmap pm(kThumb, kThumb);
     pm.fill(Qt::transparent);
@@ -311,8 +370,9 @@ QIcon LayersPanel::layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> si
             p.fillRect(x, y, 6, 6, ((x / 6 + y / 6) & 1) ? c0 : c1);
         }
     }
-    const QImage scaled = src.scaled(kThumb, kThumb, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    p.drawImage((kThumb - scaled.width()) / 2, (kThumb - scaled.height()) / 2, scaled);
+    // Already at thumbnail scale: drawn at its canvas-relative offset, not stretched to fill.
+    // Stretching would render a single dab as a full-thumbnail blob and lose where it sits.
+    if (!img.isNull()) p.drawImage(offX, offY, img);
     p.setPen(QColor(0, 0, 0, 110));
     p.drawRect(0, 0, kThumb - 1, kThumb - 1);
     p.end();

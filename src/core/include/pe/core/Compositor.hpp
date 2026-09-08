@@ -40,6 +40,40 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
 [[nodiscard]] PixelBuffer compositeToImage(std::span<const std::unique_ptr<Layer>> stack,
                                            Rect canvas);
 
+// The most source tiles a scaled composite will read before giving up. A scaled composite
+// has no AREA cap, deliberately: bounding it by area would defeat the point, which is to
+// preview something too large to flatten. What it is bounded by is the work, and the work is
+// tiles. Matches the renderer's own scaled path.
+inline constexpr std::int64_t kMaxScaledSourceTiles = 16384;
+
+// Composite `stack` over `region` and box-average it down by an integer `divisor`, producing
+// an image of ceil(region.width / divisor) x ceil(region.height / divisor).
+//
+// The full-resolution region is NEVER materialized: tiles are composited one at a time and
+// accumulated into the output bins, so peak memory is one tile plus the output rather than
+// the whole region. That is what lets a caller preview a layer far larger than
+// kMaxCompositeImagePixels, which compositeToImage refuses outright.
+//
+// Averaging is done PREMULTIPLIED and then un-premultiplied, because averaging straight alpha
+// across transparent pixels biases the colour toward black. Accumulators are double: a bin
+// sums up to divisor^2 samples, which passes float32's exact-integer limit at large
+// downscales and would silently collapse the average toward zero.
+//
+// Returns an empty buffer for an empty or unrepresentable region, a divisor below 1, or a
+// region spanning more than `maxSourceTiles`.
+// Diagnostics: source tiles composited by compositeToImageScaled since the process started.
+//
+// The output is a fixed small size whatever the input, so a preview that reads the whole
+// canvas and one that reads only the layer's content produce IDENTICAL pixels. The difference
+// is entirely in the work, and the layers panel exists to make that difference: a thumbnail
+// used to composite the full canvas at full resolution for a 26x26 icon. Same idiom as
+// NativeFormat's gatherTileLookupCount.
+[[nodiscard]] std::uint64_t scaledCompositeTileCount() noexcept;
+
+[[nodiscard]] PixelBuffer compositeToImageScaled(
+    std::span<const std::unique_ptr<Layer>> stack, Rect region, int divisor,
+    std::int64_t maxSourceTiles = kMaxScaledSourceTiles);
+
 // Like compositeToImage, but preserves the full 32-bit-float composite (no 8-bit
 // quantization) — the high-bit-depth flatten/export path (docs/systems/15). The
 // same megapixel budget applies; returns an empty buffer if the canvas exceeds it.

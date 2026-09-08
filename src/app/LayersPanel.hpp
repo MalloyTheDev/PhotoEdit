@@ -101,6 +101,13 @@ private:
 
     // A small preview of one layer (composited alone), for the row icon; groups get a
     // folder glyph. `siblings`/`index` give the engine slot to composite.
+    // The checkerboard, border and placement shared by every pixel thumbnail.
+    // Refresh one row in place: its text, its check state and its two previews. The cheap
+    // alternative to rebuild() for a change that names its layer.
+    void refreshRow(pe::LayerId id);
+
+    [[nodiscard]] static QIcon checkerThumbnail(const QImage& img, int offX, int offY);
+
     [[nodiscard]] QIcon layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> siblings,
                                        std::size_t index) const;
     [[nodiscard]] QIcon groupIcon() const;

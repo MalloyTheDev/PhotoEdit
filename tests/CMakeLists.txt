@@ -89,6 +89,7 @@ if(PHOTOEDIT_BUILD_APP)
         app/test_pixelformatnames.cpp
         app/test_iconutil.cpp
         app/test_canvasview.cpp
+        app/test_layerspanel.cpp
         app/test_busytask.cpp
     )
 
