@@ -75,7 +75,9 @@ void CanvasView::setDocument(pe::Document* doc) {
         // Abandon any in-progress stroke or move on the outgoing document, reverting its
         // live preview, so a tool never carries provisional state across documents.
         if (tool_.isStroking()) tool_.cancel(*doc_);
-        cancelMovePreview();
+        // The rect is deliberately discarded here: the renderer is destroyed two lines
+        // below, so there is no cache left to invalidate.
+        (void)cancelMovePreview();
         cancelTransform();  // revert any live transform preview before detaching
         renderer_.reset();  // unregister the old renderer before detaching this view
         doc_->removeObserver(this);
@@ -122,6 +124,11 @@ void CanvasView::onDocumentChanged(const pe::Document&, const pe::DocumentChange
     // A committed mutation (paint commit, undo/redo, file load). The renderer is also an
     // observer and has already marked the changed tiles dirty, so we only need to repaint;
     // paintEvent recomposites just those tiles. The live brush preview repaints separately.
+    update();
+}
+
+void CanvasView::repaintRegion(pe::Rect docRect) {
+    if (renderer_ != nullptr && !docRect.isEmpty()) renderer_->invalidate(docRect);
     update();
 }
 
@@ -199,11 +206,15 @@ bool CanvasView::handleClonePress(const pe::PointD& docPt, bool altHeld) {
     return false;  // begin a clone stroke
 }
 
-void CanvasView::cancelMovePreview() {
-    if (movePreview_ && doc_ != nullptr) movePreview_->undo(*doc_);  // restore the layer
+pe::Rect CanvasView::cancelMovePreview() {
+    pe::Rect dirty{};
+    // Captured BEFORE the reset: PaintCommand exposes no rect accessor, so once the pointer
+    // is gone the rect is unrecoverable and the caller has nothing left to invalidate.
+    if (movePreview_ && doc_ != nullptr) dirty = movePreview_->undo(*doc_).dirtyRegion;
     movePreview_.reset();
     movingContent_ = false;
     moveLayer_ = pe::kNoLayer;
+    return dirty;
 }
 
 QSize CanvasView::sizeHint() const {
@@ -290,8 +301,7 @@ void CanvasView::setTool(Tool t) {
         update();
     }
     if (movingContent_) {  // switching away from Move drops any live move preview
-        cancelMovePreview();
-        reloadImage();
+        repaintRegion(cancelMovePreview());
     }
     if (draggingLasso_) {  // switching away mid-lasso discards the in-progress path
         draggingLasso_ = false;
@@ -381,42 +391,54 @@ void CanvasView::beginTransform() {
 
 void CanvasView::updateTransformPreview() {
     if (!transforming_ || doc_ == nullptr) return;
+    pe::Rect reverted{};
     if (transformPreview_) {  // revert the prior preview so we always resample the ORIGINAL content
-        transformPreview_->undo(*doc_);
+        reverted = transformPreview_->undo(*doc_).dirtyRegion;
         transformPreview_.reset();
     }
     transformPreview_ = pe::transformLayerContent(*doc_, transformLayer_, transformMatrix());
-    if (transformPreview_) transformPreview_->execute(*doc_);
-    reloadImage();  // provisional command applied without notifying: drop the cache + repaint
-    update();       // redraw the box/handles at their new placement
+    pe::Rect applied{};
+    if (transformPreview_) applied = transformPreview_->execute(*doc_).dirtyRegion;
+    // As in the Move drag: the revert's rect matters most when the rebuild returns null, and
+    // the two are invalidated separately rather than united.
+    repaintRegion(reverted);
+    repaintRegion(applied);
+    update();  // redraw the box/handles at their new placement
 }
 
 void CanvasView::commitTransform() {
     if (!transforming_) return;
-    if (transformPreview_ && doc_ != nullptr) transformPreview_->undo(*doc_);  // back to S0
+    pe::Rect reverted{};
+    if (transformPreview_ && doc_ != nullptr) {
+        reverted = transformPreview_->undo(*doc_).dirtyRegion;  // back to S0
+    }
     transformPreview_.reset();
     std::unique_ptr<pe::PaintCommand> cmd;
     if (doc_ != nullptr) cmd = pe::transformLayerContent(*doc_, transformLayer_, transformMatrix());
     transforming_ = false;
     tfDrag_ = -1;
     transformLayer_ = pe::kNoLayer;
+    // The revert has to be invalidated either way: push notifies for the pixels the COMMAND
+    // touches, which need not cover everything the reverted preview did.
+    repaintRegion(reverted);
     if (cmd != nullptr && doc_ != nullptr) {
         doc_->history().push(std::move(cmd));  // one undo step; the observer refreshes the canvas
-    } else {
-        reloadImage();  // identity / no-op: just clear the (already-reverted) preview cache
     }
     update();
 }
 
 void CanvasView::cancelTransform() {
     const bool was = transforming_;
-    if (transformPreview_ && doc_ != nullptr) transformPreview_->undo(*doc_);  // restore the layer
+    pe::Rect reverted{};
+    if (transformPreview_ && doc_ != nullptr) {
+        reverted = transformPreview_->undo(*doc_).dirtyRegion;  // restore the layer
+    }
     transformPreview_.reset();
     transforming_ = false;
     tfDrag_ = -1;
     transformLayer_ = pe::kNoLayer;
     if (was) {
-        reloadImage();
+        repaintRegion(reverted);
         update();
     }
 }
@@ -827,7 +849,10 @@ void CanvasView::mousePressEvent(QMouseEvent* e) {
         return;
     }
     if (toolMode_ == Tool::Move) {
-        cancelMovePreview();  // recover from any stale (capture-lost) preview
+        // Recover from any stale (capture-lost) preview. This used to revert without
+        // repainting at all, leaving the reverted pixels stale on screen until something
+        // else happened to invalidate them; having the rect closes that too.
+        repaintRegion(cancelMovePreview());
         movingContent_ = true;
         moveStartWidget_ = e->position();
         moveLayer_ = doc_->activeLayer();  // move the layer that is active when the drag begins
@@ -1047,13 +1072,23 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e) {
         const pe::PointD b = view_.viewToDoc(pe::PointD{e->position().x(), e->position().y()});
         const int dx = static_cast<int>(std::lround(b.x - a.x));
         const int dy = static_cast<int>(std::lround(b.y - a.y));
+        // Both rects are needed, and both must be invalidated even when the rebuild returns
+        // null: the previous preview has already been reverted by then, so the revert's rect
+        // is the only thing keeping the cache honest. Dragging back to the exact start is the
+        // ordinary way to reach that, since a zero delta yields no command at all.
+        pe::Rect reverted{};
         if (movePreview_) {
-            movePreview_->undo(*doc_);
+            reverted = movePreview_->undo(*doc_).dirtyRegion;
             movePreview_.reset();
         }
         movePreview_ = pe::moveLayerContent(*doc_, moveLayer_, dx, dy);
-        if (movePreview_) movePreview_->execute(*doc_);
-        reloadImage();  // preview applied without notifying: drop the cache + repaint
+        pe::Rect applied{};
+        if (movePreview_) applied = movePreview_->execute(*doc_).dirtyRegion;
+        // Two calls rather than one united rect: uniting a rect near the drag origin with one
+        // far away yields a bounding box that can dwarf both, and that is the only realistic
+        // way to trip invalidate()'s escalation back to dropping the whole cache.
+        repaintRegion(reverted);
+        repaintRegion(applied);
         return;
     }
     if (!tool_.isStroking() || doc_ == nullptr) {
@@ -1160,11 +1195,16 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
         movingContent_ = false;
         moveLayer_ = pe::kNoLayer;
         if (movePreview_ && doc_ != nullptr) {
-            movePreview_->undo(*doc_);  // back to the pre-move state
+            // No explicit invalidation here, unlike commitTransform. The command being pushed
+            // IS the preview being reverted, and PaintCommand reports the same rect from undo
+            // as from execute, so push's notification covers exactly what the revert dirtied.
+            // commitTransform differs because it reverts the preview and pushes a DIFFERENT,
+            // freshly built command, whose rect need not cover the preview's.
+            (void)movePreview_->undo(*doc_);
             doc_->history().push(
                 std::move(movePreview_));  // commit one undo step; observer refreshes
         } else {
-            reloadImage();  // dragged back to origin / nothing movable: ensure a clean canvas
+            update();  // dragged back to origin: the last mouse-move already invalidated
         }
         return;
     }

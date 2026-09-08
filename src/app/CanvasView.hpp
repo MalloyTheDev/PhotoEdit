@@ -136,6 +136,21 @@ public:
     // so the tile cache would otherwise show stale pixels until the next committed change.
     void reloadImage();
 
+    // The bounded sibling of reloadImage(). A preview applied without notifying leaves the
+    // renderer cache stale, but only over the rect the command reports, and dropping the
+    // WHOLE cache on every mouse-move of a drag cost a full recomposite per event.
+    //
+    // Safe because the compositor computes each display tile purely from that tile's own
+    // source pixels, so a cached tile outside `docRect` still equals a fresh recomposite.
+    // The rect is the one PaintCommand returns, which over-covers (it unions whole tile
+    // slices) and can never under-cover, because a command writes only inside it.
+    void repaintRegion(pe::Rect docRect);
+
+    // Diagnostics and tests: the tile-cache renderer bound to the current document, or null
+    // when there is none. Exposed because there is otherwise no way for a test to tell a
+    // bounded invalidation from an unbounded one.
+    [[nodiscard]] pe::CanvasRenderer* renderer() noexcept { return renderer_.get(); }
+
     // Stop reading the document to paint, and show the last frame instead.
     //
     // A background task (a save, an export, a wand click) runs the engine on a worker
@@ -248,7 +263,9 @@ private:
 
     // Move-tool drag state: a live preview shifts the active layer's content by the drag
     // delta (a provisional command reverted on each move and committed on release).
-    void cancelMovePreview();  // revert + drop any in-progress move preview
+    // Revert and drop any in-progress move preview. Returns the rect the revert dirtied so
+    // the caller can bound its repaint; empty when there was no preview.
+    [[nodiscard]] pe::Rect cancelMovePreview();
     bool movingContent_ = false;
     QPointF moveStartWidget_;               // drag start (widget space)
     pe::LayerId moveLayer_ = pe::kNoLayer;  // the layer captured at drag start
