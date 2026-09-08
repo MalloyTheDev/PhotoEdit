@@ -26,6 +26,7 @@ add_library(pe_core
     src/Adjustment.cpp
     src/AdjustmentLayer.cpp
     src/Filter.cpp
+    src/HitTest.cpp
     src/Histogram.cpp
     src/Channels.cpp
     src/NativeFormat.cpp
