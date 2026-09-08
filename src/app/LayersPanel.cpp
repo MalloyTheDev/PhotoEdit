@@ -74,19 +74,35 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
 
     auto* btnRow = new QHBoxLayout();
     addBtn_ = new QPushButton(QStringLiteral("Add"), this);
-    dupBtn_ = new QPushButton(QStringLiteral("Dup"), this);
-    delBtn_ = new QPushButton(QStringLiteral("Del"), this);
-    groupBtn_ = new QPushButton(QStringLiteral("Grp"), this);
-    ungroupBtn_ = new QPushButton(QStringLiteral("Ungrp"), this);
-    maskBtn_ = new QPushButton(QStringLiteral("Msk"), this);
+    dupBtn_ = new QPushButton(QStringLiteral("Duplicate"), this);
+    delBtn_ = new QPushButton(QStringLiteral("Delete"), this);
+    groupBtn_ = new QPushButton(QStringLiteral("Group"), this);
+    ungroupBtn_ = new QPushButton(QStringLiteral("Ungroup"), this);
+    maskBtn_ = new QPushButton(QStringLiteral("Mask"), this);
     upBtn_ = new QPushButton(QStringLiteral("▲"), this);
     downBtn_ = new QPushButton(QStringLiteral("▼"), this);
+    // Every button gets a tooltip AND an accessible name. Three had neither, and the two
+    // arrows carry a bare Unicode triangle as their whole label, which a screen reader either
+    // announces as a shape or skips: there is nothing else on them to read.
+    addBtn_->setToolTip(QStringLiteral("Add a new empty layer above the active one"));
+    dupBtn_->setToolTip(QStringLiteral("Duplicate the active layer"));
+    delBtn_->setToolTip(QStringLiteral("Delete the active layer"));
     groupBtn_->setToolTip(QStringLiteral("Group selected layers (Ctrl+G)"));
     ungroupBtn_->setToolTip(QStringLiteral("Ungroup the active group (Ctrl+Shift+G)"));
     maskBtn_->setToolTip(
         QStringLiteral("Add a layer mask (from the selection if any). Click a mask thumbnail to "
                        "paint into it with the Brush (black hides, white reveals); Alt-click "
                        "toggles it on/off."));
+    upBtn_->setToolTip(QStringLiteral("Move the active layer up"));
+    downBtn_->setToolTip(QStringLiteral("Move the active layer down"));
+    addBtn_->setAccessibleName(QStringLiteral("Add layer"));
+    dupBtn_->setAccessibleName(QStringLiteral("Duplicate layer"));
+    delBtn_->setAccessibleName(QStringLiteral("Delete layer"));
+    groupBtn_->setAccessibleName(QStringLiteral("Group layers"));
+    ungroupBtn_->setAccessibleName(QStringLiteral("Ungroup layers"));
+    maskBtn_->setAccessibleName(QStringLiteral("Add layer mask"));
+    upBtn_->setAccessibleName(QStringLiteral("Move layer up"));
+    downBtn_->setAccessibleName(QStringLiteral("Move layer down"));
     for (QPushButton* b :
          {addBtn_, dupBtn_, delBtn_, groupBtn_, ungroupBtn_, maskBtn_, upBtn_, downBtn_}) {
         btnRow->addWidget(b);
@@ -467,7 +483,9 @@ void LayersPanel::addLevel(QTreeWidgetItem* parentItem,
         const bool isGroup = l->kind() == pe::LayerKind::Group;
         auto* item = new QTreeWidgetItem();
         item->setText(0, QString::fromStdString(l->name()));
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        // Editable so a name can be changed in place. onItemChanged turns the committed edit
+        // into a RenameLayerCommand, so it lands on the undo stack like any other change.
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsEditable);
         item->setCheckState(0, l->visible() ? Qt::Checked : Qt::Unchecked);
         item->setData(0, Qt::UserRole, static_cast<qulonglong>(l->id()));
         // Adjustment layers contribute no pixels (a composited thumbnail would be blank), so they
@@ -702,6 +720,24 @@ void LayersPanel::onItemChanged(QTreeWidgetItem* item, int /*column*/) {
     const pe::LayerId id = idOf(item);
     const pe::Layer* l = doc_->findLayer(id);
     if (l == nullptr) return;
+
+    // A committed in-place rename. Checked before visibility because one signal carries both,
+    // and an edit that changed neither must push nothing at all.
+    const QString typed = item->text(0).trimmed();
+    const QString current = QString::fromStdString(l->name());
+    if (typed != current) {
+        if (typed.isEmpty()) {
+            // An empty name would leave an unidentifiable row. Put the old one back rather
+            // than pushing a command; updating_ stops that write coming straight back here.
+            updating_ = true;
+            item->setText(0, current);
+            updating_ = false;
+        } else {
+            push(std::make_unique<pe::RenameLayerCommand>(id, typed.toStdString()));
+        }
+        return;
+    }
+
     const bool want = item->checkState(0) == Qt::Checked;
     if (l->visible() != want) push(std::make_unique<pe::SetVisibilityCommand>(id, want));
 }
@@ -718,6 +754,10 @@ void LayersPanel::onItemDoubleClicked(QTreeWidgetItem* item, int column) {
         emit editAdjustmentRequested(id);
     } else if (l->kind() == pe::LayerKind::Text) {
         emit editTextRequested(id);
+    } else {
+        // Every other kind: rename in place, which is what a double-click on a layer name
+        // does everywhere else and previously did nothing here.
+        tree_->editItem(item, 0);
     }
 }
 
@@ -795,6 +835,12 @@ void LayersPanel::onDelete() {
                                 "group first.",
                                 describeSelectionForRefusal()));
         return;
+    }
+    // Ask before discarding a layer that actually holds something. An empty layer is not
+    // worth a prompt, and prompting for one trains the user to dismiss the dialog unread.
+    const pe::Layer* victim = doc_->findLayer(id);
+    if (confirmDelete_ && victim != nullptr && !victim->contentBounds().isEmpty()) {
+        if (!confirmDelete_(QString::fromStdString(victim->name()))) return;
     }
     push(std::make_unique<pe::RemoveLayerCommand>(id));
 }

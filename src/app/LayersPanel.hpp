@@ -48,6 +48,12 @@ public:
     // null before the observed document is destroyed.
     void setDocument(pe::Document* doc);
 
+    // Asked before a layer that holds content is deleted; returns true to go ahead. The panel
+    // proceeds without asking when none is installed, which keeps it usable on its own and in
+    // tests, exactly as CanvasView's task runner does. MainWindow installs the real prompt.
+    using DeleteConfirmer = std::function<bool(const QString& layerName)>;
+    void setDeleteConfirmer(DeleteConfirmer c) { confirmDelete_ = std::move(c); }
+
     void onDocumentChanged(const pe::Document&, const pe::DocumentChange&) override;
 
     // Group the multi-selected top-level layers into a new group; dissolve the active
@@ -105,6 +111,8 @@ private:
     // Refresh one row in place: its text, its check state and its two previews. The cheap
     // alternative to rebuild() for a change that names its layer.
     void refreshRow(pe::LayerId id);
+
+    DeleteConfirmer confirmDelete_;
 
     [[nodiscard]] static QIcon checkerThumbnail(const QImage& img, int offX, int offY);
 

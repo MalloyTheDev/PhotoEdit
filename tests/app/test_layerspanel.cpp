@@ -23,12 +23,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <utility>
 
 #include <QColor>
 #include <QIcon>
 #include <QImage>
+#include <QList>
 #include <QPixmap>
+#include <QPushButton>
 #include <QSize>
 #include <QString>
 #include <QTreeWidget>
@@ -236,5 +239,173 @@ PE_TEST(layerspanel_group_and_adjustment_rows_keep_their_glyphs) {
         PE_CHECK_EQ(red, 0);
     }
     PE_CHECK(sawGroup);
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_a_layer_can_be_renamed_in_place_and_undone) {
+    // Layer names were visible, meaningful and FIXED at creation: rows carried
+    // ItemIsUserCheckable but never ItemIsEditable, and no rename existed anywhere in the
+    // application. Double-clicking a plain layer did nothing at all.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    const pe::LayerId id = doc->activeLayer();
+    const std::string original = doc->findLayer(id)->name();
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr);
+    PE_REQUIRE(tree->topLevelItemCount() == 1);
+
+    // The flag the USER needs, asserted separately: setText below commits an edit whether or
+    // not the row is editable, so without this the double-click path is unpinned.
+    PE_CHECK((tree->topLevelItem(0)->flags() & Qt::ItemIsEditable) != 0);
+
+    // Editing the row's text is what committing an in-place edit does.
+    tree->topLevelItem(0)->setText(0, QStringLiteral("Sky"));
+    PE_CHECK(doc->findLayer(id)->name() == std::string("Sky"));
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));  // one command
+
+    doc->history().undo();
+    PE_CHECK(doc->findLayer(id)->name() == original);
+    // And the row followed the undo rather than keeping the typed text.
+    PE_CHECK(tree->topLevelItem(0)->text(0) == QString::fromStdString(original));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_an_empty_rename_is_refused_rather_than_committed) {
+    // An empty name leaves a row nothing can identify, and it would be a real command on the
+    // undo stack. The old text goes back and nothing is pushed.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    const pe::LayerId id = doc->activeLayer();
+    const std::string original = doc->findLayer(id)->name();
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr);
+
+    tree->topLevelItem(0)->setText(0, QStringLiteral("   "));  // whitespace only
+    PE_CHECK(doc->findLayer(id)->name() == original);
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));
+    PE_CHECK(tree->topLevelItem(0)->text(0) == QString::fromStdString(original));
+
+    // And renaming to the SAME name pushes nothing either: one signal carries both the text
+    // and the check state, so an edit that changed neither must be a no-op.
+    tree->topLevelItem(0)->setText(0, QString::fromStdString(original));
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_toggling_visibility_still_works_alongside_rename) {
+    // The inverse of the case above: itemChanged now handles two different edits, so the
+    // check-state path must not have been swallowed by the rename branch.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    const pe::LayerId id = doc->activeLayer();
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr);
+
+    PE_CHECK(doc->findLayer(id)->visible());
+    tree->topLevelItem(0)->setCheckState(0, Qt::Unchecked);
+    PE_CHECK(!doc->findLayer(id)->visible());
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_deleting_a_layer_with_content_asks_first) {
+    // Delete removed the layer immediately, whatever was on it. The prompt is injected rather
+    // than owned by the panel, so the rule is testable and the modal lives in one place.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    auto second = std::make_unique<pe::PixelLayer>("Painted");
+    second->tiles().fillRect(pe::Rect{0, 0, 20, 20}, pe::Rgba8{200, 50, 50, 255});
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(second));
+    const pe::LayerId painted = doc->topLevelLayers()[1]->id();
+    doc->setActiveLayer(painted);
+
+    pe::app::LayersPanel panel;
+    int asked = 0;
+    QString askedAbout;
+    panel.setDeleteConfirmer([&asked, &askedAbout](const QString& name) {
+        ++asked;
+        askedAbout = name;
+        return false;  // the user says no
+    });
+    panel.setDocument(doc.get());
+
+    QPushButton* del = panel.findChild<QPushButton*>();
+    PE_REQUIRE(del != nullptr);
+    // Reach the Delete button by its accessible name rather than its position.
+    QPushButton* deleteBtn = nullptr;
+    for (QPushButton* b : panel.findChildren<QPushButton*>()) {
+        if (b->accessibleName() == QStringLiteral("Delete layer")) deleteBtn = b;
+    }
+    PE_REQUIRE(deleteBtn != nullptr);
+
+    deleteBtn->click();
+    PE_CHECK_EQ(asked, 1);
+    PE_CHECK(askedAbout == QStringLiteral("Painted"));
+    PE_CHECK_EQ(doc->topLevelCount(), static_cast<std::size_t>(2));  // refused: still there
+
+    panel.setDeleteConfirmer([&asked](const QString&) {
+        ++asked;
+        return true;  // and now the user says yes
+    });
+    deleteBtn->click();
+    PE_CHECK_EQ(asked, 2);
+    PE_CHECK_EQ(doc->topLevelCount(), static_cast<std::size_t>(1));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_deleting_an_empty_layer_does_not_ask) {
+    // Prompting for a layer that holds nothing trains the user to dismiss the dialog unread,
+    // which is how a confirmation stops confirming anything.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<pe::PixelLayer>("Empty"));
+    doc->setActiveLayer(doc->topLevelLayers()[1]->id());
+
+    pe::app::LayersPanel panel;
+    int asked = 0;
+    panel.setDeleteConfirmer([&asked](const QString&) {
+        ++asked;
+        return true;
+    });
+    panel.setDocument(doc.get());
+
+    QPushButton* deleteBtn = nullptr;
+    for (QPushButton* b : panel.findChildren<QPushButton*>()) {
+        if (b->accessibleName() == QStringLiteral("Delete layer")) deleteBtn = b;
+    }
+    PE_REQUIRE(deleteBtn != nullptr);
+    deleteBtn->click();
+    PE_CHECK_EQ(asked, 0);
+    PE_CHECK_EQ(doc->topLevelCount(), static_cast<std::size_t>(1));  // and it went
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_every_button_has_a_tooltip_and_an_accessible_name) {
+    // Three of eight had a tooltip and none had an accessible name. Two of them are a bare
+    // Unicode triangle, which assistive technology announces as a shape or skips entirely,
+    // and abbreviations like "Dup" and "Msk" are not much better for a sighted first-time
+    // user either.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+
+    const QList<QPushButton*> buttons = panel.findChildren<QPushButton*>();
+    PE_CHECK_EQ(buttons.size(), 8);
+    for (QPushButton* b : buttons) {
+        PE_CHECK(!b->toolTip().isEmpty());
+        PE_CHECK(!b->accessibleName().isEmpty());
+        // The name must say what it does, not repeat a glyph.
+        PE_CHECK(b->accessibleName() != b->text());
+    }
     panel.setDocument(nullptr);
 }

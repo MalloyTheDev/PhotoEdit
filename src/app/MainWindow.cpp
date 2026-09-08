@@ -1971,6 +1971,15 @@ void MainWindow::buildDockPanels() {
     };
 
     layers_ = new LayersPanel();
+    // Deleting a layer that holds pixels is not undoable-by-accident enough to do silently.
+    // The panel asks through this hook rather than owning a dialog, so the rule stays testable
+    // and the modal lives in one place, as the unsaved-changes prompt does.
+    layers_->setDeleteConfirmer([this](const QString& name) {
+        return QMessageBox::question(
+                   this, QStringLiteral("Delete layer"),
+                   QStringLiteral("Delete \"%1\"? It still has content.").arg(name),
+                   QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+    });
     connect(layers_, &LayersPanel::editAdjustmentRequested, this, &MainWindow::editAdjustmentLayer);
     connect(layers_, &LayersPanel::refused, this, &MainWindow::reportRefusal);
     connect(layers_, &LayersPanel::editTextRequested, this, &MainWindow::editTextLayer);
