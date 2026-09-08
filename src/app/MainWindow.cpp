@@ -1842,37 +1842,53 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     updateActionStates();
 }
 
-bool MainWindow::confirmDiscard() {
-    // Loop rather than ask once. A save started from here serializes a SNAPSHOT and leaves
-    // the canvas live, so the user can paint while it writes; history correctly reports the
-    // document still dirty afterwards, and returning true on the strength of "the save
-    // succeeded" would discard those strokes with no second prompt. Each pass re-tests what
-    // is actually unsaved now.
-    while (doc_ != nullptr && doc_->isDirty()) {
-        const QString name = currentPath_.isEmpty() ? QStringLiteral("Untitled")
-                                                    : QFileInfo(currentPath_).fileName();
-        QMessageBox box(this);
-        box.setIcon(QMessageBox::Warning);
-        box.setWindowTitle(QStringLiteral("Unsaved changes"));
-        box.setText(QStringLiteral("Save changes to \"%1\" before closing?").arg(name));
-        box.setInformativeText(QStringLiteral("If you don't save, your changes will be lost."));
-        box.setStandardButtons(QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
-        box.setDefaultButton(QMessageBox::Save);
-
-        switch (box.exec()) {
-            case QMessageBox::Save:
-                // Only proceed if the write actually succeeded; a failed or cancelled
+bool resolveUnsavedChanges(const std::function<bool()>& isDirty,
+                           const std::function<DiscardAnswer()>& ask,
+                           const std::function<bool()>& save) {
+    // Re-test every pass, rather than trusting the outcome of the save. See the header.
+    while (isDirty()) {
+        switch (ask()) {
+            case DiscardAnswer::Save:
+                // Only continue if the write actually succeeded; a failed or cancelled
                 // Save As must not fall through to discarding the document.
-                if (!saveDocument()) return false;
+                if (!save()) return false;
                 break;  // round again: anything painted during that write is still unsaved
-            case QMessageBox::Discard:
+            case DiscardAnswer::Discard:
                 return true;
+            case DiscardAnswer::Cancel:
             default:
-                return false;  // Cancel, or the dialog was closed
+                return false;
         }
     }
     // Nothing to lose: no document, or every change is already on disk.
     return true;
+}
+
+DiscardAnswer MainWindow::askAboutUnsavedChanges() {
+    const QString name =
+        currentPath_.isEmpty() ? QStringLiteral("Untitled") : QFileInfo(currentPath_).fileName();
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(QStringLiteral("Unsaved changes"));
+    box.setText(QStringLiteral("Save changes to \"%1\" before closing?").arg(name));
+    box.setInformativeText(QStringLiteral("If you don't save, your changes will be lost."));
+    box.setStandardButtons(QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Save);
+
+    switch (box.exec()) {
+        case QMessageBox::Save:
+            return DiscardAnswer::Save;
+        case QMessageBox::Discard:
+            return DiscardAnswer::Discard;
+        default:
+            return DiscardAnswer::Cancel;  // Cancel, or the dialog was closed
+    }
+}
+
+bool MainWindow::confirmDiscard() {
+    return resolveUnsavedChanges([this] { return doc_ != nullptr && doc_->isDirty(); },
+                                 [this] { return askAboutUnsavedChanges(); },
+                                 [this] { return saveDocument(); });
 }
 
 void MainWindow::closeEvent(QCloseEvent* e) {

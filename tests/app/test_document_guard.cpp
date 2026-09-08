@@ -175,3 +175,98 @@ PE_TEST(mainwindow_exit_action_is_not_wired_straight_to_quit) {
     exitAction->trigger();
     PE_CHECK(!w.isVisible());
 }
+
+// The unsaved-changes rule, tested without the modal box that kept it untested. The dialog
+// and the save are injected, so each case scripts what the user answered and what the save
+// did, and asserts what the caller was told and how many times it was asked.
+namespace {
+
+struct DiscardScript {
+    std::vector<pe::app::DiscardAnswer> answers;  // consumed in order
+    std::vector<bool> saveResults;                // consumed in order
+    bool dirty = true;
+    // Set when a save "succeeds" but the user painted during it, so the document is still
+    // dirty afterwards. That is the case the old code got wrong.
+    bool staysDirtyAfterFirstSave = false;
+    int asked = 0;
+    int saved = 0;
+
+    bool run() {
+        return pe::app::resolveUnsavedChanges(
+            [this] { return dirty; }, [this] { return nextAnswer(); }, [this] { return doSave(); });
+    }
+    pe::app::DiscardAnswer nextAnswer() {
+        const std::size_t i = static_cast<std::size_t>(asked++);
+        return i < answers.size() ? answers[i] : pe::app::DiscardAnswer::Cancel;
+    }
+    bool doSave() {
+        const std::size_t i = static_cast<std::size_t>(saved++);
+        const bool ok = i < saveResults.size() ? saveResults[i] : true;
+        if (ok && !(staysDirtyAfterFirstSave && i == 0)) dirty = false;
+        return ok;
+    }
+};
+
+}  // namespace
+
+PE_TEST(unsaved_changes_asks_again_when_a_save_leaves_the_document_still_dirty) {
+    // The defect this rule exists for. A save serializes a snapshot and leaves the canvas
+    // live, so a stroke made while the worker writes is correctly NOT in the file. Returning
+    // true because the save succeeded discarded that stroke with no second prompt, on close,
+    // New and Open alike.
+    DiscardScript s;
+    s.answers = {pe::app::DiscardAnswer::Save, pe::app::DiscardAnswer::Save};
+    s.saveResults = {true, true};
+    s.staysDirtyAfterFirstSave = true;
+
+    PE_CHECK(s.run());
+    PE_CHECK_EQ(s.asked, 2);  // asked again about the stroke made during the first save
+    PE_CHECK_EQ(s.saved, 2);
+    PE_CHECK(!s.dirty);
+}
+
+PE_TEST(unsaved_changes_stops_asking_once_nothing_is_unsaved) {
+    // The inverse: an ordinary save with no edits during it must not re-prompt, or every
+    // close would ask twice.
+    DiscardScript s;
+    s.answers = {pe::app::DiscardAnswer::Save};
+    s.saveResults = {true};
+
+    PE_CHECK(s.run());
+    PE_CHECK_EQ(s.asked, 1);
+    PE_CHECK_EQ(s.saved, 1);
+}
+
+PE_TEST(unsaved_changes_does_not_ask_at_all_when_there_is_nothing_to_lose) {
+    DiscardScript s;
+    s.dirty = false;
+    PE_CHECK(s.run());
+    PE_CHECK_EQ(s.asked, 0);
+    PE_CHECK_EQ(s.saved, 0);
+}
+
+PE_TEST(unsaved_changes_refuses_when_the_save_fails_rather_than_looping) {
+    // A failed write, or a Save As the user cancelled. The caller must not proceed, and the
+    // prompt must not come back round: a read-only disk would otherwise trap the user in it.
+    DiscardScript s;
+    s.answers = {pe::app::DiscardAnswer::Save, pe::app::DiscardAnswer::Save};
+    s.saveResults = {false};
+
+    PE_CHECK(!s.run());
+    PE_CHECK_EQ(s.asked, 1);
+    PE_CHECK_EQ(s.saved, 1);
+    PE_CHECK(s.dirty);  // and the document still holds the work
+}
+
+PE_TEST(unsaved_changes_honours_discard_and_cancel) {
+    DiscardScript discard;
+    discard.answers = {pe::app::DiscardAnswer::Discard};
+    PE_CHECK(discard.run());        // the caller may proceed
+    PE_CHECK_EQ(discard.saved, 0);  // without writing anything
+    PE_CHECK(discard.dirty);
+
+    DiscardScript cancel;
+    cancel.answers = {pe::app::DiscardAnswer::Cancel};
+    PE_CHECK(!cancel.run());
+    PE_CHECK_EQ(cancel.saved, 0);
+}

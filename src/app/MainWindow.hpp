@@ -34,6 +34,24 @@ class HistoryPanel;
 class ColorPanel;
 class PropertiesPanel;
 
+// What the user chose when asked about unsaved changes.
+enum class DiscardAnswer { Save, Discard, Cancel };
+
+// May the caller go ahead and replace or close the document?
+//
+// The RULE, with the dialog and the save injected, so it can be tested without a modal box.
+// It is small and it was wrong: it used to return true as soon as a save succeeded, which
+// is not the same question. A save serializes a SNAPSHOT and leaves the canvas live, so the
+// user can paint while it writes; those strokes are correctly still unsaved afterwards, and
+// answering "yes, discard" on the strength of "the save worked" destroyed them with no
+// second prompt. So it asks again while `isDirty` still says there is something to lose.
+//
+// `save` returning false (a failed write, or a Save As the user cancelled) aborts rather
+// than looping, or a broken disk would trap the user in the prompt.
+[[nodiscard]] bool resolveUnsavedChanges(const std::function<bool()>& isDirty,
+                                         const std::function<DiscardAnswer()>& ask,
+                                         const std::function<bool()>& save);
+
 // The top-level application window. Wires the menus to the engine's document I/O and
 // shows the active document on a CanvasView. Color, Properties, Layers and History are
 // real panels; Swatches, Gradients, Patterns, Adjustments, Libraries, Channels and
@@ -75,6 +93,9 @@ private:
     // Returns false only if the user cancels, in which case the caller must abort.
     // True when there is nothing to lose, when the user saved, or when they discarded.
     [[nodiscard]] bool confirmDiscard();
+    // Shows the unsaved-changes prompt. Split out so confirmDiscard's rule is the part
+    // under test and the modal box is the part that is not; see resolveUnsavedChanges.
+    [[nodiscard]] DiscardAnswer askAboutUnsavedChanges();
 
     void buildMenuBar();
     void buildToolBar();
