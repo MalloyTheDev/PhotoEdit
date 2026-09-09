@@ -570,24 +570,29 @@ QIcon LayersPanel::checkerThumbnail(const QImage& img, int offX, int offY, Thumb
     p.setPen(QColor(0, 0, 0, 110));
     p.drawRect(ox, oy, scale.width - 1, scale.height - 1);
     if (clipped) {
-        // A corner arrow pointing down and left, at the bottom-left of the icon: the layer
-        // is bound to the one below it. Drawn white over black so it reads on any content,
-        // the same trick the marching ants and the transform box use.
-        constexpr int kArmX = 7;
-        constexpr int kArmY = 6;
-        const QPoint elbow(2, kThumb - 3);
-        const QPoint up(2, kThumb - 3 - kArmY);
-        const QPoint right(2 + kArmX, kThumb - 3);
+        // An arrow pointing DOWN, at the bottom left: this layer is bound to the one below
+        // it. Drawn white on black so it reads over any content, the same trick the marching
+        // ants and the transform box use, and drawn as a stem plus a SOLID head because at
+        // 26 pixels an outlined glyph turns to mush. The first version was an L with barbs
+        // at the corner and read as a mouse cursor.
+        const QPoint stemTop(4, kThumb - 11);
+        const QPoint stemBottom(4, kThumb - 7);
+        const QPoint head[3] = {QPoint(1, kThumb - 8), QPoint(7, kThumb - 8),
+                                QPoint(4, kThumb - 3)};
+        const QPoint headOutline[3] = {QPoint(0, kThumb - 9), QPoint(8, kThumb - 9),
+                                       QPoint(4, kThumb - 2)};
         p.setRenderHint(QPainter::Antialiasing, false);
-        for (int pass = 0; pass < 2; ++pass) {
-            // Pass 0 lays a dark 3px stroke, pass 1 the light 1px line on top of it.
-            p.setPen(
-                QPen(pass == 0 ? QColor(0, 0, 0, 200) : QColor(255, 255, 255), pass == 0 ? 3 : 1));
-            p.drawLine(up, elbow);
-            p.drawLine(elbow, right);
-            p.drawLine(elbow, elbow + QPoint(3, -3));  // the arrowhead's upper barb
-            p.drawLine(elbow, elbow + QPoint(3, 3));   // and its lower one
-        }
+        p.setPen(QPen(QColor(0, 0, 0, 220), 3));
+        p.drawLine(stemTop, stemBottom);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(0, 0, 0, 220));
+        p.drawPolygon(headOutline, 3);
+        p.setPen(QPen(QColor(255, 255, 255), 1));
+        p.drawLine(stemTop, stemBottom);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(255, 255, 255));
+        p.drawPolygon(head, 3);
+        p.setBrush(Qt::NoBrush);
     }
     p.end();
     return thumbIcon(pm);
