@@ -36,6 +36,7 @@
 #include <QMenuBar>
 #include <QMouseEvent>
 #include <QSize>
+#include <QSpinBox>
 #include <QString>
 #include <QToolBar>
 #include <QToolButton>
@@ -1166,4 +1167,79 @@ PE_TEST(mainwindow_a_clip_refusal_reaches_the_status_bar) {
     PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::NoEffect);
     PE_CHECK_EQ(w.document()->history().undoDepth(), static_cast<std::size_t>(0));
     PE_CHECK(!clip->isChecked());
+}
+
+PE_TEST(mainwindow_brush_settings_are_kept_per_tool) {
+    // One shared set is how you drop the brush to 30% for a soft pass, reach for the Eraser,
+    // and find it erasing at 30% too. The options bar shows the number, but the user is not
+    // thinking of it as the eraser's number, so it reads as the eraser not working properly.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    PE_REQUIRE(w.canvas() != nullptr);
+
+    QAction* brush = stripAction(w, QStringLiteral("Brush"));
+    QAction* eraser = stripAction(w, QStringLiteral("Eraser"));
+    PE_REQUIRE(brush != nullptr && eraser != nullptr);
+    auto* sizeBox = w.findChild<QSpinBox*>(QStringLiteral("BrushSize"));
+    auto* opacityBox = w.findChild<QSpinBox*>(QStringLiteral("BrushOpacity"));
+    PE_REQUIRE(sizeBox != nullptr && opacityBox != nullptr);
+
+    brush->trigger();
+    sizeBox->setValue(80);
+    opacityBox->setValue(30);
+    PE_CHECK_NEAR(w.canvas()->tool().brush().diameter, 80.0f);
+    PE_CHECK_NEAR(w.canvas()->tool().brush().opacity, 0.3f);
+
+    // The Eraser starts from its own settings, not the brush's.
+    eraser->trigger();
+    PE_CHECK_NEAR(w.canvas()->tool().brush().opacity, 1.0f);
+    PE_CHECK_NEAR(w.canvas()->tool().brush().diameter, 20.0f);
+    // And the options bar shows the eraser's, or it reports one tool's numbers while
+    // another paints with its own.
+    PE_CHECK_EQ(opacityBox->value(), 100);
+    PE_CHECK_EQ(sizeBox->value(), 20);
+
+    // Editing here changes the Eraser only.
+    sizeBox->setValue(9);
+    PE_CHECK_NEAR(w.canvas()->tool().brush().diameter, 9.0f);
+
+    // Back to the Brush: its own settings come back, untouched.
+    brush->trigger();
+    PE_CHECK_NEAR(w.canvas()->tool().brush().diameter, 80.0f);
+    PE_CHECK_NEAR(w.canvas()->tool().brush().opacity, 0.3f);
+    PE_CHECK_EQ(sizeBox->value(), 80);
+    PE_CHECK_EQ(opacityBox->value(), 30);
+
+    // And the Eraser kept its edit.
+    eraser->trigger();
+    PE_CHECK_NEAR(w.canvas()->tool().brush().diameter, 9.0f);
+
+    // Showing a setting must not round it away. The boxes are integers and the settings are
+    // floats, so a refresh that echoed back through valueChanged would quietly replace 80.6
+    // with 81 every time the user switched tools.
+    brush->trigger();
+    w.canvas()->tool().brush().diameter = 80.6f;  // set on the Brush, past the integer box
+    eraser->trigger();                            // carries 80.6 into the Brush's slot
+    brush->trigger();                             // and brings it back, box refreshed to 81
+    PE_CHECK_NEAR(w.canvas()->tool().brush().diameter, 80.6f);
+    PE_CHECK_EQ(sizeBox->value(), 81);  // displayed rounded, stored exact
+}
+
+PE_TEST(mainwindow_painting_a_mask_keeps_the_brush_s_own_settings) {
+    // Mask painting is still the Brush, pointed at a mask. A size that changed when a mask
+    // thumbnail was clicked would be its own surprise, so the two share a slot.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    QAction* brush = stripAction(w, QStringLiteral("Brush"));
+    PE_REQUIRE(brush != nullptr && w.canvas() != nullptr);
+    brush->trigger();
+
+    auto* sizeBox = w.findChild<QSpinBox*>(QStringLiteral("BrushSize"));
+    PE_REQUIRE(sizeBox != nullptr);
+    sizeBox->setValue(64);
+
+    w.canvas()->setMaskEditTarget(true);
+    w.canvas()->setTool(pe::app::CanvasView::Tool::Brush);  // re-enters as MaskPaint
+    PE_CHECK_NEAR(w.canvas()->tool().brush().diameter, 64.0f);
+    PE_CHECK_EQ(sizeBox->value(), 64);
 }

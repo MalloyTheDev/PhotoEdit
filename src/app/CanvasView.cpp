@@ -315,6 +315,23 @@ void CanvasView::setTool(Tool t) {
         maskEditTarget_ = false;
         emit maskEditTargetCleared();
     }
+    // Carry the current settings back to the outgoing tool's slot and load the incoming
+    // one's, BEFORE the mode changes, so a stroke never straddles two sets.
+    if (t == Tool::Brush) {
+        swapBrushSettingsTo(maskEditTarget_ ? pe::PaintToolController::Mode::MaskPaint
+                                            : pe::PaintToolController::Mode::Brush);
+    } else if (t == Tool::Eraser) {
+        swapBrushSettingsTo(pe::PaintToolController::Mode::Eraser);
+    } else if (t == Tool::Dodge) {
+        swapBrushSettingsTo(pe::PaintToolController::Mode::Dodge);
+    } else if (t == Tool::Clone) {
+        swapBrushSettingsTo(pe::PaintToolController::Mode::Clone);
+    } else if (t == Tool::Blur) {
+        swapBrushSettingsTo(pe::PaintToolController::Mode::Blur);
+    } else if (t == Tool::Heal) {
+        swapBrushSettingsTo(pe::PaintToolController::Mode::Heal);
+    }
+
     if (t == Tool::Brush) {
         // When a layer mask is the edit target, the Brush paints the mask instead of pixels.
         tool_.setMode(maskEditTarget_ ? pe::PaintToolController::Mode::MaskPaint
@@ -367,6 +384,25 @@ void CanvasView::setTool(Tool t) {
         if (!transforming_) beginTransform();
     }
     if (changed) emit toolChanged(t);
+}
+
+std::size_t CanvasView::brushSlotFor(pe::PaintToolController::Mode m) noexcept {
+    using Mode = pe::PaintToolController::Mode;
+    // MaskPaint shares the Brush's settings: it IS the Brush, pointed at a mask.
+    if (m == Mode::MaskPaint) m = Mode::Brush;
+    const auto i = static_cast<std::size_t>(m);
+    return i < kPaintModeCount ? i : 0;
+}
+
+void CanvasView::swapBrushSettingsTo(pe::PaintToolController::Mode m) {
+    if (brushSlotFor(m) == brushSlotFor(brushSlotMode_)) {
+        brushSlotMode_ = m;
+        return;  // same slot (Brush and MaskPaint): nothing to carry across
+    }
+    brushPerMode_[brushSlotFor(brushSlotMode_)] = tool_.brush();
+    tool_.brush() = brushPerMode_[brushSlotFor(m)];
+    brushSlotMode_ = m;
+    emit brushSettingsSwapped();
 }
 
 void CanvasView::setShowTransformControls(bool on) {

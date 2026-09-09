@@ -269,12 +269,18 @@ private:
     QAction* clipAct_ = nullptr;
     QSpinBox* sizeSpin_ = nullptr;        // options bar: brush diameter
     QSpinBox* opacitySpinOpt_ = nullptr;  // options bar: brush opacity
-    QSpinBox* wandTolSpin_ = nullptr;     // options bar: magic-wand tolerance
-    QLabel* docTab_ = nullptr;            // document tab strip above the canvas
-    QToolButton* fgSwatch_ = nullptr;     // foreground color swatch (tool strip)
-    QToolButton* bgSwatch_ = nullptr;     // background color swatch (tool strip)
-    QColor fgColor_;                      // current foreground (paint) color
-    QColor bgColor_;                      // current background color
+    QSpinBox* flowSpin_ = nullptr;        // options bar: brush flow
+    QSpinBox* stabSpin_ = nullptr;        // options bar: stroke stabilization
+    // Show the ACTIVE tool's brush settings. They are kept per tool, so switching tools
+    // changes them under the options bar and the boxes have to catch up or they report the
+    // previous tool's numbers while the new one paints with its own.
+    void refreshBrushOptions();
+    QSpinBox* wandTolSpin_ = nullptr;  // options bar: magic-wand tolerance
+    QLabel* docTab_ = nullptr;         // document tab strip above the canvas
+    QToolButton* fgSwatch_ = nullptr;  // foreground color swatch (tool strip)
+    QToolButton* bgSwatch_ = nullptr;  // background color swatch (tool strip)
+    QColor fgColor_;                   // current foreground (paint) color
+    QColor bgColor_;                   // current background color
 
     QString currentPath_;
 };

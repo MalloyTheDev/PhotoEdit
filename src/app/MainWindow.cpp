@@ -995,30 +995,32 @@ void MainWindow::buildOptionsBar() {
     bl->setSpacing(6);
     bl->addWidget(new QLabel(QStringLiteral("Size"), brushOptions_));
     sizeSpin_ = new QSpinBox(brushOptions_);
+    sizeSpin_->setObjectName(QStringLiteral("BrushSize"));
     sizeSpin_->setRange(1, 500);
     sizeSpin_->setValue(static_cast<int>(canvas_->tool().brush().diameter));
     sizeSpin_->setSuffix(QStringLiteral(" px"));
     bl->addWidget(sizeSpin_);
     bl->addWidget(new QLabel(QStringLiteral("Opacity"), brushOptions_));
     opacitySpinOpt_ = new QSpinBox(brushOptions_);
+    opacitySpinOpt_->setObjectName(QStringLiteral("BrushOpacity"));
     opacitySpinOpt_->setRange(1, 100);
     opacitySpinOpt_->setValue(static_cast<int>(canvas_->tool().brush().opacity * 100.0f));
     opacitySpinOpt_->setSuffix(QStringLiteral("%"));
     bl->addWidget(opacitySpinOpt_);
     bl->addWidget(new QLabel(QStringLiteral("Flow"), brushOptions_));
-    auto* flowSpin = new QSpinBox(brushOptions_);
-    flowSpin->setRange(1, 100);
-    flowSpin->setValue(static_cast<int>(canvas_->tool().brush().flow * 100.0f));
-    flowSpin->setSuffix(QStringLiteral("%"));
-    bl->addWidget(flowSpin);
+    flowSpin_ = new QSpinBox(brushOptions_);
+    flowSpin_->setRange(1, 100);
+    flowSpin_->setValue(static_cast<int>(canvas_->tool().brush().flow * 100.0f));
+    flowSpin_->setSuffix(QStringLiteral("%"));
+    bl->addWidget(flowSpin_);
 
     // Brush dynamics UI skeleton: stabilization (0-100%)
     bl->addWidget(new QLabel(QStringLiteral("Stabilize"), brushOptions_));
-    auto* stabSpin = new QSpinBox(brushOptions_);
-    stabSpin->setRange(0, 100);
-    stabSpin->setValue(static_cast<int>(canvas_->tool().brush().stabilize * 100.0f));
-    stabSpin->setSuffix(QStringLiteral("%"));
-    bl->addWidget(stabSpin);
+    stabSpin_ = new QSpinBox(brushOptions_);
+    stabSpin_->setRange(0, 100);
+    stabSpin_->setValue(static_cast<int>(canvas_->tool().brush().stabilize * 100.0f));
+    stabSpin_->setSuffix(QStringLiteral("%"));
+    bl->addWidget(stabSpin_);
     brushOptAction_ = optionsBar_->addWidget(brushOptions_);
     brushOptAction_->setObjectName(QStringLiteral("BrushOptionsAction"));
 
@@ -1026,10 +1028,12 @@ void MainWindow::buildOptionsBar() {
             [this](int v) { canvas_->tool().brush().diameter = static_cast<float>(v); });
     connect(opacitySpinOpt_, &QSpinBox::valueChanged, this,
             [this](int v) { canvas_->tool().brush().opacity = static_cast<float>(v) / 100.0f; });
-    connect(flowSpin, &QSpinBox::valueChanged, this,
+    connect(flowSpin_, &QSpinBox::valueChanged, this,
             [this](int v) { canvas_->tool().brush().flow = static_cast<float>(v) / 100.0f; });
-    connect(stabSpin, &QSpinBox::valueChanged, this,
+    connect(stabSpin_, &QSpinBox::valueChanged, this,
             [this](int v) { canvas_->tool().brush().stabilize = static_cast<float>(v) / 100.0f; });
+    // Brush settings are per tool, so a tool change swaps them under these boxes.
+    connect(canvas_, &CanvasView::brushSettingsSwapped, this, &MainWindow::refreshBrushOptions);
 
     // Magic-wand options — per-channel tolerance for the flood; shown only for the Wand tool.
     wandOptions_ = new QWidget(optionsBar_);
@@ -1205,6 +1209,22 @@ void MainWindow::buildCentral() {
     v->addWidget(canvas_, 1);
     setCentralWidget(central);
     refreshDocTab();
+}
+
+void MainWindow::refreshBrushOptions() {
+    // Blocked, because setValue would otherwise fire valueChanged and write the value
+    // straight back into the settings it was just read from. Harmless today, and exactly
+    // the loop that bites when one of these gains a side effect.
+    const auto show = [](QSpinBox* box, int value) {
+        if (box == nullptr) return;
+        const QSignalBlocker blocked(box);
+        box->setValue(value);
+    };
+    const pe::BrushSettings& b = canvas_->tool().brush();
+    show(sizeSpin_, static_cast<int>(std::lround(b.diameter)));
+    show(opacitySpinOpt_, static_cast<int>(std::lround(b.opacity * 100.0f)));
+    show(flowSpin_, static_cast<int>(std::lround(b.flow * 100.0f)));
+    show(stabSpin_, static_cast<int>(std::lround(b.stabilize * 100.0f)));
 }
 
 void MainWindow::updateOptionsBar(OptKind kind, const QString& toolName) {

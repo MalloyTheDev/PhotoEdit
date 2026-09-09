@@ -8,6 +8,7 @@
 #include "pe/core/ViewTransform.hpp"
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -133,6 +134,10 @@ signals:
     // Mask-edit was exited because a non-Brush tool became active (only the Brush paints masks).
     // MainWindow relays it so the Layers panel drops the focus ring; keeps the ring honest.
     void maskEditTargetCleared();
+    // The brush settings changed because the TOOL changed, so whatever is showing them has
+    // to catch up. Not emitted when the settings are edited through those controls, which
+    // would echo straight back at them.
+    void brushSettingsSwapped();
     // The canvas changed the active tool ITSELF: grabbing a transform handle under the Move
     // tool enters Free Transform. Without this the tool strip would keep claiming Move while
     // the canvas was transforming. Not emitted when the shell set the tool.
@@ -279,6 +284,21 @@ private:
     bool autoSelect_ = false;
     AutoSelectMode autoSelectMode_ = AutoSelectMode::Layer;
     bool showTransformControls_ = false;
+
+    // Brush settings, kept per paint mode.
+    //
+    // One shared set is how you drop the brush to 30% for a soft pass, reach for the Eraser,
+    // and find it erasing at 30% too, with nothing on screen saying why: the options bar
+    // shows the number, but the user is not thinking of it as the eraser's number. Every
+    // comparable editor keeps them per tool.
+    //
+    // MaskPaint deliberately shares the Brush's slot: painting a mask is still the Brush,
+    // and a size that changes when a mask thumbnail is clicked would be its own surprise.
+    static constexpr std::size_t kPaintModeCount = 9;
+    [[nodiscard]] static std::size_t brushSlotFor(pe::PaintToolController::Mode m) noexcept;
+    std::array<pe::BrushSettings, kPaintModeCount> brushPerMode_{};
+    pe::PaintToolController::Mode brushSlotMode_ = pe::PaintToolController::Mode::Brush;
+    void swapBrushSettingsTo(pe::PaintToolController::Mode m);
     QPixmap frozenFrame_;
 
     bool needsFit_ = true;  // fit-to-window pending until the widget has a valid size
