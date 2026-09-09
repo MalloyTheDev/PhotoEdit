@@ -362,6 +362,18 @@ void MainWindow::buildMenuBar() {
             if (layers_ != nullptr) layers_->deleteLayer();
         });
 
+        clipAct_ = layerMenu->addAction(QStringLiteral("&Clip to Layer Below"), this, [this] {
+            if (layers_ != nullptr) layers_->toggleClipToLayerBelow();
+            // Qt flips a checkable action BEFORE the handler runs, so a refused toggle would
+            // otherwise leave the menu claiming the layer is clipped when it is not. Nothing
+            // else re-syncs it here: a refusal makes no document change to observe.
+            updateActionStates();
+        });
+        clipAct_->setCheckable(true);
+        clipAct_->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+G")));
+        clipAct_->setToolTip(
+            QStringLiteral("Confine this layer to the coverage of the layer beneath it"));
+
         layerMenu->addSeparator();
         auto* arrangeMenu = layerMenu->addMenu(QStringLiteral("&Arrange"));
         struct ArrangeEntry {
@@ -841,6 +853,11 @@ void MainWindow::updateActionStates() {
     // out at the ends of the stack instead of silently doing nothing.
     if (undoAct_ != nullptr) undoAct_->setEnabled(hasDoc && doc_->history().canUndo());
     if (redoAct_ != nullptr) redoAct_->setEnabled(hasDoc && doc_->history().canRedo());
+    // Clipping is a per-layer state, not a one-way action, so the entry carries a checkmark
+    // that follows the ACTIVE layer. Left stale it would report the previous layer's state.
+    if (clipAct_ != nullptr) {
+        clipAct_->setChecked(hasDoc && layers_ != nullptr && layers_->activeIsClipped());
+    }
 }
 
 void MainWindow::showAbout() {

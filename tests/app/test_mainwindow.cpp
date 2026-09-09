@@ -1113,3 +1113,57 @@ PE_TEST(mainwindow_a_canvas_refusal_is_recorded_without_a_prior_tool_message) {
     clickOffCanvas();
     PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(1));  // one refusal, one record
 }
+
+PE_TEST(mainwindow_clip_to_layer_below_is_a_state_not_a_one_way_switch) {
+    // Clipping is a per-layer state, so the menu entry carries a checkmark. Left stale it
+    // would report the previously active layer's state, which is worse than no mark at all.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    PE_REQUIRE(w.document() != nullptr);
+    auto second = std::make_unique<pe::PixelLayer>("Above");
+    w.document()->cmdInsertTopLevel(w.document()->topLevelCount(), std::move(second));
+    const pe::LayerId above = w.document()->topLevelLayers()[1]->id();
+    const pe::LayerId below = w.document()->topLevelLayers()[0]->id();
+    w.document()->setActiveLayer(above);
+
+    QAction* clip = findAction(w.menuBar(), QStringLiteral("&Clip to Layer Below"));
+    PE_REQUIRE(clip != nullptr);
+    PE_CHECK(clip->isCheckable());
+    PE_CHECK(clip->shortcut().toString(QKeySequence::PortableText) == QStringLiteral("Ctrl+Alt+G"));
+    PE_CHECK(!clip->isChecked());
+
+    clip->trigger();
+    PE_CHECK(w.document()->findLayer(above)->clipped());
+    PE_CHECK(clip->isChecked());  // the mark followed the change
+
+    // Switching to a layer that is NOT clipped clears the mark.
+    w.document()->setActiveLayer(below);
+    PE_CHECK(!clip->isChecked());
+    w.document()->setActiveLayer(above);
+    PE_CHECK(clip->isChecked());
+
+    // And triggering again releases it.
+    clip->trigger();
+    PE_CHECK(!w.document()->findLayer(above)->clipped());
+    PE_CHECK(!clip->isChecked());
+}
+
+PE_TEST(mainwindow_a_clip_refusal_reaches_the_status_bar) {
+    // The bottom layer has nothing to clip to. Silently setting the flag would leave a
+    // history entry that changes no pixel and a checkmark that claims something untrue.
+    pe::app::MainWindow w;
+    w.setDocument(docWithPixelLayer(), QString());
+    PE_REQUIRE(w.document() != nullptr);
+    PE_REQUIRE(w.document()->topLevelCount() == static_cast<std::size_t>(1));
+    w.clearRefusals();
+
+    QAction* clip = findAction(w.menuBar(), QStringLiteral("&Clip to Layer Below"));
+    PE_REQUIRE(clip != nullptr);
+    clip->trigger();
+
+    PE_REQUIRE(w.refusals().size() == 1);
+    PE_CHECK(w.refusals()[0].operation == std::string("layer.clip"));
+    PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::NoEffect);
+    PE_CHECK_EQ(w.document()->history().undoDepth(), static_cast<std::size_t>(0));
+    PE_CHECK(!clip->isChecked());
+}

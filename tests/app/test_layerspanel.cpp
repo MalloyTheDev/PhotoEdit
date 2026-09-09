@@ -42,6 +42,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QSize>
+#include <QSpinBox>
 #include <QString>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -822,5 +823,188 @@ PE_TEST(layerspanel_a_mask_thumbnail_is_framed_like_the_layer_beside_it) {
     // And it is not vacuously true because both are empty.
     PE_CHECK(maskImg.pixelColor(kThumb / 2, kThumb / 2).alpha() > 0);
     PE_CHECK(maskImg.pixelColor(kThumb / 2, 0).alpha() == 0);  // trimmed top, like the layer
+    panel.setDocument(nullptr);
+}
+
+// --- fill opacity and clipping (#141) -----------------------------------------------------
+
+namespace {
+
+QSpinBox* spinOf(pe::app::LayersPanel& panel, const QString& name) {
+    return panel.findChild<QSpinBox*>(name);
+}
+
+}  // namespace
+
+PE_TEST(layerspanel_the_fill_opacity_box_reaches_the_document_and_undoes) {
+    // fillOpacity has been modelled and composited since M1 and was reachable from nowhere
+    // in the application, so a property that changes the picture could not be set at all.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    const pe::LayerId id = doc->activeLayer();
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QSpinBox* fill = spinOf(panel, QStringLiteral("LayerFillOpacity"));
+    QSpinBox* opacity = spinOf(panel, QStringLiteral("LayerOpacity"));
+    PE_REQUIRE(fill != nullptr && opacity != nullptr);
+    PE_CHECK(!fill->toolTip().isEmpty());
+    PE_CHECK(!fill->accessibleName().isEmpty());
+    PE_CHECK_EQ(fill->value(), 100);
+
+    fill->setValue(40);
+    emit fill->editingFinished();
+    PE_CHECK_NEAR(doc->findLayer(id)->fillOpacity(), 0.4f);
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+    // It is a separate control from opacity, not an alias for it.
+    PE_CHECK_NEAR(doc->findLayer(id)->opacity(), 1.0f);
+    PE_CHECK_EQ(opacity->value(), 100);
+
+    // A second edit, so undo has a non-default value to restore: undoing to the model's
+    // default would look right for the first edit and be wrong for every one after it.
+    fill->setValue(70);
+    emit fill->editingFinished();
+    PE_CHECK_NEAR(doc->findLayer(id)->fillOpacity(), 0.7f);
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(2));
+
+    doc->history().undo();
+    PE_CHECK_NEAR(doc->findLayer(id)->fillOpacity(), 0.4f);
+    PE_CHECK_EQ(fill->value(), 40);  // and the box followed the undo
+
+    doc->history().undo();
+    PE_CHECK_NEAR(doc->findLayer(id)->fillOpacity(), 1.0f);
+    PE_CHECK_EQ(fill->value(), 100);
+
+    // Re-committing the value already in the document pushes nothing: one signal fires on
+    // every focus change, and a history entry per focus change is not an edit.
+    emit fill->editingFinished();
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_the_fill_box_follows_the_active_layer) {
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    const pe::LayerId first = doc->activeLayer();
+    auto second = std::make_unique<pe::PixelLayer>("Second");
+    second->setFillOpacity(0.25f);
+    const pe::LayerId secondId = second->id();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(second));
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QSpinBox* fill = spinOf(panel, QStringLiteral("LayerFillOpacity"));
+    PE_REQUIRE(fill != nullptr);
+
+    doc->setActiveLayer(secondId);
+    PE_CHECK_EQ(fill->value(), 25);
+    doc->setActiveLayer(first);
+    PE_CHECK_EQ(fill->value(), 100);
+    // Following the active layer must not itself push a command.
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_clipping_toggles_and_refuses_at_the_bottom_of_a_stack) {
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    const pe::LayerId bottom = doc->activeLayer();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<pe::PixelLayer>("Above"));
+    const pe::LayerId above = doc->topLevelLayers()[1]->id();
+
+    pe::app::LayersPanel panel;
+    std::vector<pe::Refusal> said;
+    QObject::connect(&panel, &pe::app::LayersPanel::refused,
+                     [&said](const pe::Refusal& r) { said.push_back(r); });
+    panel.setDocument(doc.get());
+
+    doc->setActiveLayer(above);
+    PE_CHECK(!panel.activeIsClipped());
+    panel.toggleClipToLayerBelow();
+    PE_CHECK(doc->findLayer(above)->clipped());
+    PE_CHECK(panel.activeIsClipped());
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+    PE_CHECK(said.empty());
+
+    // The same entry releases it, so it is a state and not a one-way switch.
+    panel.toggleClipToLayerBelow();
+    PE_CHECK(!doc->findLayer(above)->clipped());
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(2));
+
+    // Undoing the RELEASE has to put the clip back. Restoring the model default instead
+    // would look correct for the first toggle and be wrong for every one after it.
+    doc->history().undo();
+    PE_CHECK(doc->findLayer(above)->clipped());
+    doc->history().redo();
+    PE_CHECK(!doc->findLayer(above)->clipped());
+
+    // The bottom layer has nothing beneath it. The compositor leaves such a layer
+    // unclipped, so setting the flag would be a history entry that changes no pixel.
+    doc->setActiveLayer(bottom);
+    panel.toggleClipToLayerBelow();
+    PE_REQUIRE(said.size() == 1);
+    PE_CHECK(said[0].code == pe::RefusalCode::NoEffect);
+    PE_CHECK(!doc->findLayer(bottom)->clipped());
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(2));
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_clipping_uses_the_layers_own_stack_not_the_top_level) {
+    // Clipping binds a layer to the one below it in the SAME stack, so what matters is its
+    // index among its siblings. A nested layer at the bottom of its group has nothing to
+    // clip to even though it sits nowhere near the bottom of the document.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    auto group = std::make_unique<pe::GroupLayer>("G");
+    group->addChild(std::make_unique<pe::PixelLayer>("Lower"));
+    group->addChild(std::make_unique<pe::PixelLayer>("Upper"));
+    const pe::LayerId lower = group->children()[0]->id();
+    const pe::LayerId upper = group->children()[1]->id();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+
+    pe::app::LayersPanel panel;
+    std::vector<pe::Refusal> said;
+    QObject::connect(&panel, &pe::app::LayersPanel::refused,
+                     [&said](const pe::Refusal& r) { said.push_back(r); });
+    panel.setDocument(doc.get());
+
+    doc->setActiveLayer(upper);
+    panel.toggleClipToLayerBelow();
+    PE_CHECK(doc->findLayer(upper)->clipped());
+    PE_CHECK(said.empty());
+
+    doc->setActiveLayer(lower);  // bottom of its group, though not of the document
+    panel.toggleClipToLayerBelow();
+    PE_REQUIRE(said.size() == 1);
+    PE_CHECK(said[0].code == pe::RefusalCode::NoEffect);
+    PE_CHECK(!doc->findLayer(lower)->clipped());
+    panel.setDocument(nullptr);
+}
+
+PE_TEST(layerspanel_a_clipped_row_is_marked_in_its_thumbnail) {
+    // A clipped row is otherwise indistinguishable from an ordinary one, which makes the
+    // state invisible: the picture changes and nothing in the panel says why.
+    auto doc = pe::Document::createBlank(pe::Size{400, 400});
+    PE_REQUIRE(doc != nullptr);
+    baseLayer(*doc)->tiles().fillRect(pe::Rect{0, 0, 400, 400}, pe::Rgba8{120, 120, 120, 255});
+    const pe::LayerId id = doc->activeLayer();
+
+    pe::app::LayersPanel panel;
+    panel.setDocument(doc.get());
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr && tree->topLevelItemCount() == 1);
+    const QImage plain = iconImage(tree->topLevelItem(0), 0);
+    PE_REQUIRE(!plain.isNull());
+
+    doc->history().push(std::make_unique<pe::SetClippedCommand>(id, true));
+    const QImage marked = iconImage(tree->topLevelItem(0), 0);
+    PE_REQUIRE(!marked.isNull());
+    PE_CHECK(marked != plain);
+    // The marker sits at the bottom left, so that corner changed and the middle did not.
+    PE_CHECK(marked.pixelColor(3, kThumb - 4) != plain.pixelColor(3, kThumb - 4));
+    PE_CHECK(marked.pixelColor(kThumb / 2, kThumb / 2) == plain.pixelColor(kThumb / 2, kThumb / 2));
+
+    doc->history().undo();
+    PE_CHECK(iconImage(tree->topLevelItem(0), 0) == plain);  // and it goes away again
     panel.setDocument(nullptr);
 }

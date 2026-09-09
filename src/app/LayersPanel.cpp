@@ -17,6 +17,7 @@
 #include <QHeaderView>
 #include <QIcon>
 #include <QImage>
+#include <QLabel>
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
@@ -103,6 +104,33 @@ protected:
 
 }  // namespace
 
+namespace {
+
+// Where `id` sits among its OWN siblings, or npos when the document does not hold it.
+//
+// Clipping binds a layer to the one below it in the same stack, so what matters is the
+// index within its parent, not within the top level: a nested layer at the bottom of its
+// group has nothing to clip to even though it is nowhere near the bottom of the document.
+std::size_t indexInOwnStack(std::span<const std::unique_ptr<pe::Layer>> siblings, pe::LayerId id) {
+    for (std::size_t i = 0; i < siblings.size(); ++i) {
+        const pe::Layer* l = siblings[i].get();
+        if (l == nullptr) continue;
+        if (l->id() == id) return i;
+        if (l->kind() == pe::LayerKind::Group) {
+            const auto* g = static_cast<const pe::GroupLayer*>(l);
+            const std::size_t inside = indexInOwnStack(g->children(), id);
+            if (inside != pe::GroupLayer::npos) return inside;
+        }
+    }
+    return pe::GroupLayer::npos;
+}
+
+std::size_t indexInOwnStack(const pe::Document& doc, pe::LayerId id) {
+    return indexInOwnStack(doc.topLevelLayers(), id);
+}
+
+}  // namespace
+
 std::size_t reorderTargetForDrop(std::size_t fromIndex, int insertBeforeRow, int rowCount) {
     if (rowCount <= 0 || fromIndex >= static_cast<std::size_t>(rowCount)) {
         return pe::GroupLayer::npos;
@@ -126,12 +154,39 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     for (int i = 0; i < static_cast<int>(pe::BlendMode::Count); ++i) {
         blend_->addItem(QString::fromUtf8(pe::blendModeName(static_cast<pe::BlendMode>(i))));
     }
+    blend_->setToolTip(QStringLiteral("How this layer combines with the layers beneath it"));
+    blend_->setAccessibleName(QStringLiteral("Blend mode"));
+
     opacity_ = new QSpinBox(this);
+    opacity_->setObjectName(QStringLiteral("LayerOpacity"));
     opacity_->setRange(0, 100);
     opacity_->setSuffix(QStringLiteral("%"));
     opacity_->setValue(100);
+    opacity_->setToolTip(QStringLiteral("Opacity of the whole layer"));
+    opacity_->setAccessibleName(QStringLiteral("Layer opacity"));
+
+    // Fill opacity scales the layer's own pixels and multiplies with opacity, so the two are
+    // independent. Modelled and composited since M1, persisted since v8, and until now
+    // reachable from nowhere in the application.
+    fill_ = new QSpinBox(this);
+    fill_->setObjectName(QStringLiteral("LayerFillOpacity"));
+    fill_->setRange(0, 100);
+    fill_->setSuffix(QStringLiteral("%"));
+    fill_->setValue(100);
+    fill_->setToolTip(
+        QStringLiteral("Opacity of the layer's own pixels, applied on top of "
+                       "the layer opacity"));
+    fill_->setAccessibleName(QStringLiteral("Layer fill opacity"));
+
     topRow->addWidget(blend_, 1);
+    auto* opacityLabel = new QLabel(QStringLiteral("Opacity"), this);
+    opacityLabel->setBuddy(opacity_);
+    topRow->addWidget(opacityLabel);
     topRow->addWidget(opacity_);
+    auto* fillLabel = new QLabel(QStringLiteral("Fill"), this);
+    fillLabel->setBuddy(fill_);
+    topRow->addWidget(fillLabel);
+    topRow->addWidget(fill_);
     root->addLayout(topRow);
 
     auto* layerTree = new LayerTree(this);
@@ -197,6 +252,7 @@ LayersPanel::LayersPanel(QWidget* parent) : QWidget(parent) {
     }
     root->addLayout(btnRow);
 
+    connect(fill_, &QSpinBox::editingFinished, this, &LayersPanel::onFillOpacityEdited);
     connect(tree_, &QTreeWidget::currentItemChanged, this, &LayersPanel::onRowChanged);
     connect(tree_, &QTreeWidget::itemSelectionChanged, this, &LayersPanel::onSelectionChanged);
     connect(tree_, &QTreeWidget::itemChanged, this, &LayersPanel::onItemChanged);
@@ -449,9 +505,10 @@ QIcon LayersPanel::layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> si
     // tile or two instead of the whole document.
     const ThumbScale scale = thumbScaleFor(canvas);
     const int divisor = scale.divisor;
+    const bool clipped = siblings[index]->clipped();
     const pe::Rect content = siblings[index]->contentBounds().intersected(canvas);
     if (content.isEmpty()) {
-        return checkerThumbnail(QImage(), 0, 0, scale);  // nothing on this layer
+        return checkerThumbnail(QImage(), 0, 0, scale, clipped);  // nothing on this layer
     }
 
     // Snap outward to whole divisor-blocks of the CANVAS grid, so an output pixel never
@@ -468,7 +525,7 @@ QIcon LayersPanel::layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> si
     const QImage src(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),
                      buf.width() * 4, QImage::Format_RGBA8888);
     return checkerThumbnail(src, (ax - canvas.left()) / divisor, (ay - canvas.top()) / divisor,
-                            scale);
+                            scale, clipped);
 }
 
 LayersPanel::ThumbScale LayersPanel::thumbScaleFor(pe::Rect canvas) {
@@ -483,7 +540,8 @@ LayersPanel::ThumbScale LayersPanel::thumbScaleFor(pe::Rect canvas) {
 // The checkerboard, the border, and `img` placed at (offX, offY) within the canvas box.
 // Split out so the empty-layer case shows the same checker as a transparent one rather than
 // no icon at all.
-QIcon LayersPanel::checkerThumbnail(const QImage& img, int offX, int offY, ThumbScale scale) {
+QIcon LayersPanel::checkerThumbnail(const QImage& img, int offX, int offY, ThumbScale scale,
+                                    bool clipped) {
     constexpr int kThumb = 26;
     // The document is centred in the square icon. It used to be pinned to the top left, so a
     // landscape canvas (which is most of them) left a band of bare checker along the bottom
@@ -511,6 +569,26 @@ QIcon LayersPanel::checkerThumbnail(const QImage& img, int offX, int offY, Thumb
     p.setClipping(false);
     p.setPen(QColor(0, 0, 0, 110));
     p.drawRect(ox, oy, scale.width - 1, scale.height - 1);
+    if (clipped) {
+        // A corner arrow pointing down and left, at the bottom-left of the icon: the layer
+        // is bound to the one below it. Drawn white over black so it reads on any content,
+        // the same trick the marching ants and the transform box use.
+        constexpr int kArmX = 7;
+        constexpr int kArmY = 6;
+        const QPoint elbow(2, kThumb - 3);
+        const QPoint up(2, kThumb - 3 - kArmY);
+        const QPoint right(2 + kArmX, kThumb - 3);
+        p.setRenderHint(QPainter::Antialiasing, false);
+        for (int pass = 0; pass < 2; ++pass) {
+            // Pass 0 lays a dark 3px stroke, pass 1 the light 1px line on top of it.
+            p.setPen(
+                QPen(pass == 0 ? QColor(0, 0, 0, 200) : QColor(255, 255, 255), pass == 0 ? 3 : 1));
+            p.drawLine(up, elbow);
+            p.drawLine(elbow, right);
+            p.drawLine(elbow, elbow + QPoint(3, -3));  // the arrowhead's upper barb
+            p.drawLine(elbow, elbow + QPoint(3, 3));   // and its lower one
+        }
+    }
     p.end();
     return thumbIcon(pm);
 }
@@ -658,9 +736,11 @@ void LayersPanel::syncActiveControls() {
     const bool has = a != nullptr;
     blend_->setEnabled(has);
     opacity_->setEnabled(has);
+    fill_->setEnabled(has);
     if (has) {
         blend_->setCurrentIndex(static_cast<int>(a->blendMode()));
         opacity_->setValue(static_cast<int>(std::lround(a->opacity() * 100.0f)));
+        fill_->setValue(static_cast<int>(std::lround(a->fillOpacity() * 100.0f)));
     }
     updating_ = false;
 }
@@ -912,6 +992,47 @@ void LayersPanel::onOpacityEdited() {
     if (std::lround(l->opacity() * 100.0f) != opacity_->value()) {
         push(std::make_unique<pe::SetOpacityCommand>(id, want));
     }
+}
+
+void LayersPanel::onFillOpacityEdited() {
+    if (updating_ || doc_ == nullptr) return;
+    const pe::LayerId id = doc_->activeLayer();
+    const pe::Layer* l = doc_->findLayer(id);
+    if (l == nullptr) return;
+    const float want = static_cast<float>(fill_->value()) / 100.0f;
+    // Compared in the spinbox's integer resolution, so re-syncing does not re-push.
+    if (std::lround(l->fillOpacity() * 100.0f) != fill_->value()) {
+        push(std::make_unique<pe::SetFillOpacityCommand>(id, want));
+    }
+}
+
+bool LayersPanel::activeIsClipped() const {
+    const pe::Layer* l = doc_ != nullptr ? doc_->findLayer(doc_->activeLayer()) : nullptr;
+    return l != nullptr && l->clipped();
+}
+
+void LayersPanel::toggleClipToLayerBelow() {
+    if (doc_ == nullptr) return;
+    const pe::LayerId id = doc_->activeLayer();
+    const pe::Layer* l = doc_->findLayer(id);
+    if (l == nullptr) {
+        emit refused(pe::refuse("layer.clip", pe::RefusalCode::NoActiveLayer, "Clip to Layer Below",
+                                "Select a layer to clip first.", describeSelectionForRefusal()));
+        return;
+    }
+    // Releasing is always available; only creating one needs something to clip to. A layer at
+    // the bottom of its own stack has nothing beneath it, and the compositor leaves such a
+    // layer unclipped, so setting the flag there would be a history entry that changes no
+    // pixel and no visible state.
+    if (!l->clipped() && indexInOwnStack(*doc_, id) == 0) {
+        emit refused(pe::refuse("layer.clip", pe::RefusalCode::NoEffect, "Clip to Layer Below",
+                                "\"" + l->name() +
+                                    "\" is the bottom layer, so there is nothing below it to "
+                                    "clip to.",
+                                describeSelectionForRefusal()));
+        return;
+    }
+    push(std::make_unique<pe::SetClippedCommand>(id, !l->clipped()));
 }
 
 void LayersPanel::onAdd() {

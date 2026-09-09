@@ -257,7 +257,10 @@ private:
     // The tool-strip action for each wired tool, so a tool the CANVAS selected can check the
     // matching button. Keyed by the Tool enum value.
     QHash<int, QAction*> toolActions_;
-    QActionGroup* toolGroup_ = nullptr;   // the strip's exclusive selection
+    QActionGroup* toolGroup_ = nullptr;  // the strip's exclusive selection
+    // Checkable, so the menu shows whether the ACTIVE layer is clipped rather than being a
+    // one-way switch. Kept honest by updateActionStates().
+    QAction* clipAct_ = nullptr;
     QSpinBox* sizeSpin_ = nullptr;        // options bar: brush diameter
     QSpinBox* opacitySpinOpt_ = nullptr;  // options bar: brush opacity
     QSpinBox* wandTolSpin_ = nullptr;     // options bar: magic-wand tolerance

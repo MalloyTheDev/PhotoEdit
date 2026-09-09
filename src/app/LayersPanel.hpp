@@ -101,6 +101,13 @@ public:
     void deleteLayer();
     void arrangeActive(Arrange where);
 
+    // Clip the active layer to the one below it, or release it. MainWindow wires
+    // Layer > Clip to Layer Below (Ctrl+Alt+G) here; refuses when there is nothing beneath
+    // the layer in its own stack, which is the case where clipping means nothing.
+    void toggleClipToLayerBelow();
+    // Is the active layer clipped? For keeping the menu's checkmark honest.
+    [[nodiscard]] bool activeIsClipped() const;
+
     // Group the multi-selected top-level layers into a new group; dissolve the active
     // top-level group. Both are safe no-ops when the selection doesn't qualify.
     // MainWindow wires the Layer▸Group (Ctrl+G) / Ungroup (Ctrl+Shift+G) actions here.
@@ -169,8 +176,12 @@ private:
     };
     [[nodiscard]] static ThumbScale thumbScaleFor(pe::Rect canvas);
 
+    // `clipped` draws the bound-to-the-layer-below marker into the corner. It belongs on
+    // the thumbnail because that is where this panel already says what state a row is in
+    // (the mask focus ring is drawn the same way), and because a clipped row is otherwise
+    // indistinguishable from an ordinary one.
     [[nodiscard]] static QIcon checkerThumbnail(const QImage& img, int offX, int offY,
-                                                ThumbScale scale);
+                                                ThumbScale scale, bool clipped);
 
     [[nodiscard]] QIcon layerThumbnail(std::span<const std::unique_ptr<pe::Layer>> siblings,
                                        std::size_t index) const;
@@ -204,6 +215,7 @@ private:
     void onItemCollapsed(QTreeWidgetItem* item);
     void onBlendChanged(int index);
     void onOpacityEdited();
+    void onFillOpacityEdited();
     void onAdd();
     void onDuplicate();
     void onDelete();
@@ -223,6 +235,7 @@ private:
 
     QComboBox* blend_ = nullptr;
     QSpinBox* opacity_ = nullptr;
+    QSpinBox* fill_ = nullptr;  // fill opacity: the layer's own pixels, not its effects
     QTreeWidget* tree_ = nullptr;
     QPushButton* addBtn_ = nullptr;
     QPushButton* dupBtn_ = nullptr;

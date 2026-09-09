@@ -156,6 +156,39 @@ private:
     float oldOpacity_ = 1.0f;
 };
 
+// Fill opacity scales the layer's own pixels, and multiplies with opacity rather than
+// replacing it, so the two are independent controls. Both are persisted from v8 on.
+class SetFillOpacityCommand final : public Command {
+public:
+    SetFillOpacityCommand(LayerId id, float fillOpacity);
+    [[nodiscard]] std::string name() const override { return "Change Fill Opacity"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    LayerId layerId_;
+    float newFill_;
+    float oldFill_ = 1.0f;
+};
+
+// Confine the layer to the coverage of the first non-clipped layer beneath it in the same
+// stack, which is what "clip to the layer below" means. Nothing to clip to leaves the layer
+// unclipped rather than hiding it.
+class SetClippedCommand final : public Command {
+public:
+    SetClippedCommand(LayerId id, bool clipped);
+    [[nodiscard]] std::string name() const override {
+        return newClipped_ ? "Create Clipping Mask" : "Release Clipping Mask";
+    }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+private:
+    LayerId layerId_;
+    bool newClipped_;
+    bool oldClipped_ = false;
+};
+
 class SetBlendModeCommand final : public Command {
 public:
     SetBlendModeCommand(LayerId id, BlendMode mode);

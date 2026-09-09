@@ -383,6 +383,40 @@ DocumentChange SetOpacityCommand::undo(Document& doc) {
     return propsChange(layer, layerId_);
 }
 
+SetFillOpacityCommand::SetFillOpacityCommand(LayerId id, float fillOpacity)
+    : layerId_(id), newFill_(fillOpacity) {}
+
+DocumentChange SetFillOpacityCommand::execute(Document& doc) {
+    Layer* layer = doc.findLayer(layerId_);
+    if (layer == nullptr) return propsChange(nullptr, layerId_);
+    oldFill_ = layer->fillOpacity();
+    layer->setFillOpacity(newFill_);
+    return propsChange(layer, layerId_);
+}
+
+DocumentChange SetFillOpacityCommand::undo(Document& doc) {
+    Layer* layer = doc.findLayer(layerId_);
+    if (layer != nullptr) layer->setFillOpacity(oldFill_);
+    return propsChange(layer, layerId_);
+}
+
+SetClippedCommand::SetClippedCommand(LayerId id, bool clipped)
+    : layerId_(id), newClipped_(clipped) {}
+
+DocumentChange SetClippedCommand::execute(Document& doc) {
+    Layer* layer = doc.findLayer(layerId_);
+    if (layer == nullptr) return propsChange(nullptr, layerId_);
+    oldClipped_ = layer->clipped();
+    layer->setClipped(newClipped_);
+    return propsChange(layer, layerId_);
+}
+
+DocumentChange SetClippedCommand::undo(Document& doc) {
+    Layer* layer = doc.findLayer(layerId_);
+    if (layer != nullptr) layer->setClipped(oldClipped_);
+    return propsChange(layer, layerId_);
+}
+
 SetBlendModeCommand::SetBlendModeCommand(LayerId id, BlendMode mode)
     : layerId_(id), newMode_(mode) {}
 
