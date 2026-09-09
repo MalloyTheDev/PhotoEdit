@@ -45,6 +45,8 @@ qt_add_library(pe_app STATIC
     SwatchesPanel.hpp
     AdjustmentsPanel.cpp
     AdjustmentsPanel.hpp
+    ChannelsPanel.cpp
+    ChannelsPanel.hpp
     PropertiesPanel.cpp
     PropertiesPanel.hpp
     Theme.cpp

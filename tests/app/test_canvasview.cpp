@@ -907,3 +907,132 @@ PE_TEST(canvasview_says_so_when_a_selection_outline_is_too_detailed_to_draw) {
 
     view.setDocument(nullptr);
 }
+
+PE_TEST(canvasview_a_channel_view_changes_what_the_canvas_draws) {
+    // The panel emitting a view is not the same as the canvas honouring it. This renders the
+    // widget and reads the pixel back, because the paint path is where the whole feature
+    // either happens or does not.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    PE_REQUIRE(pl != nullptr);
+    // Three values far enough apart that no two channels can be confused for each other.
+    pl->tiles().fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{200, 60, 20, 255});
+
+    pe::app::CanvasView view;
+    view.resize(200, 200);
+    view.setDocument(doc.get());
+    view.actualPixels();
+
+    const QPointF centre = view.docToWidget(pe::PointD{32.0, 32.0});
+    const auto at = [&](const QImage& img) {
+        return img.pixelColor(static_cast<int>(std::lround(centre.x())),
+                              static_cast<int>(std::lround(centre.y())));
+    };
+    const auto near = [](int got, int want) { return got >= want - 2 && got <= want + 2; };
+
+    const QColor composite = at(view.grab().toImage());
+    PE_CHECK(near(composite.red(), 200));
+    PE_CHECK(near(composite.green(), 60));
+    PE_CHECK(near(composite.blue(), 20));
+
+    // One channel: grey at that channel's value, which is how a channel is read.
+    view.setChannelView(pe::ChannelView{true, false, false});
+    const QColor red = at(view.grab().toImage());
+    PE_CHECK(near(red.red(), 200));
+    PE_CHECK(near(red.green(), 200));
+    PE_CHECK(near(red.blue(), 200));
+
+    view.setChannelView(pe::ChannelView{false, true, false});
+    const QColor green = at(view.grab().toImage());
+    PE_CHECK(near(green.red(), 60));
+    PE_CHECK(near(green.blue(), 60));
+
+    // Two channels: still colour, with the third gone. A single-channel-only implementation
+    // passes everything above and fails here.
+    view.setChannelView(pe::ChannelView{true, true, false});
+    const QColor noBlue = at(view.grab().toImage());
+    PE_CHECK(near(noBlue.red(), 200));
+    PE_CHECK(near(noBlue.green(), 60));
+    PE_CHECK(near(noBlue.blue(), 0));
+
+    // And back, with nothing left behind: the view is a display filter, not an edit.
+    view.setChannelView(pe::ChannelView{});
+    const QColor again = at(view.grab().toImage());
+    PE_CHECK(near(again.red(), 200));
+    PE_CHECK(near(again.green(), 60));
+    PE_CHECK(near(again.blue(), 20));
+    PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(0));
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_a_preview_stays_bounded_however_large_the_canvas) {
+    // What the Channels panel pulls its thumbnails through. Document::compositeImage() is the
+    // wrong source: past its cap it returns nothing at all, which is how the layer thumbnails
+    // came to vanish on large documents (#146). This one keeps working, and its cost is set
+    // by the cap asked for rather than by the document.
+    auto doc = pe::Document::createBlank(pe::Size{9000, 9000});  // 81 MP, over the composite cap
+    PE_REQUIRE(doc != nullptr);
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(pe::Rect{0, 0, 9000, 9000}, pe::Rgba8{10, 200, 30, 255});
+
+    pe::app::CanvasView view;
+    view.resize(200, 200);
+    view.setDocument(doc.get());
+
+    const pe::PixelBuffer preview = view.canvasPreview(128 * 128);
+    PE_CHECK(!preview.isEmpty());
+    PE_CHECK(preview.width() * preview.height() <= 128 * 128);
+    // And it is the picture, not an empty frame.
+    PE_CHECK(preview.at(preview.width() / 2, preview.height() / 2).g > 150);
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_a_preview_with_no_document_is_empty_rather_than_a_crash) {
+    pe::app::CanvasView view;
+    PE_CHECK(view.canvasPreview(1024).isEmpty());
+}
+
+PE_TEST(canvasview_a_channel_view_holds_on_the_zoomed_out_path_too) {
+    // Zoomed far enough out, the canvas is drawn from the renderer's CACHED scaled composite
+    // rather than from a freshly assembled buffer. That buffer belongs to the renderer, so a
+    // channel view applied to it in place would be written back into the cache: the next
+    // repaint would then draw a channel view of a channel view, and the image would decay
+    // every frame while nothing in the code looked wrong.
+    auto doc = pe::Document::createBlank(pe::Size{9000, 9000});
+    PE_REQUIRE(doc != nullptr);
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(pe::Rect{0, 0, 9000, 9000}, pe::Rgba8{200, 60, 20, 255});
+
+    pe::app::CanvasView view;
+    view.resize(200, 200);
+    view.setDocument(doc.get());
+    view.fitToWindow();  // 81 MP visible against a 40 000 pixel viewport: the scaled path
+
+    // The view is 200x200 and the canvas is fitted inside it, so its centre is the widget's.
+    const auto at = [](const QImage& img) { return img.pixelColor(100, 100); };
+    const auto near = [](int got, int want) { return got >= want - 3 && got <= want + 3; };
+
+    view.setChannelView(pe::ChannelView{false, true, false});
+    const QColor first = at(view.grab().toImage());
+    PE_CHECK(near(first.red(), 60));
+    PE_CHECK(near(first.green(), 60));
+    PE_CHECK(near(first.blue(), 60));
+
+    // Again, with nothing else changed. Same pixels, or the cache was written through.
+    const QColor second = at(view.grab().toImage());
+    PE_CHECK_EQ(second.red(), first.red());
+    PE_CHECK_EQ(second.green(), first.green());
+    PE_CHECK_EQ(second.blue(), first.blue());
+
+    // And back to the composite: the original colour is still there to come back to.
+    view.setChannelView(pe::ChannelView{});
+    const QColor back = at(view.grab().toImage());
+    PE_CHECK(near(back.red(), 200));
+    PE_CHECK(near(back.green(), 60));
+    PE_CHECK(near(back.blue(), 20));
+
+    view.setDocument(nullptr);
+}

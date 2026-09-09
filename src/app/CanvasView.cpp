@@ -166,6 +166,25 @@ void CanvasView::repaintRegion(pe::Rect docRect) {
     update();
 }
 
+void CanvasView::setChannelView(pe::ChannelView v) {
+    if (v == channelView_) return;
+    channelView_ = v;
+    // The renderer's tiles are untouched: what changed is how they are drawn, so a repaint
+    // is the whole of it. Invalidating the cache here would recomposite the canvas every
+    // time an eye was clicked, for no difference in the pixels.
+    update();
+}
+
+pe::PixelBuffer CanvasView::canvasPreview(int maxPixels) {
+    // Frozen means a worker owns the document; compositing here would race it. The caller
+    // gets an empty buffer and keeps whatever it drew last, which is what paintEvent does.
+    if (frozen_ || doc_ == nullptr || renderer_ == nullptr) return pe::PixelBuffer{};
+    const pe::Size cs = canvasSize();
+    if (cs.isEmpty()) return pe::PixelBuffer{};
+    return renderer_->renderRegionScaled(pe::Rect{0, 0, cs.width, cs.height},
+                                         std::max(1, maxPixels));
+}
+
 void CanvasView::reloadImage() {
     // A live preview applied a provisional command straight to the document (no
     // notification), so the renderer's cache is stale — drop it and repaint.
@@ -721,7 +740,10 @@ void CanvasView::paintEvent(QPaintEvent*) {
             // Fits the cache, so the full-resolution path is both exact and incremental: it
             // recomposites only the tiles that actually changed, which is what keeps
             // painting cheap. This is the interactive case and it must stay on this path.
-            const pe::PixelBuffer buf = renderer_->renderRegion(vis);  // alive through drawImage
+            pe::PixelBuffer buf = renderer_->renderRegion(vis);  // alive through drawImage
+            // Ours to modify: renderRegion returns a freshly assembled buffer, not a view
+            // into the cache. A no-op unless a channel view is on.
+            pe::applyChannelView(buf, channelView_);
             if (!buf.isEmpty()) {
                 const QImage img(reinterpret_cast<const uchar*>(buf.data()), buf.width(),
                                  buf.height(), buf.width() * 4, QImage::Format_RGBA8888);
@@ -742,7 +764,17 @@ void CanvasView::paintEvent(QPaintEvent*) {
             // the display. The buffer stays bounded (about 25 MB at a 1600x1000 viewport).
             const int cap = static_cast<int>(std::min<std::int64_t>(viewportPx * 4, 1 << 26));
             pe::Rect covered{};
-            const pe::PixelBuffer& buf = renderer_->renderRegionScaledCached(vis, cap, covered);
+            const pe::PixelBuffer& cached = renderer_->renderRegionScaledCached(vis, cap, covered);
+            // Unlike the branch above, this is a reference INTO the renderer's cache, so a
+            // channel view has to work on a copy: applying it in place would poison the cache
+            // and the next repaint would draw a channel view of a channel view. The copy is
+            // paid for only while a channel view is on, and only on this zoomed-way-out path.
+            pe::PixelBuffer viewed;
+            if (!channelView_.showsAll() && !cached.isEmpty()) {
+                viewed = cached;
+                pe::applyChannelView(viewed, channelView_);
+            }
+            const pe::PixelBuffer& buf = viewed.isEmpty() ? cached : viewed;
             if (!buf.isEmpty()) {
                 const QImage img(reinterpret_cast<const uchar*>(buf.data()), buf.width(),
                                  buf.height(), buf.width() * 4, QImage::Format_RGBA8888);

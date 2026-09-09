@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **681 engine cases + 154 shell cases, 0 failed**. The engine tests
+Test suite: **687 engine cases + 171 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -106,9 +106,19 @@ The engine is no longer headless-only; the Qt6 app provides a real
   by the engine, so a row cannot claim an effect its layer will not produce; a test asserts
   every preset actually moves the strip. Both the panel and the menu add layers through one
   `MainWindow::addAdjustmentLayer`, so where the layer lands cannot differ between them.
-- The panels that are **not built yet** (Gradients, Patterns, Libraries, Channels, Paths)
-  now say what they will be for and that they are not implemented. They used to show their
-  own name centred in a blank dock, which reads as a panel that failed to load.
+- **Channels panel**: the RGB composite and the Red, Green and Blue planes, each with a
+  thumbnail of that plane and an eye. Clicking a row views that channel on its own, as grey;
+  the eyes combine, so hiding one leaves the other two in colour. The rule is the engine's
+  (`pe::applyChannelView`), so it is tested headlessly and the canvas cannot disagree with
+  the thumbnails, which come from `pe::extractChannel`. Visibility is display state: nothing
+  here touches the document, the undo stack or the dirty bit. Thumbnails pull a bounded
+  downscale through the canvas renderer's cache rather than `Document::compositeImage()`,
+  so they keep working above the composite cap, and are only rebuilt while the dock is on
+  screen. Spot channels and saved-selection channels are specified
+  ([19](systems/19-channels.md)) and not built; the panel says so.
+- The panels that are **not built yet** (Gradients, Patterns, Libraries, Paths) now say what
+  they will be for and that they are not implemented. They used to show their own name
+  centred in a blank dock, which reads as a panel that failed to load.
 
 ### Visual design system (dark pro theme)
 

@@ -5,6 +5,7 @@
 #include "AdjustmentsPanel.hpp"
 #include "BusyTask.hpp"
 #include "CanvasView.hpp"
+#include "ChannelsPanel.hpp"
 #include "ColorPanel.hpp"
 #include "CurvesDialog.hpp"
 #include "EffectDialog.hpp"
@@ -165,6 +166,7 @@ MainWindow::~MainWindow() {
     if (layers_ != nullptr) layers_->setDocument(nullptr);
     if (history_ != nullptr) history_->setDocument(nullptr);
     if (properties_ != nullptr) properties_->setDocument(nullptr);
+    if (channels_ != nullptr) channels_->setDocument(nullptr);
 }
 
 namespace {
@@ -2047,6 +2049,7 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     if (layers_ != nullptr) layers_->setDocument(nullptr);
     if (history_ != nullptr) history_->setDocument(nullptr);
     if (properties_ != nullptr) properties_->setDocument(nullptr);
+    if (channels_ != nullptr) channels_->setDocument(nullptr);
     if (doc_ != nullptr) doc_->removeObserver(this);
     doc_ = std::move(doc);
     if (doc_ != nullptr) doc_->addObserver(this);
@@ -2055,6 +2058,7 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     if (layers_ != nullptr) layers_->setDocument(doc_.get());
     if (history_ != nullptr) history_->setDocument(doc_.get());
     if (properties_ != nullptr) properties_->setDocument(doc_.get());
+    if (channels_ != nullptr) channels_->setDocument(doc_.get());
     refreshTitle();
     refreshDocTab();
     refreshZoomStrip();
@@ -2218,6 +2222,7 @@ void MainWindow::buildDockPanels() {
     colorPanel_ = new ColorPanel();
     swatchesPanel_ = new SwatchesPanel();
     adjustments_ = new AdjustmentsPanel();
+    channels_ = new ChannelsPanel();
     properties_ = new PropertiesPanel();
 
     // The Color panel drives the foreground/brush colour; seed it and keep in sync.
@@ -2236,6 +2241,13 @@ void MainWindow::buildDockPanels() {
         if (adjustments_ == nullptr) return;
         addAdjustmentLayer(adjustments_->makeAdjustment(index), adjustments_->preset(index).name);
     });
+    // Channels is display state: the panel decides what the canvas draws and never touches
+    // the document. Its thumbnails come from the canvas's renderer, which already holds the
+    // composited tiles, rather than from a fresh flatten of the whole image.
+    channels_->setPreviewSource(
+        [this](int maxPixels) { return canvas_->canvasPreview(maxPixels); });
+    connect(channels_, &ChannelsPanel::viewChanged, this,
+            [this](pe::ChannelView v) { canvas_->setChannelView(v); });
 
     // Group anchors (one per stacked group).
     auto* colorDock = makeDock(QStringLiteral("Color"), colorPanel_);
@@ -2271,12 +2283,7 @@ void MainWindow::buildDockPanels() {
                                         QStringLiteral("Assets shared between documents: colours, "
                                                        "gradients, graphics."))));
 
-    tabifyDockWidget(layersDock,
-                     makeDock(QStringLiteral("Channels"),
-                              placeholder(QStringLiteral("Channels"),
-                                          QStringLiteral("The document's colour channels, and "
-                                                         "selections saved as alpha "
-                                                         "channels."))));
+    tabifyDockWidget(layersDock, makeDock(QStringLiteral("Channels"), channels_));
     tabifyDockWidget(layersDock,
                      makeDock(QStringLiteral("Paths"),
                               placeholder(QStringLiteral("Paths"),

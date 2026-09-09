@@ -40,6 +40,7 @@ class HistoryPanel;
 class ColorPanel;
 class SwatchesPanel;
 class AdjustmentsPanel;
+class ChannelsPanel;
 class PropertiesPanel;
 
 // What the user chose when asked about unsaved changes.
@@ -231,6 +232,7 @@ private:
     ColorPanel* colorPanel_ = nullptr;
     SwatchesPanel* swatchesPanel_ = nullptr;
     AdjustmentsPanel* adjustments_ = nullptr;
+    ChannelsPanel* channels_ = nullptr;
     PropertiesPanel* properties_ = nullptr;
     QLabel* toolLabel_ = nullptr;        // status bar: active tool
     QLabel* toolHintLabel_ = nullptr;    // status bar: what the active tool does

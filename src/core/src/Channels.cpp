@@ -59,4 +59,31 @@ PixelBuffer mergeChannels(const PixelBuffer& red, const PixelBuffer& green, cons
     return out;
 }
 
+void applyChannelView(PixelBuffer& img, ChannelView view) {
+    // The common case by far: the composite is shown as composited, and a repaint outside a
+    // channel view must not pay for a pass over the pixels at all.
+    if (view.showsAll() || img.isEmpty()) return;
+
+    const std::size_t n =
+        static_cast<std::size_t>(img.width()) * static_cast<std::size_t>(img.height());
+    Rgba8* p = img.data();
+
+    if (view.count() == 1) {
+        const Channel only =
+            view.red ? Channel::Red : (view.green ? Channel::Green : Channel::Blue);
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::uint8_t v = channelValue(p[i], only);
+            p[i] = Rgba8{v, v, v, p[i].a};  // alpha survives: see the header
+        }
+        return;
+    }
+    // Two visible, or none. Zeroing the hidden components covers both, and "none" lands on
+    // black rather than on some special case.
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!view.red) p[i].r = 0;
+        if (!view.green) p[i].g = 0;
+        if (!view.blue) p[i].b = 0;
+    }
+}
+
 }  // namespace pe

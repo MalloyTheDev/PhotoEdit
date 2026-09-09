@@ -93,6 +93,7 @@ if(PHOTOEDIT_BUILD_APP)
         app/test_layerspanel.cpp
         app/test_swatchespanel.cpp
         app/test_adjustmentspanel.cpp
+        app/test_channelspanel.cpp
         app/test_busytask.cpp
     )
 

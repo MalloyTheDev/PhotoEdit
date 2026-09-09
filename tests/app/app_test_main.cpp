@@ -7,9 +7,15 @@
 #include "IconUtil.hpp"
 #include "pe_test.hpp"
 
+#include <cstdio>
+
 #include <QApplication>
 
 int main(int argc, char** argv) {
+    // Unbuffered, so the last line in the log is the test that was actually running.
+    // Block buffering attributes a crash to whichever case the buffer last flushed,
+    // which can be dozens of tests earlier.
+    setvbuf(stdout, nullptr, _IONBF, 0);
     // Must be set before QApplication is constructed.
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);

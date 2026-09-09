@@ -2,6 +2,7 @@
 
 #include "BusyTask.hpp"
 
+#include "pe/core/Channels.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/PaintToolController.hpp"
 #include "pe/core/Refusal.hpp"
@@ -119,6 +120,18 @@ public:
     // reveals. Cleared when the target layer/mask goes away or the document changes.
     void setMaskEditTarget(bool on);
     [[nodiscard]] bool maskEditTarget() const noexcept { return maskEditTarget_; }
+
+    // Which colour channels the canvas draws (the Channels panel). Display state only: it
+    // changes what is painted and nothing about the document, so it survives undo, is not
+    // undoable itself, and never marks the document dirty.
+    void setChannelView(pe::ChannelView v);
+    [[nodiscard]] pe::ChannelView channelView() const noexcept { return channelView_; }
+
+    // A bounded, downscaled composite of the whole canvas, at most `maxPixels` of output.
+    // For panel thumbnails: it goes through the renderer's tile cache and its scaled path, so
+    // the cost is set by `maxPixels` rather than by the document, and unlike
+    // Document::compositeImage() it keeps working above the composite cap.
+    [[nodiscard]] pe::PixelBuffer canvasPreview(int maxPixels);
 
 signals:
     void zoomChanged(double percent);   // for the status-bar zoom readout
@@ -284,6 +297,10 @@ private:
     bool autoSelect_ = false;
     AutoSelectMode autoSelectMode_ = AutoSelectMode::Layer;
     bool showTransformControls_ = false;
+
+    // Display state, not document state: which colour channels get drawn. Default is the
+    // composite, so a canvas nobody has touched the Channels panel on pays nothing.
+    pe::ChannelView channelView_{};
 
     // Brush settings, kept per paint mode.
     //
