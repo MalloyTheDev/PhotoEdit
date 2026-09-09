@@ -22,6 +22,26 @@ namespace pe {
 // multiplying into their per-pixel coverage. Marching ants (the UI visualization)
 // derive from this mask's boundary in the app shell. See
 // docs/systems/07-selection-system.md.
+// One straight run of a selection's boundary, in document coordinates.
+struct OutlineSegment {
+    Point a;
+    Point b;
+
+    [[nodiscard]] constexpr bool operator==(const OutlineSegment&) const noexcept = default;
+};
+
+// A selection's boundary, and whether it is the whole of it.
+//
+// A sufficiently ragged selection (a magic wand over noise, at the project's target document
+// size) has a boundary with more segments than are worth drawing every frame, so the trace
+// gives up rather than allocating unboundedly. `complete` is false then, and the CALLER has
+// to say so rather than quietly drawing a partial outline: a boundary that stops halfway is
+// a worse lie than the bounding box this replaces.
+struct SelectionOutline {
+    std::vector<OutlineSegment> segments;
+    bool complete = true;
+};
+
 class Selection {
 public:
     [[nodiscard]] bool active() const noexcept { return active_; }
@@ -77,6 +97,24 @@ public:
     // selected). Pixel-accurate, unlike selectedBounds — for the marching-ants outline. Scans
     // the selected tiles' pixels, so compute it on selection change, not every repaint.
     [[nodiscard]] Rect tightBounds() const noexcept;
+
+    // The boundary of the selected region: every edge where a selected pixel meets an
+    // unselected one, merged into the longest straight runs.
+    //
+    // This is what marching ants have to be drawn from. Drawing tightBounds() instead shows a
+    // RECTANGLE for every selection, so a freehand lasso appeared to snap to a box the moment
+    // the drag ended, and a magic wand never looked like the shape it had found. Worse than
+    // cosmetic: the pixels inside that box which were never selected then refused to paint,
+    // which reads as the canvas not responding rather than as a selection doing its job.
+    //
+    // Endpoints are pixel CORNERS, not centres. The boundary between pixel (x-1, y) and
+    // (x, y) is the vertical line at x, so a single selected pixel at the origin outlines the
+    // unit square from (0, 0) to (1, 1).
+    //
+    // `threshold` is the coverage at which a pixel counts as inside. 128 is the 50% contour,
+    // which is the one contour a single outline can honestly draw for a feathered selection.
+    [[nodiscard]] SelectionOutline outline(std::uint8_t threshold = 128,
+                                           std::size_t maxSegments = 200'000) const;
     [[nodiscard]] std::size_t tileCount() const noexcept { return tiles_.size(); }
 
     // One tile's bytes, row-major, indexed tileLocalOffset(y) * kTileSize + tileLocalOffset(x).

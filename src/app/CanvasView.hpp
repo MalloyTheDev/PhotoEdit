@@ -16,10 +16,12 @@
 #include <QBrush>
 #include <QColor>
 #include <QImage>
+#include <QLineF>
 #include <QPixmap>
 #include <QPoint>
 #include <QPointF>
 #include <QString>
+#include <QVector>
 #include <QWidget>
 
 namespace pe {
@@ -157,6 +159,13 @@ public:
     // an interactive preview to work the user can actually see, and a test needs to be able
     // to say what that region is.
     [[nodiscard]] pe::Rect visibleDocRect() const;
+
+    // The committed selection's outline as the view draws it, in document coordinates.
+    // Public because "the ants follow the selection and not its bounding box" is the
+    // property that broke, and it cannot be asserted from outside without seeing them.
+    [[nodiscard]] const QVector<QLineF>& selectionOutline() const noexcept {
+        return selectionAnts_;
+    }
 
     // DocumentObserver: re-flatten and repaint after any committed change.
     void onDocumentChanged(const pe::Document&, const pe::DocumentChange&) override;
@@ -296,7 +305,15 @@ private:
 
     // Pixel-tight bounds of the committed selection, for the marching-ants outline. Cached
     // on selection change (and on setDocument) so paintEvent never scans the mask per frame.
-    Rect selectionAnts_{};
+    // The committed selection's boundary, in DOCUMENT coordinates, rebuilt on each selection
+    // change so paintEvent never traces the mask per frame. Line segments rather than a rect:
+    // drawing tightBounds() made every lasso and every wand look like it had snapped to a box.
+    QVector<QLineF> selectionAnts_;
+    // The bounds to fall back to when the boundary was too ragged to trace, and whether the
+    // user has been told. Said once per selection, not once per repaint.
+    Rect selectionAntsBounds_{};
+    bool selectionAntsComplete_ = true;
+    void rebuildSelectionAnts();
 
     // Move-tool drag state: a live preview shifts the active layer's content by the drag
     // delta (a provisional command reverted on each move and committed on release).

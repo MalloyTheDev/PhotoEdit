@@ -106,19 +106,46 @@ void CanvasView::setDocument(pe::Document* doc) {
         doc_->addObserver(this);
         renderer_ = std::make_unique<pe::CanvasRenderer>(*doc_);  // observes doc_ itself
     }
-    selectionAnts_ = doc_ != nullptr ? doc_->selection().tightBounds() : pe::Rect{};
+    rebuildSelectionAnts();
     needsFit_ = true;  // fit the new document once we have a valid widget size
     maybeInitialFit();
     updateGeometry();
     update();
 }
 
+void CanvasView::rebuildSelectionAnts() {
+    selectionAnts_.clear();
+    selectionAntsBounds_ = pe::Rect{};
+    const bool wasComplete = selectionAntsComplete_;
+    selectionAntsComplete_ = true;
+    if (doc_ == nullptr) return;
+
+    const pe::Selection& sel = doc_->selection();
+    const pe::SelectionOutline traced = sel.outline();
+    selectionAntsComplete_ = traced.complete;
+    if (!traced.complete) {
+        // Too ragged to draw every frame. The bounds are at least true as a BOUND, but they
+        // are not the selection, so the user is told rather than left to infer it from a
+        // rectangle that paints like something else. Once per selection, not per repaint.
+        selectionAntsBounds_ = sel.tightBounds();
+        if (wasComplete) {
+            emit toolMessage(
+                QStringLiteral("Selection outline is too detailed to draw; showing its bounds. "
+                               "The selection itself is unaffected."));
+        }
+        return;
+    }
+    selectionAnts_.reserve(static_cast<qsizetype>(traced.segments.size()));
+    for (const pe::OutlineSegment& s : traced.segments) {
+        selectionAnts_.append(QLineF(s.a.x, s.a.y, s.b.x, s.b.y));
+    }
+}
+
 void CanvasView::onDocumentChanged(const pe::Document&, const pe::DocumentChange& ch) {
     if (ch.kind == pe::DocumentChange::Kind::Selection) {
         // Selection change only affects the marching-ants overlay, not pixel content.
-        // Recompute the pixel-tight ants bounds here (once per change) so paintEvent never
-        // scans the selection mask per frame.
-        selectionAnts_ = doc_ != nullptr ? doc_->selection().tightBounds() : pe::Rect{};
+        // Retrace the outline here, once per change, so paintEvent never scans the mask.
+        rebuildSelectionAnts();
         update();
         return;
     }
@@ -731,8 +758,16 @@ void CanvasView::paintEvent(QPaintEvent*) {
             }
         } else if (draggingMarquee_ && liveMarquee_.width > 0 && liveMarquee_.height > 0) {
             drawAntRect(liveMarquee_);
+        } else if (!selectionAnts_.isEmpty()) {
+            // The real boundary, as one call per pen rather than one per segment.
+            for (const QPen* pen : pens) {
+                painter.setPen(*pen);
+                painter.drawLines(selectionAnts_);
+            }
         } else {
-            drawAntRect(selectionAnts_);
+            // Only reached for a selection whose outline could not be traced; empty
+            // otherwise, and drawAntRect ignores an empty rect.
+            drawAntRect(selectionAntsBounds_);
         }
     }
 

@@ -532,6 +532,89 @@ Rect Selection::selectedBounds() const noexcept {
     return bounds;
 }
 
+SelectionOutline Selection::outline(std::uint8_t threshold, std::size_t maxSegments) const {
+    SelectionOutline result;
+    if (!active_) return result;
+    const Rect b = tightBounds();
+    if (b.isEmpty()) return result;
+
+    // One pixel of margin on every side. Everything outside the selection is unselected, so
+    // the margin is what makes the boundary of a run that reaches the edge of the bounds get
+    // emitted, and it is what guarantees every vertical run is closed by the final row.
+    const int x0 = b.left() - 1;
+    const int x1 = b.right() + 1;  // exclusive
+    const int y0 = b.top() - 1;
+    const int y1 = b.bottom() + 1;  // exclusive
+    const std::size_t w = static_cast<std::size_t>(x1 - x0);
+
+    std::vector<unsigned char> prev(w, 0);
+    std::vector<unsigned char> cur(w, 0);
+    constexpr int kNone = std::numeric_limits<int>::min();
+    std::vector<int> openY(w, kNone);  // per column: where its vertical run started
+
+    // One tile lookup per tile per row, rather than one per pixel: the same reason
+    // forEachRun exists on the write side.
+    const auto readRow = [&](int y, std::vector<unsigned char>& dst) {
+        std::fill(dst.begin(), dst.end(), 0);
+        int x = x0;
+        while (x < x1) {
+            const TileCoord c{floorDiv(x, kTileSize), floorDiv(y, kTileSize)};
+            const int end = std::min((c.col + 1) * kTileSize, x1);
+            if (const GrayTile* t = findTile(c); t != nullptr) {
+                const std::size_t rowBase = static_cast<std::size_t>(localIndex(y)) * kTileSize;
+                for (int gx = x; gx < end; ++gx) {
+                    dst[static_cast<std::size_t>(gx - x0)] =
+                        (*t)[rowBase + static_cast<std::size_t>(localIndex(gx))] >= threshold ? 1
+                                                                                              : 0;
+                }
+            }
+            x = end;
+        }
+    };
+
+    for (int y = y0; y < y1; ++y) {
+        readRow(y, cur);
+
+        // Horizontal edges: between the row above and this one, merged along x.
+        int runStart = kNone;
+        for (std::size_t i = 0; i < w; ++i) {
+            const bool edge = prev[i] != cur[i];
+            if (edge && runStart == kNone) {
+                runStart = x0 + static_cast<int>(i);
+            } else if (!edge && runStart != kNone) {
+                result.segments.push_back(
+                    OutlineSegment{Point{runStart, y}, Point{x0 + static_cast<int>(i), y}});
+                runStart = kNone;
+            }
+        }
+        if (runStart != kNone) {
+            result.segments.push_back(OutlineSegment{Point{runStart, y}, Point{x1, y}});
+        }
+
+        // Vertical edges: between neighbours in this row, accumulated down the columns.
+        for (std::size_t i = 1; i < w; ++i) {
+            const bool edge = cur[i - 1] != cur[i];
+            if (edge && openY[i] == kNone) {
+                openY[i] = y;
+            } else if (!edge && openY[i] != kNone) {
+                const int x = x0 + static_cast<int>(i);
+                result.segments.push_back(OutlineSegment{Point{x, openY[i]}, Point{x, y}});
+                openY[i] = kNone;
+            }
+        }
+
+        if (result.segments.size() > maxSegments) {
+            result.segments.clear();
+            result.complete = false;
+            return result;
+        }
+        std::swap(prev, cur);
+    }
+    // No run can still be open: the final row is the margin, which is entirely unselected,
+    // so every column's edge state ended false and closed whatever it had.
+    return result;
+}
+
 Rect Selection::tightBounds() const noexcept {
     // Exact pixel extent of the non-zero coverage. Bounded by kMaxSelectionTiles tiles, so
     // the worst-case scan is one-time work a caller does on selection change.

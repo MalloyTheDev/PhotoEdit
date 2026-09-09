@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <utility>
 #include "pe/core/Brush.hpp"
@@ -692,4 +693,139 @@ PE_TEST(selection_write_resolves_one_tile_per_run_not_per_pixel) {
     // that crashes says far less than one that fails.
     PE_REQUIRE(used > 0);
     PE_CHECK_EQ(static_cast<std::uint64_t>(6000) * 4000 / used, static_cast<std::uint64_t>(250));
+}
+
+// --- the selection outline the marching ants are drawn from --------------------------------
+
+namespace {
+
+// The four segments that bound `r`, in the order and orientation outline() emits them, so a
+// test can say "this outline is exactly this rectangle" rather than counting.
+bool outlineIsRect(const std::vector<pe::OutlineSegment>& segs, pe::Rect r) {
+    if (segs.size() != 4) return false;
+    const pe::OutlineSegment want[4] = {
+        {pe::Point{r.left(), r.top()}, pe::Point{r.right(), r.top()}},        // top
+        {pe::Point{r.left(), r.top()}, pe::Point{r.left(), r.bottom()}},      // left
+        {pe::Point{r.right(), r.top()}, pe::Point{r.right(), r.bottom()}},    // right
+        {pe::Point{r.left(), r.bottom()}, pe::Point{r.right(), r.bottom()}},  // bottom
+    };
+    for (const pe::OutlineSegment& w : want) {
+        if (std::find(segs.begin(), segs.end(), w) == segs.end()) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+PE_TEST(selection_outline_of_a_rectangle_is_four_merged_edges) {
+    // The runs have to merge, or a 4000 pixel wide selection emits 4000 unit segments per
+    // edge and the overlay costs more to draw than the image beneath it.
+    pe::Selection s;
+    s.selectRect(pe::Rect{10, 20, 5, 7});
+    const pe::SelectionOutline o = s.outline();
+    PE_CHECK(o.complete);
+    PE_CHECK(outlineIsRect(o.segments, pe::Rect{10, 20, 5, 7}));
+}
+
+PE_TEST(selection_outline_of_one_pixel_is_the_unit_square) {
+    // Endpoints are pixel CORNERS. Getting that off by one draws the ants half a pixel
+    // inside the selection at every zoom, which is exactly where it is least forgivable.
+    pe::Selection s;
+    s.selectRect(pe::Rect{0, 0, 1, 1});
+    const pe::SelectionOutline o = s.outline();
+    PE_CHECK(outlineIsRect(o.segments, pe::Rect{0, 0, 1, 1}));
+}
+
+PE_TEST(selection_outline_follows_the_shape_and_not_its_bounding_box) {
+    // The defect this exists for. A freehand lasso committed a correct polygon mask and the
+    // overlay drew tightBounds(), so the selection appeared to snap to a box the instant the
+    // drag ended, and the pixels inside that box which were never selected then refused to
+    // paint, which reads as the canvas not responding.
+    pe::Selection s;
+    const pe::Point tri[3] = {{0, 0}, {40, 0}, {0, 40}};
+    s.selectPolygon(tri);
+    PE_REQUIRE(s.active());
+
+    const pe::SelectionOutline o = s.outline();
+    PE_CHECK(o.complete);
+    // A right triangle's hypotenuse is a staircase, so its outline is many segments, and
+    // above all it is NOT the four of its bounding box.
+    PE_CHECK(o.segments.size() > 4);
+    PE_CHECK(!outlineIsRect(o.segments, s.tightBounds()));
+
+    // Concretely: the box's right edge runs the full height, and the triangle's cannot.
+    const pe::Rect b = s.tightBounds();
+    const pe::OutlineSegment boxRight{pe::Point{b.right(), b.top()},
+                                      pe::Point{b.right(), b.bottom()}};
+    PE_CHECK(std::find(o.segments.begin(), o.segments.end(), boxRight) == o.segments.end());
+}
+
+PE_TEST(selection_outline_traces_holes_and_separate_islands) {
+    // Both are shapes a wand produces routinely, and neither has a boundary a single
+    // rectangle can describe.
+    pe::Selection hole;
+    hole.selectRect(pe::Rect{0, 0, 40, 40});
+    hole.subtractRect(pe::Rect{10, 10, 10, 10});
+    const pe::SelectionOutline ho = hole.outline();
+    PE_CHECK(ho.complete);
+    PE_CHECK_EQ(ho.segments.size(), static_cast<std::size_t>(8));  // outer four, inner four
+
+    pe::Selection islands;
+    islands.selectRect(pe::Rect{0, 0, 5, 5});
+    islands.addRect(pe::Rect{20, 20, 5, 5});
+    const pe::SelectionOutline io2 = islands.outline();
+    PE_CHECK(io2.complete);
+    PE_CHECK_EQ(io2.segments.size(), static_cast<std::size_t>(8));
+}
+
+PE_TEST(selection_outline_of_nothing_is_nothing) {
+    pe::Selection none;
+    PE_CHECK(none.outline().segments.empty());  // inactive: the whole document is editable
+    PE_CHECK(none.outline().complete);
+
+    pe::Selection cleared;
+    cleared.selectRect(pe::Rect{0, 0, 4, 4});
+    cleared.selectNone();
+    PE_CHECK(cleared.outline().segments.empty());
+}
+
+PE_TEST(selection_outline_gives_up_rather_than_growing_without_bound) {
+    // A ragged enough boundary has more segments than are worth drawing every frame. Giving
+    // up has to be reported, because a boundary that stops halfway is a worse lie than the
+    // bounding box this replaced, and the caller has to be able to say so.
+    pe::Selection comb;
+    for (int x = 0; x < 400; x += 2) comb.addRect(pe::Rect{x, 0, 1, 400});
+
+    const pe::SelectionOutline full = comb.outline();
+    PE_CHECK(full.complete);
+    PE_CHECK(full.segments.size() > static_cast<std::size_t>(100));
+
+    const pe::SelectionOutline capped = comb.outline(128, 10);
+    PE_CHECK(!capped.complete);
+    PE_CHECK(capped.segments.empty());  // nothing, rather than a partial outline
+}
+
+PE_TEST(selection_outline_traces_the_half_coverage_contour) {
+    // A feathered selection has no single edge, so the outline draws the 50% contour: the
+    // one contour that answers "which pixels are more selected than not".
+    // Well inside the canvas on every side, so the feather can spread outward rather than
+    // being clipped by the canvas edge, which is what makes the two extents differ at all.
+    pe::Selection s;
+    s.selectRect(pe::Rect{20, 20, 40, 40});
+    s.feather(4.0f, pe::Rect{0, 0, 100, 100});
+    PE_REQUIRE(s.active());
+
+    const pe::Rect tight = s.tightBounds();
+    PE_REQUIRE(tight.width > 40);  // feathering spread the non-zero coverage outward
+
+    const pe::SelectionOutline o = s.outline();
+    PE_CHECK(o.complete);
+    PE_CHECK(!o.segments.empty());
+    // The contour sits inside the non-zero extent, not on it: a feathered edge's outer
+    // pixels are barely selected, and drawing the ants there would overstate the selection.
+    int minX = std::numeric_limits<int>::max();
+    for (const pe::OutlineSegment& seg : o.segments) {
+        minX = std::min({minX, seg.a.x, seg.b.x});
+    }
+    PE_CHECK(minX > tight.left());
 }

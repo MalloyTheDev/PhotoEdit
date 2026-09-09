@@ -7,6 +7,7 @@
 #include "CanvasView.hpp"
 #include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/CanvasRenderer.hpp"
+#include "pe/core/Commands.hpp"
 #include "pe/core/Document.hpp"
 #include "pe/core/Geometry.hpp"
 #include "pe/core/GroupLayer.hpp"
@@ -16,6 +17,7 @@
 #include "pe/core/Tile.hpp"
 #include "pe_test.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -23,6 +25,7 @@
 #include <vector>
 
 #include <QCoreApplication>
+#include <QImage>
 #include <QMouseEvent>
 #include <QObject>
 #include <QPointF>
@@ -734,5 +737,173 @@ PE_TEST(canvasview_the_visible_rect_covers_the_widget_and_is_padded) {
     // that grew with the document would defeat the whole point.
     PE_CHECK(r.width >= 400 + 8 && r.width <= 400 + 16);
     PE_CHECK(r.height >= 300 + 8 && r.height <= 300 + 16);
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_a_lasso_leaves_ants_that_follow_the_shape_it_drew) {
+    // The user-visible defect: the freehand path drew correctly while the mouse was down and
+    // became a rectangle the moment it came up, because the committed selection's overlay
+    // was tightBounds(). The mask was right all along, which is why parts of that rectangle
+    // then would not paint.
+    auto doc = pe::Document::createBlank(pe::Size{400, 400});
+    PE_REQUIRE(doc != nullptr);
+
+    pe::app::CanvasView view;
+    view.resize(500, 500);
+    view.setDocument(doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Lasso);
+
+    // A triangle, whose boundary no rectangle can describe.
+    pressAt(view, view.docToWidget(pe::PointD{40.0, 40.0}));
+    moveTo(view, view.docToWidget(pe::PointD{240.0, 40.0}));
+    moveTo(view, view.docToWidget(pe::PointD{40.0, 240.0}));
+    releaseAt(view, view.docToWidget(pe::PointD{40.0, 240.0}));
+
+    PE_REQUIRE(doc->selection().active());
+    const QVector<QLineF>& ants = view.selectionOutline();
+    PE_REQUIRE(!ants.isEmpty());
+    // Four segments is a rectangle. A triangle's staircase hypotenuse is many more.
+    PE_CHECK(ants.size() > 4);
+
+    // And the ants agree with what actually paints: the corner outside the triangle but
+    // inside its bounding box is not selected, and no ant segment claims it is.
+    const pe::Rect b = doc->selection().tightBounds();
+    PE_CHECK_EQ(doc->selection().value(b.right() - 2, b.bottom() - 2), static_cast<uint8_t>(0));
+    bool touchesBoxCorner = false;
+    for (const QLineF& l : ants) {
+        if (l.x1() >= b.right() && l.y1() >= b.bottom()) touchesBoxCorner = true;
+        if (l.x2() >= b.right() && l.y2() >= b.bottom()) touchesBoxCorner = true;
+    }
+    PE_CHECK(!touchesBoxCorner);
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_a_rectangular_marquee_still_leaves_four_ant_segments) {
+    // The inverse, so the fix cannot have been "always draw many segments": a rectangle's
+    // outline is still four merged edges, not one per pixel.
+    auto doc = pe::Document::createBlank(pe::Size{400, 400});
+    PE_REQUIRE(doc != nullptr);
+
+    pe::app::CanvasView view;
+    view.resize(500, 500);
+    view.setDocument(doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Marquee);
+
+    pressAt(view, view.docToWidget(pe::PointD{40.0, 40.0}));
+    moveTo(view, view.docToWidget(pe::PointD{240.0, 140.0}));
+    releaseAt(view, view.docToWidget(pe::PointD{240.0, 140.0}));
+
+    PE_REQUIRE(doc->selection().active());
+    PE_CHECK_EQ(view.selectionOutline().size(), 4);
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_the_ants_are_painted_along_the_shape_not_its_box) {
+    // The one that matches what the user saw. The cached outline being right is not the same
+    // as the overlay being drawn from it, and the defect was entirely in the drawing: the
+    // committed selection was painted as drawAntRect(tightBounds()).
+    //
+    // Compares two renders of the same view, so the difference between them IS the overlay,
+    // whatever colour the dashes happen to land on.
+    auto doc = pe::Document::createBlank(pe::Size{400, 400});
+    PE_REQUIRE(doc != nullptr);
+
+    pe::app::CanvasView view;
+    view.resize(500, 500);
+    view.setDocument(doc.get());
+    view.actualPixels();
+    view.setTool(pe::app::CanvasView::Tool::Lasso);
+    const QImage before = view.grab().toImage();
+    PE_REQUIRE(!before.isNull());
+
+    // A right triangle: (40,40), (240,40), (40,240). Its hypotenuse runs through (140,140),
+    // and the right edge of its bounding box at (240,140) is nowhere near the selection.
+    pressAt(view, view.docToWidget(pe::PointD{40.0, 40.0}));
+    moveTo(view, view.docToWidget(pe::PointD{240.0, 40.0}));
+    moveTo(view, view.docToWidget(pe::PointD{40.0, 240.0}));
+    releaseAt(view, view.docToWidget(pe::PointD{40.0, 240.0}));
+    PE_REQUIRE(doc->selection().active());
+
+    const QImage after = view.grab().toImage();
+    PE_REQUIRE(after.size() == before.size());
+
+    const auto changedNear = [&](pe::PointD at, int radius) {
+        const QPointF w = view.docToWidget(at);
+        const int cx = static_cast<int>(std::lround(w.x()));
+        const int cy = static_cast<int>(std::lround(w.y()));
+        for (int y = cy - radius; y <= cy + radius; ++y) {
+            for (int x = cx - radius; x <= cx + radius; ++x) {
+                if (x < 0 || y < 0 || x >= before.width() || y >= before.height()) continue;
+                if (before.pixel(x, y) != after.pixel(x, y)) return true;
+            }
+        }
+        return false;
+    };
+
+    PE_CHECK(changedNear(pe::PointD{140.0, 140.0}, 4));   // on the hypotenuse: ants
+    PE_CHECK(!changedNear(pe::PointD{240.0, 140.0}, 4));  // on the box's right edge: none
+    PE_CHECK(!changedNear(pe::PointD{200.0, 200.0}, 4));  // and the box's far corner: none
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_says_so_when_a_selection_outline_is_too_detailed_to_draw) {
+    // A boundary ragged enough to have more segments than are worth drawing every frame is
+    // given up on. That has to be SAID: falling back to the bounding box without a word is
+    // the original defect wearing a hat, and the user would again be looking at a rectangle
+    // that paints like something else.
+    auto doc = pe::Document::createBlank(pe::Size{900, 900});
+    PE_REQUIRE(doc != nullptr);
+
+    // Noise, not a checkerboard. A checkerboard looks maximally ragged and is not: every row
+    // differs from the one above it at every pixel, so the horizontal boundary merges into
+    // ONE run per row and the whole thing traces to a few hundred segments. Irregularity is
+    // what defeats merging, so the mask is a deterministic pseudo-random one.
+    constexpr int kSide = 800;
+    pe::PixelBuffer mask(kSide, kSide, pe::Rgba8{0, 0, 0, 255});
+    std::uint32_t seed = 12345u;
+    for (int y = 0; y < kSide; ++y) {
+        for (int x = 0; x < kSide; ++x) {
+            seed = seed * 1664525u + 1013904223u;  // a plain LCG: reproducible across runs
+            if ((seed >> 16) & 1u) mask.set(x, y, pe::Rgba8{255, 255, 255, 255});
+        }
+    }
+    const auto ragged = [&mask] {
+        pe::Selection s;
+        s.loadMask(mask, 20, 20);
+        return s;
+    };
+
+    pe::app::CanvasView view;
+    view.resize(300, 300);
+    view.setDocument(doc.get());
+
+    QStringList said = messagesFrom(
+        view, [&] { doc->history().push(std::make_unique<pe::SetSelectionCommand>(ragged())); });
+    PE_CHECK_EQ(said.size(), 1);
+    PE_CHECK(!said.isEmpty() && said.first().contains(QStringLiteral("bounds")));
+    PE_CHECK(view.selectionOutline().isEmpty());  // nothing, rather than half an outline
+
+    // A second untraceable selection does not repeat itself: the state has not changed.
+    said = messagesFrom(
+        view, [&] { doc->history().push(std::make_unique<pe::SetSelectionCommand>(ragged())); });
+    PE_CHECK_EQ(said.size(), 0);
+
+    // But once a traceable selection has been shown, an untraceable one is worth saying again.
+    said = messagesFrom(view, [&] {
+        pe::Selection simple;
+        simple.selectRect(pe::Rect{10, 10, 50, 50});
+        doc->history().push(std::make_unique<pe::SetSelectionCommand>(std::move(simple)));
+    });
+    PE_CHECK_EQ(said.size(), 0);
+    PE_CHECK_EQ(view.selectionOutline().size(), 4);
+
+    said = messagesFrom(
+        view, [&] { doc->history().push(std::make_unique<pe::SetSelectionCommand>(ragged())); });
+    PE_CHECK_EQ(said.size(), 1);
+
     view.setDocument(nullptr);
 }
