@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **681 engine cases + 140 shell cases, 0 failed**. The engine tests
+Test suite: **681 engine cases + 153 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -97,10 +97,18 @@ The engine is no longer headless-only; the Qt6 app provides a real
   matches, wherever the colour came from. Usable from the keyboard, and it goes through
   the one `setForegroundColor` path the picker, the eyedropper and the colour dialog use,
   so the brush, the tool-strip swatch and the two panels cannot drift apart.
-- The panels that are **not built yet** (Gradients, Patterns, Adjustments, Libraries,
-  Channels, Paths) now say what they will be for and that they are not implemented. They
-  used to show their own name centred in a blank dock, which reads as a panel that failed
-  to load.
+- **Adjustments panel**: one-click presets, grouped by what they are for (tone, colour,
+  monochrome, graphic), each of which adds one configured non-destructive adjustment layer.
+  The gap it fills is not "there is no way to add an adjustment layer" (Layer > New
+  Adjustment Layer already did) but that every entry there creates the adjustment at its
+  IDENTITY settings, so the layer changes nothing until its dialog is opened. Each row's
+  swatch is a reference tone-and-hue strip with that preset's own `pe::Adjustment` applied
+  by the engine, so a row cannot claim an effect its layer will not produce; a test asserts
+  every preset actually moves the strip. Both the panel and the menu add layers through one
+  `MainWindow::addAdjustmentLayer`, so where the layer lands cannot differ between them.
+- The panels that are **not built yet** (Gradients, Patterns, Libraries, Channels, Paths)
+  now say what they will be for and that they are not implemented. They used to show their
+  own name centred in a blank dock, which reads as a panel that failed to load.
 
 ### Visual design system (dark pro theme)
 

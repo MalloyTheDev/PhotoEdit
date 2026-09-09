@@ -91,7 +91,8 @@ if(PHOTOEDIT_BUILD_APP)
         app/test_iconutil.cpp
         app/test_canvasview.cpp
         app/test_layerspanel.cpp
-    app/test_swatchespanel.cpp
+        app/test_swatchespanel.cpp
+        app/test_adjustmentspanel.cpp
         app/test_busytask.cpp
     )
 

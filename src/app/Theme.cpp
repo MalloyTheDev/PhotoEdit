@@ -211,6 +211,13 @@ QLabel#PlaceholderTitle { color: @text@; font-weight: 600; background: transpare
 QLabel#PlaceholderBody { color: @textDim@; background: transparent; }
 QLabel#PlaceholderNote { color: @textDim@; font-style: italic; background: transparent; }
 QWidget#SwatchesPanel { background: @base@; }
+
+/* Adjustments: a list of presets over a line saying where the layer lands. The group
+   headings are unflagged items, so they arrive here as :disabled; without this rule the
+   item colour above would paint them at full strength and they would read as choices. */
+QWidget#AdjustmentsPanel { background: @panel@; }
+QListWidget::item:disabled { color: @textDim@; }
+QLabel#PanelHint { color: @textDim@; background: transparent; }
 )QSS");
 
     struct Tok {

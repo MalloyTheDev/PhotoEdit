@@ -2,6 +2,7 @@
 
 #include "PixelFormatNames.hpp"
 
+#include "AdjustmentsPanel.hpp"
 #include "BusyTask.hpp"
 #include "CanvasView.hpp"
 #include "ColorPanel.hpp"
@@ -531,12 +532,7 @@ void MainWindow::buildMenuBar() {
         };
         for (const auto& [label, make] : adjTypes) {
             adjMenu->addAction(QString::fromUtf8(label), this, [this, label, make] {
-                if (doc_ == nullptr) return;
-                auto layer = std::make_unique<pe::AdjustmentLayer>(make(), std::string(label));
-                const pe::LayerId id = layer->id();
-                doc_->history().push(
-                    std::make_unique<pe::AddLayerCommand>(std::move(layer), doc_->topLevelCount()));
-                doc_->setActiveLayer(id);
+                addAdjustmentLayer(make(), QString::fromUtf8(label));
             });
         }
         // Edit the active adjustment layer's parameters (also reachable by double-clicking its
@@ -844,6 +840,9 @@ void MainWindow::updateActionStates() {
     for (QMenu* m : docMenus_) {
         if (m != nullptr) m->setEnabled(hasDoc);
     }
+    // Every preset adds a layer to a document, so with none open the panel is greyed rather
+    // than left looking live and doing nothing when clicked. Same rule the menus follow.
+    if (adjustments_ != nullptr) adjustments_->setEnabled(hasDoc);
     for (QAction* a : fileActions_) {
         if (a != nullptr) a->setEnabled(idle);
     }
@@ -1608,6 +1607,17 @@ void MainWindow::editTextLayer(pe::LayerId id) {
         std::make_unique<pe::EditTextCommand>(id, model, std::move(raster), rasterOrigin));
 }
 
+void MainWindow::addAdjustmentLayer(std::unique_ptr<pe::Adjustment> adj, const QString& name) {
+    if (doc_ == nullptr || adj == nullptr) return;
+    auto layer = std::make_unique<pe::AdjustmentLayer>(std::move(adj), name.toStdString());
+    const pe::LayerId id = layer->id();
+    doc_->history().push(
+        std::make_unique<pe::AddLayerCommand>(std::move(layer), doc_->topLevelCount()));
+    // Active, so the next thing done (Edit Adjustment, a mask, a blend mode) lands on the
+    // layer that was just added rather than on whatever happened to be selected before.
+    doc_->setActiveLayer(id);
+}
+
 void MainWindow::editAdjustmentLayer(pe::LayerId id) {
     if (doc_ == nullptr) return;
     pe::Layer* layer = doc_->findLayer(id);
@@ -2193,6 +2203,7 @@ void MainWindow::buildDockPanels() {
     history_ = new HistoryPanel();
     colorPanel_ = new ColorPanel();
     swatchesPanel_ = new SwatchesPanel();
+    adjustments_ = new AdjustmentsPanel();
     properties_ = new PropertiesPanel();
 
     // The Color panel drives the foreground/brush colour; seed it and keep in sync.
@@ -2205,6 +2216,12 @@ void MainWindow::buildDockPanels() {
     swatchesPanel_->setCurrentColor(fgColor_);
     connect(swatchesPanel_, &SwatchesPanel::colorChosen, this,
             [this](const QColor& c) { setForegroundColor(c); });
+    // A preset is a name and a set of numbers; the layer it becomes is built here, by the
+    // same call Layer▸New Adjustment Layer makes. The panel never touches the document.
+    connect(adjustments_, &AdjustmentsPanel::presetChosen, this, [this](int index) {
+        if (adjustments_ == nullptr) return;
+        addAdjustmentLayer(adjustments_->makeAdjustment(index), adjustments_->preset(index).name);
+    });
 
     // Group anchors (one per stacked group).
     auto* colorDock = makeDock(QStringLiteral("Color"), colorPanel_);
@@ -2233,12 +2250,7 @@ void MainWindow::buildDockPanels() {
                                           QStringLiteral("Tiling images to fill a selection "
                                                          "or a layer with."))));
 
-    tabifyDockWidget(propsDock,
-                     makeDock(QStringLiteral("Adjustments"),
-                              placeholder(QStringLiteral("Adjustments"),
-                                          QStringLiteral("One-click adjustment presets. Layer "
-                                                         "> New Adjustment Layer already "
-                                                         "creates them."))));
+    tabifyDockWidget(propsDock, makeDock(QStringLiteral("Adjustments"), adjustments_));
     tabifyDockWidget(
         propsDock, makeDock(QStringLiteral("Libraries"),
                             placeholder(QStringLiteral("Libraries"),

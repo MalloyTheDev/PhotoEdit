@@ -26,6 +26,10 @@ class QToolBar;
 class QToolButton;
 class QWidget;
 
+namespace pe {
+class Adjustment;  // only ever held by pointer here; Adjustment.hpp stays out of this header
+}
+
 namespace pe::app {
 
 class CanvasView;
@@ -33,6 +37,7 @@ class LayersPanel;
 class HistoryPanel;
 class ColorPanel;
 class SwatchesPanel;
+class AdjustmentsPanel;
 class PropertiesPanel;
 
 // What the user chose when asked about unsaved changes.
@@ -138,6 +143,10 @@ private:
     // panel, or Layer▸Edit Adjustment). Commits one EditAdjustmentCommand on OK; a no-op for a
     // non-adjustment layer or a type without an editor yet.
     void editAdjustmentLayer(pe::LayerId id);
+    // Add one adjustment layer on top of the stack as a single undo step and make it active.
+    // The only path: Layer▸New Adjustment Layer and the Adjustments panel both come through
+    // here, so where the layer lands and what it is called cannot differ between them.
+    void addAdjustmentLayer(std::unique_ptr<pe::Adjustment> adj, const QString& name);
     // Reopen the text dialog for a text layer (double-click in the Layers panel), seeded from its
     // model; commits one EditTextCommand on OK. A no-op for a non-text layer.
     void editTextLayer(pe::LayerId id);
@@ -212,6 +221,7 @@ private:
     HistoryPanel* history_ = nullptr;
     ColorPanel* colorPanel_ = nullptr;
     SwatchesPanel* swatchesPanel_ = nullptr;
+    AdjustmentsPanel* adjustments_ = nullptr;
     PropertiesPanel* properties_ = nullptr;
     QLabel* toolLabel_ = nullptr;        // status bar: active tool
     QLabel* toolHintLabel_ = nullptr;    // status bar: what the active tool does

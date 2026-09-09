@@ -175,3 +175,22 @@ PE_TEST(theme_the_tree_selection_does_not_box_every_cell) {
         PE_CHECK(!rule.contains(QStringLiteral("border-right")));
     }
 }
+
+PE_TEST(theme_a_disabled_list_row_is_dimmer_than_a_live_one) {
+    // The Adjustments panel groups its presets under headings, and a heading is a list row
+    // carrying no flags, which Qt renders as :disabled. QListWidget::item already sets the
+    // full text colour, and a stylesheet rule wins over the palette, so without a rule of its
+    // own a heading paints exactly like a preset and reads as one more thing to click.
+    for (const pe::app::ThemeId id : pe::app::kAllThemes) {
+        const QString qss = pe::app::buildStyleSheet(pe::app::themeColors(id));
+        const int at = qss.indexOf(QStringLiteral("QListWidget::item:disabled"));
+        PE_CHECK(at >= 0);
+        if (at < 0) continue;
+        const int close = qss.indexOf(QLatin1Char('}'), at);
+        PE_REQUIRE(close > at);
+        const QString rule = qss.mid(at, close - at);
+        const pe::app::ThemeColors c = pe::app::themeColors(id);
+        PE_CHECK(rule.contains(c.textDim.name()));
+        PE_CHECK(!rule.contains(c.text.name()));  // the same colour would be no rule at all
+    }
+}

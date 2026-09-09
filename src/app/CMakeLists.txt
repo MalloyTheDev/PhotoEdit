@@ -40,8 +40,11 @@ qt_add_library(pe_app STATIC
     HistoryPanel.cpp
     HistoryPanel.hpp
     ColorPanel.cpp
-    SwatchesPanel.cpp
     ColorPanel.hpp
+    SwatchesPanel.cpp
+    SwatchesPanel.hpp
+    AdjustmentsPanel.cpp
+    AdjustmentsPanel.hpp
     PropertiesPanel.cpp
     PropertiesPanel.hpp
     Theme.cpp
