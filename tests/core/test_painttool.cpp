@@ -8,6 +8,8 @@
 #include "pe/core/Selection.hpp"
 #include "pe_test.hpp"
 
+#include <cstdint>
+
 #include <algorithm>
 #include <memory>
 #include <vector>
@@ -499,4 +501,76 @@ PE_TEST(painttool_maskpaint_per_sample_dirty_stays_bounded) {
 
     PE_CHECK(tool.end(*doc));
     PE_CHECK_EQ(doc->history().undoDepth(), static_cast<std::size_t>(1));
+}
+
+PE_TEST(painttool_a_long_brush_or_eraser_stroke_reaches_its_end) {
+    // A stroke that stops following the cursor is indistinguishable from a broken tool, and
+    // it is one of the things reported about the Eraser. Only two engines can do it: Heal,
+    // which rebuilds its Gauss-Seidel fill from scratch on every sample, and mask paint,
+    // whose command stores a dense array over the stroke's bounding box. The Brush and the
+    // Eraser stamp incrementally into tile deltas and have no stroke length limit.
+    //
+    // Asserted on the PIXELS at both ends rather than on the flag, because "the stroke ran
+    // out of budget" and "the stroke silently stopped painting" look the same to the user
+    // and only one of them sets a flag.
+    constexpr int kDim = 4096;
+    auto doc = pe::Document::createBlank(pe::Size{kDim, kDim});
+    PE_REQUIRE(doc != nullptr);
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(pe::Rect{0, 0, kDim, kDim}, pe::Rgba8{120, 130, 140, 255});
+
+    pe::PaintToolController tool;
+    tool.setMode(pe::PaintToolController::Mode::Eraser);
+    tool.brush().diameter = 40.0f;
+    PE_REQUIRE(tool.begin(*doc, pe::StrokePoint{pe::Vec2{20.0f, 20.0f}, 1.0f}, nullptr));
+    for (int i = 1; i <= 200; ++i) {
+        const float t = 20.0f + static_cast<float>(i) * 20.0f;
+        tool.extend(*doc, pe::StrokePoint{pe::Vec2{t, t}, 1.0f});
+    }
+    PE_CHECK(!tool.strokeAtBudget());
+    tool.end(*doc);
+
+    // Both ends of a stroke spanning more than 16 megapixels of bounding box.
+    PE_CHECK_EQ(pl->tiles().pixel(20, 20).a, static_cast<std::uint8_t>(0));
+    PE_CHECK_EQ(pl->tiles().pixel(4020, 4020).a, static_cast<std::uint8_t>(0));
+    // And it erased a line, not the whole layer.
+    PE_CHECK_EQ(pl->tiles().pixel(2000, 3000).a, static_cast<std::uint8_t>(255));
+}
+
+PE_TEST(painttool_only_heal_and_mask_paint_have_a_stroke_budget) {
+    // Which modes can stop mid-stroke is a user-facing fact: a stroke that stops following
+    // the cursor looks like the tool has failed, and only the modes that can actually do it
+    // should be claiming a limit. The header used to say blur and sharpen were among them,
+    // and they have not been since they moved to the incremental path.
+    // Painted, because the batched engines return no command at all on an empty layer and
+    // would then never reach the budget this is about.
+    constexpr int kSide = 4096;
+    auto doc = pe::Document::createBlank(pe::Size{kSide, kSide});
+    PE_REQUIRE(doc != nullptr);
+    static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()))
+        ->tiles()
+        .fillRect(pe::Rect{0, 0, kSide, kSide}, pe::Rgba8{120, 130, 140, 255});
+
+    const auto longStroke = [&doc](pe::PaintToolController::Mode m) {
+        pe::PaintToolController tool;
+        tool.setMode(m);
+        tool.brush().diameter = 40.0f;
+        if (!tool.begin(*doc, pe::StrokePoint{pe::Vec2{10.0f, 10.0f}, 1.0f}, nullptr)) {
+            return false;  // this mode cannot start here (Clone has no source)
+        }
+        for (int i = 1; i <= 200; ++i) {
+            const float t = static_cast<float>(i) * 20.0f;
+            tool.extend(*doc, pe::StrokePoint{pe::Vec2{10.0f + t, 10.0f + t}, 1.0f});
+        }
+        const bool hit = tool.strokeAtBudget();
+        tool.end(*doc);
+        return hit;
+    };
+
+    using Mode = pe::PaintToolController::Mode;
+    // The incremental engines stamp into tile deltas and have no stroke length limit.
+    for (const Mode m :
+         {Mode::Brush, Mode::Eraser, Mode::Dodge, Mode::Burn, Mode::Blur, Mode::Sharpen}) {
+        PE_CHECK(!longStroke(m));
+    }
 }

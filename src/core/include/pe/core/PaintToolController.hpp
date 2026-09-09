@@ -80,9 +80,17 @@ public:
     [[nodiscard]] Rect lastExtendBounds() const noexcept { return lastDirty_; }
 
     // True once a stroke has grown past the bake budget of the engine behind the current
-    // mode (heal 2M px, blur/sharpen and mask paint 16M) and stopped accepting samples.
-    // What was painted up to that point still commits. A view can surface this so a
-    // stroke that stops following the cursor is explained rather than looking broken.
+    // mode and stopped accepting samples. What was painted up to that point still commits.
+    // A view can surface this so a stroke that stops following the cursor is explained
+    // rather than looking broken.
+    //
+    // Only two modes can reach it: Heal, whose Gauss-Seidel fill has to rebuild from
+    // scratch on every sample and refuses past 2M px, and MaskPaint, whose command stores a
+    // dense array over the stroke's bounding box and freezes past 16M. Everything else,
+    // Brush and Eraser included, stamps incrementally into tile deltas and has no stroke
+    // length limit. This comment used to name blur and sharpen as well; they moved to the
+    // incremental path when stabilization stopped forcing the batched rebuild, and the
+    // budget went with it.
     [[nodiscard]] bool strokeAtBudget() const noexcept {
         return batchedFrozen_ || (live_ != nullptr && live_->atBudget());
     }
