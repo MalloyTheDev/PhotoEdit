@@ -7,11 +7,10 @@
 namespace pe {
 
 namespace {
-// Rec.601 luma on encoded 8-bit values, rounded to a [0,255] bin. Matches the
-// luminance() used by the adjustment operators (GradientMap/Threshold).
+// Rec.601 luma on encoded 8-bit values, rounded to a [0,255] bin. The weighting is
+// linear, so feeding it 0..255 samples yields a 0..255 result directly.
 inline int luma8(Rgba8 p) noexcept {
-    const float l = 0.299f * static_cast<float>(p.r) + 0.587f * static_cast<float>(p.g) +
-                    0.114f * static_cast<float>(p.b);
+    const float l = luma(static_cast<float>(p.r), static_cast<float>(p.g), static_cast<float>(p.b));
     const int v = static_cast<int>(l + 0.5f);
     return v < 0 ? 0 : (v > 255 ? 255 : v);
 }

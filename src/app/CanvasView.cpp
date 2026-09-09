@@ -185,6 +185,66 @@ pe::PixelBuffer CanvasView::canvasPreview(int maxPixels) {
                                          std::max(1, maxPixels));
 }
 
+void CanvasView::loadSelectionFromChannel(std::optional<pe::Channel> channel) {
+    const char* const action = "Channels: Load as Selection";
+    if (doc_ == nullptr || renderer_ == nullptr) {
+        emit refused(pe::refuse("select.loadChannel", pe::RefusalCode::NoDocument, action,
+                                "Open a document first."));
+        return;
+    }
+    const pe::Size cs = canvasSize();
+    if (cs.isEmpty()) {
+        emit refused(pe::refuse("select.loadChannel", pe::RefusalCode::NoDocument, action,
+                                "This document has no canvas to read."));
+        return;
+    }
+
+    pe::Selection sel;
+    bool overBudget = false;
+    // LiveDocument and the renderer's cache, for the reason the Magic Wand uses them: the
+    // paint path has already composited most of these tiles, and a snapshot would arrive with
+    // a cold renderer and pay back the whole composite.
+    const TaskResult task = runCanvasTask(
+        QStringLiteral("Load Channel as Selection"), TaskAccess::LiveDocument,
+        [this, cs, channel, &sel, &overBudget] {
+            const pe::PixelBuffer buf =
+                renderer_->renderRegion(pe::Rect{0, 0, cs.width, cs.height});
+            if (buf.isEmpty()) {
+                overBudget = true;
+                return;
+            }
+            const pe::PixelBuffer plane =
+                channel.has_value() ? pe::extractChannel(buf, *channel) : pe::extractLuminance(buf);
+            // loadMask reads the RED channel as coverage, and both extractors write the value
+            // to all three, so this is the channel's own values read as how-selected.
+            sel.loadMask(plane, 0, 0);
+        });
+    if (task.threw) {
+        emit toolMessage(QStringLiteral("Load as Selection failed: %1").arg(task.error));
+        return;
+    }
+    if (!task.ran) return;
+    if (overBudget) {
+        emit refused(pe::refuse(
+            "select.loadChannel", pe::RefusalCode::OverSizeBudget, action,
+            QStringLiteral("Reading a channel means flattening the image, and this one is over "
+                           "the %1 megapixel limit.")
+                .arg(pe::kMaxCompositeImagePixels / 1'000'000)
+                .toStdString()));
+        return;
+    }
+    // A channel that is black everywhere loads as a selection of nothing: the ants vanish and
+    // every subsequent edit is refused, with nothing on screen explaining why. Saying so and
+    // leaving the current selection alone is more use than handing the user that state.
+    if (!sel.active() || sel.tightBounds().isEmpty()) {
+        emit refused(pe::refuse("select.loadChannel", pe::RefusalCode::NoEffect, action,
+                                "That channel is black everywhere, so loading it would select "
+                                "nothing."));
+        return;
+    }
+    doc_->history().push(std::make_unique<pe::SetSelectionCommand>(std::move(sel)));
+}
+
 void CanvasView::reloadImage() {
     // A live preview applied a provisional command straight to the document (no
     // notification), so the renderer's cache is stale — drop it and repaint.

@@ -12,6 +12,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -132,6 +133,15 @@ public:
     // the cost is set by `maxPixels` rather than by the document, and unlike
     // Document::compositeImage() it keeps working above the composite cap.
     [[nodiscard]] pe::PixelBuffer canvasPreview(int maxPixels);
+
+    // Replace the document's selection with a channel's values read as coverage: bright is
+    // selected, dark is not, and the greys in between are partially selected. An empty
+    // `channel` means the composite's brightness, which is the luminosity mask.
+    //
+    // At full resolution, unlike the panel thumbnails: a selection is per pixel. That puts it
+    // over the same composite budget the Magic Wand runs into, and on the same worker, since
+    // flattening a large canvas on the GUI thread is indistinguishable from a hang.
+    void loadSelectionFromChannel(std::optional<pe::Channel> channel);
 
 signals:
     void zoomChanged(double percent);   // for the status-bar zoom readout

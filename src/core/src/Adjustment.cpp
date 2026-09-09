@@ -160,7 +160,7 @@ float wrapHue(float h) noexcept {
 }
 
 float luminance(float r, float g, float b) noexcept {
-    return 0.299f * r + 0.587f * g + 0.114f * b;  // Rec.601 luma (encoded, M5)
+    return luma(r, g, b);  // Rec.601, on encoded values (M5)
 }
 
 }  // namespace

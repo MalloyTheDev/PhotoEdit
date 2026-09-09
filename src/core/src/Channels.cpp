@@ -59,6 +59,25 @@ PixelBuffer mergeChannels(const PixelBuffer& red, const PixelBuffer& green, cons
     return out;
 }
 
+PixelBuffer extractLuminance(const PixelBuffer& img) {
+    PixelBuffer out(img.width(), img.height());
+    if (img.isEmpty()) return out;
+    const std::size_t n =
+        static_cast<std::size_t>(img.width()) * static_cast<std::size_t>(img.height());
+    const Rgba8* src = img.data();
+    Rgba8* dst = out.data();
+    for (std::size_t i = 0; i < n; ++i) {
+        // The weighting is linear, so 0..255 in gives 0..255 out; +0.5 rounds rather than
+        // truncating, which would drag the whole plane a fraction darker.
+        const float l = luma(static_cast<float>(src[i].r), static_cast<float>(src[i].g),
+                             static_cast<float>(src[i].b));
+        const int v = static_cast<int>(l + 0.5f);
+        const auto g = static_cast<std::uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+        dst[i] = Rgba8{g, g, g, 255};
+    }
+    return out;
+}
+
 void applyChannelView(PixelBuffer& img, ChannelView view) {
     // The common case by far: the composite is shown as composited, and a repaint outside a
     // channel view must not pay for a pass over the pixels at all.

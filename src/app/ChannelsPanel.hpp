@@ -7,9 +7,11 @@
 #include <QWidget>
 
 #include <functional>
+#include <optional>
 
 class QEvent;
 class QObject;
+class QPushButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 
@@ -58,6 +60,10 @@ public:
 
 signals:
     void viewChanged(pe::ChannelView view);
+    // Load the named plane's values as the document's selection. An empty `channel` means the
+    // composite's brightness (the luminosity mask). The panel does not do this itself: it
+    // needs a full-resolution composite, which belongs to the canvas.
+    void loadAsSelectionRequested(std::optional<pe::Channel> channel);
 
 protected:
     // Thumbnails are only rebuilt while the dock is on screen; this catches up when it is
@@ -80,6 +86,9 @@ private:
     void soloRow(int row);     // view exactly that channel (or everything, for Composite)
     void onItemChanged(QTreeWidgetItem* item, int column);
     void onItemClicked(QTreeWidgetItem* item, int column);
+    // What the current row would load, for the button's tooltip and for the request itself.
+    [[nodiscard]] std::optional<pe::Channel> channelOfCurrentRow() const;
+    void syncLoadButton();
 
     pe::Document* doc_ = nullptr;  // not owned; observed while non-null
     std::function<pe::PixelBuffer(int)> previewSource_;
@@ -87,6 +96,7 @@ private:
     bool updating_ = false;    // guard: our own writes into the tree
     bool thumbsStale_ = true;  // a change arrived while hidden; catch up on show
     QTreeWidget* tree_ = nullptr;
+    QPushButton* loadButton_ = nullptr;
 };
 
 }  // namespace pe::app

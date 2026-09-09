@@ -12,6 +12,18 @@ namespace pe {
     return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
 }
 
+// Rec.601 luma: the perceptual weighting that answers "how bright is this colour".
+//
+// Linear in its inputs and unit-agnostic, so it serves both the 0..1 working values and
+// raw 0..255 samples; the caller keeps whatever scale it passed in. Every adjustment that
+// reads brightness (Threshold, Gradient Map), the histogram, and mask painting all need
+// this, and each of them used to carry its own copy of the constants. One copy so they
+// cannot drift, which for a perceptual weighting would show up as three tools disagreeing
+// about which of two colours is lighter.
+[[nodiscard]] constexpr float luma(float r, float g, float b) noexcept {
+    return 0.299f * r + 0.587f * g + 0.114f * b;
+}
+
 // 8-bit straight (non-premultiplied) RGBA. This is the storage format for the
 // initial 8-bit pixel path. 16-bit and 32-bit-float buffers arrive in later
 // milestones (see docs/15-color-management.md) but share this interface shape.

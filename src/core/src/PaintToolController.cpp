@@ -17,7 +17,7 @@ namespace {
 // the color's luminance is meaningful (a transparent foreground still deposits its RGB-derived
 // gray).
 [[nodiscard]] float maskGrayFromColor(Rgbaf c) noexcept {
-    return clamp01(0.299f * c.r + 0.587f * c.g + 0.114f * c.b);
+    return clamp01(luma(c.r, c.g, c.b));
 }
 }  // namespace
 

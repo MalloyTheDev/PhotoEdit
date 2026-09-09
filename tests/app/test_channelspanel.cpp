@@ -10,6 +10,7 @@
 #include "pe/core/Document.hpp"
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/Refusal.hpp"
 #include "pe/core/Selection.hpp"
 #include "pe/core/Tile.hpp"
 #include "pe_test.hpp"
@@ -23,12 +24,15 @@
 #include <QKeyEvent>
 #include <QList>
 #include <QPixmap>
+#include <QPushButton>
 #include <QString>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 
 #include <cstddef>
 #include <memory>
+#include <optional>
+#include <string>
 
 namespace {
 
@@ -351,4 +355,183 @@ PE_TEST(channels_the_panel_says_what_it_cannot_do_yet) {
         }
     }
     PE_CHECK(told);
+}
+
+PE_TEST(channels_loading_a_channel_selects_by_that_channel_s_values) {
+    // The action that turns the panel from something you look at into something you act with.
+    // A gradient across the red channel must come back as a selection that is fully selected
+    // where red is bright and unselected where it is dark, with the greys in between partial.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+            // Red ramps left to right; green and blue are constants, and deliberately not
+            // equal to red anywhere, so loading the wrong plane is visible.
+            pl->tiles().setPixel(x, y, pe::Rgba8{static_cast<uint8_t>(x * 255 / 63), 30, 200, 255});
+        }
+    }
+
+    pe::app::CanvasView view;
+    view.setDocument(doc.get());
+    const std::size_t undoBefore = doc->history().undoDepth();
+
+    view.loadSelectionFromChannel(pe::Channel::Red);
+
+    PE_CHECK_EQ(doc->history().undoDepth(), undoBefore + 1);  // one undoable step
+    PE_REQUIRE(doc->selection().active());
+    PE_CHECK_EQ(doc->selection().value(63, 10), 255);  // red is 255 at the right edge
+    PE_CHECK_EQ(doc->selection().value(0, 10), 0);     // and 0 at the left
+    const int mid = doc->selection().value(32, 10);
+    PE_CHECK(mid > 110 && mid < 145);  // partial in between, not rounded to all-or-nothing
+
+    // The blue plane is a constant 200, so loading it selects the whole canvas at 200.
+    view.loadSelectionFromChannel(pe::Channel::Blue);
+    PE_CHECK_EQ(doc->selection().value(0, 0), 200);
+    PE_CHECK_EQ(doc->selection().value(63, 63), 200);
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(channels_loading_the_composite_selects_by_brightness) {
+    // The luminosity mask. Not an average: green weighs most and blue least, so a green patch
+    // comes back far more selected than a blue one of the same numeric value.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{0, 0, 255, 255});  // blue
+    pl->tiles().fillRect(pe::Rect{0, 0, 32, 64}, pe::Rgba8{0, 255, 0, 255});  // green, left half
+
+    pe::app::CanvasView view;
+    view.setDocument(doc.get());
+    view.loadSelectionFromChannel(std::nullopt);
+
+    PE_REQUIRE(doc->selection().active());
+    const int green = doc->selection().value(10, 10);
+    const int blue = doc->selection().value(50, 10);
+    PE_CHECK_EQ(green, 150);  // 0.587 * 255
+    PE_CHECK_EQ(blue, 29);    // 0.114 * 255
+    PE_CHECK(green > blue);
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(channels_loading_a_black_channel_is_refused_rather_than_selecting_nothing) {
+    // An active selection that selects nothing is the worst outcome available here: the ants
+    // vanish, every subsequent edit is refused, and nothing on screen explains why. That is
+    // the state the marching-ants defect used to produce, and it is not worth recreating on
+    // purpose.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{0, 180, 90, 255});  // no red at all
+
+    pe::app::CanvasView view;
+    view.setDocument(doc.get());
+    // Something to lose: a selection already in place, which must survive the refusal.
+    pe::Selection existing;
+    existing.selectRect(pe::Rect{4, 4, 10, 10});
+    doc->history().push(std::make_unique<pe::SetSelectionCommand>(std::move(existing)));
+    const std::size_t undoBefore = doc->history().undoDepth();
+
+    pe::Refusal heard;
+    QObject::connect(&view, &pe::app::CanvasView::refused,
+                     [&heard](const pe::Refusal& r) { heard = r; });
+
+    view.loadSelectionFromChannel(pe::Channel::Red);
+
+    PE_CHECK(heard.code == pe::RefusalCode::NoEffect);
+    PE_CHECK_EQ(doc->history().undoDepth(), undoBefore);  // no entry to undo
+    // And the selection the user already had is untouched.
+    PE_CHECK(doc->selection().active());
+    PE_CHECK_EQ(doc->selection().value(5, 5), 255);
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(channels_loading_with_no_document_is_refused_and_says_so) {
+    pe::app::CanvasView view;
+    pe::Refusal heard;
+    QObject::connect(&view, &pe::app::CanvasView::refused,
+                     [&heard](const pe::Refusal& r) { heard = r; });
+    view.loadSelectionFromChannel(pe::Channel::Green);
+    PE_CHECK(heard.code == pe::RefusalCode::NoDocument);
+    PE_CHECK(!heard.explanation.empty());
+}
+
+PE_TEST(channels_the_button_asks_for_the_row_that_is_current) {
+    // Four rows and one button: the whole of the button meaning is which row it reads.
+    pe::app::ChannelsPanel panel;
+    QTreeWidget* tree = treeOf(panel);
+    PE_REQUIRE(tree != nullptr);
+    auto* button = panel.findChild<QPushButton*>(QStringLiteral("ChannelsLoadSelection"));
+    PE_REQUIRE(button != nullptr);
+
+    std::optional<pe::Channel> heard = pe::Channel::Alpha;  // never a legitimate outcome
+    int count = 0;
+    QObject::connect(&panel, &pe::app::ChannelsPanel::loadAsSelectionRequested,
+                     [&](std::optional<pe::Channel> c) {
+                         heard = c;
+                         ++count;
+                     });
+
+    tree->setCurrentItem(tree->topLevelItem(2));  // Green
+    button->click();
+    PE_CHECK(heard == std::optional<pe::Channel>(pe::Channel::Green));
+
+    tree->setCurrentItem(tree->topLevelItem(0));  // RGB: brightness, not a plane
+    button->click();
+    PE_CHECK(!heard.has_value());
+    PE_CHECK_EQ(count, 2);
+
+    // And it says which one it means, since a fixed label cannot.
+    tree->setCurrentItem(tree->topLevelItem(3));
+    PE_CHECK(button->toolTip().contains(QStringLiteral("Blue")));
+    tree->setCurrentItem(tree->topLevelItem(0));
+    PE_CHECK(button->toolTip().contains(QStringLiteral("brightness")));
+}
+
+PE_TEST(channels_the_button_reaches_the_canvas) {
+    // The panel emitting a request is not the same as the selection changing.
+    pe::app::MainWindow w;
+    auto doc = pe::Document::createBlank(pe::Size{32, 32});
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    pl->tiles().fillRect(pe::Rect{0, 0, 32, 32}, pe::Rgba8{255, 0, 0, 255});
+    w.setDocument(std::move(doc), QString());
+
+    auto* panel = w.findChild<pe::app::ChannelsPanel*>();
+    PE_REQUIRE(panel != nullptr);
+    auto* button = panel->findChild<QPushButton*>(QStringLiteral("ChannelsLoadSelection"));
+    PE_REQUIRE(button != nullptr);
+    QTreeWidget* tree = panel->findChild<QTreeWidget*>();
+    PE_REQUIRE(tree != nullptr);
+
+    tree->setCurrentItem(tree->topLevelItem(1));  // Red, which is 255 everywhere
+    button->click();
+
+    PE_REQUIRE(w.document()->selection().active());
+    PE_CHECK_EQ(w.document()->selection().value(16, 16), 255);
+}
+
+PE_TEST(channels_loading_a_channel_of_an_oversized_canvas_is_refused_with_the_reason) {
+    // Reading a channel means flattening the image, and the engine will not flatten past its
+    // composite cap. Silently selecting nothing there is what the Magic Wand used to do, and
+    // it is indistinguishable from the button being broken.
+    auto doc = pe::Document::createBlank(pe::Size{9000, 9000});  // 81 MP, over the 64 MP cap
+    PE_REQUIRE(doc != nullptr);
+
+    pe::app::CanvasView view;
+    view.setDocument(doc.get());
+    const std::size_t undoBefore = doc->history().undoDepth();
+
+    pe::Refusal heard;
+    QObject::connect(&view, &pe::app::CanvasView::refused,
+                     [&heard](const pe::Refusal& r) { heard = r; });
+
+    view.loadSelectionFromChannel(pe::Channel::Red);
+
+    PE_CHECK(heard.code == pe::RefusalCode::OverSizeBudget);
+    PE_CHECK(heard.explanation.find("megapixel") != std::string::npos);  // names the limit
+    PE_CHECK_EQ(doc->history().undoDepth(), undoBefore);
+    PE_CHECK(!doc->selection().active());
+
+    view.setDocument(nullptr);
 }

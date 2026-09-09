@@ -148,3 +148,62 @@ PE_TEST(channels_an_empty_buffer_is_left_alone) {
     applyChannelView(empty, ChannelView{true, false, false});
     PE_CHECK(empty.isEmpty());
 }
+
+PE_TEST(channels_luminance_weights_green_most_and_blue_least) {
+    // Rec.601, the same weighting the histogram and the adjustments use. Pure green must read
+    // brighter than pure red, and pure red brighter than pure blue: an unweighted average
+    // would make all three identical, which is the mistake this replaces.
+    PixelBuffer img(3, 1);
+    img.set(0, 0, Rgba8{255, 0, 0, 255});
+    img.set(1, 0, Rgba8{0, 255, 0, 255});
+    img.set(2, 0, Rgba8{0, 0, 255, 255});
+
+    const PixelBuffer lum = extractLuminance(img);
+    PE_REQUIRE(!lum.isEmpty());
+    const int red = lum.at(0, 0).r;
+    const int green = lum.at(1, 0).r;
+    const int blue = lum.at(2, 0).r;
+    PE_CHECK(green > red);
+    PE_CHECK(red > blue);
+    // And the actual weights, not merely the order.
+    PE_CHECK_EQ(red, 76);     // 0.299 * 255
+    PE_CHECK_EQ(green, 150);  // 0.587 * 255
+    PE_CHECK_EQ(blue, 29);    // 0.114 * 255
+}
+
+PE_TEST(channels_luminance_is_grey_and_opaque_like_a_channel) {
+    // Same shape as extractChannel, because Selection::loadMask reads the RED channel as
+    // coverage: a luminance plane that kept the source alpha would load as a selection of
+    // whatever was opaque rather than of whatever was bright.
+    PixelBuffer img(2, 2);
+    img.set(0, 0, Rgba8{200, 100, 50, 0});
+    img.set(1, 0, Rgba8{10, 20, 30, 40});
+    img.set(0, 1, Rgba8{255, 255, 255, 255});
+    img.set(1, 1, Rgba8{0, 0, 0, 128});
+
+    const PixelBuffer lum = extractLuminance(img);
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            const Rgba8 p = lum.at(x, y);
+            PE_CHECK_EQ(p.r, p.g);
+            PE_CHECK_EQ(p.g, p.b);
+            PE_CHECK_EQ(p.a, 255);
+        }
+    }
+    PE_CHECK_EQ(lum.at(0, 1).r, 255);  // white is fully bright
+    PE_CHECK_EQ(lum.at(1, 1).r, 0);    // black is not, whatever its alpha
+}
+
+PE_TEST(channels_luminance_of_a_grey_is_that_grey) {
+    // The round-trip that catches a mis-scaled weighting: the coefficients sum to one, so a
+    // neutral must come back unchanged rather than drifting.
+    PixelBuffer img(4, 1);
+    const uint8_t greys[4] = {0, 64, 128, 255};
+    for (int x = 0; x < 4; ++x) img.set(x, 0, Rgba8{greys[x], greys[x], greys[x], 255});
+    const PixelBuffer lum = extractLuminance(img);
+    for (int x = 0; x < 4; ++x) PE_CHECK_EQ(lum.at(x, 0).r, greys[x]);
+}
+
+PE_TEST(channels_luminance_of_an_empty_buffer_is_empty) {
+    PE_CHECK(extractLuminance(PixelBuffer{}).isEmpty());
+}

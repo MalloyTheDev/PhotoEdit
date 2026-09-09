@@ -65,6 +65,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -2248,6 +2249,8 @@ void MainWindow::buildDockPanels() {
         [this](int maxPixels) { return canvas_->canvasPreview(maxPixels); });
     connect(channels_, &ChannelsPanel::viewChanged, this,
             [this](pe::ChannelView v) { canvas_->setChannelView(v); });
+    connect(channels_, &ChannelsPanel::loadAsSelectionRequested, this,
+            [this](std::optional<pe::Channel> ch) { canvas_->loadSelectionFromChannel(ch); });
 
     // Group anchors (one per stacked group).
     auto* colorDock = makeDock(QStringLiteral("Color"), colorPanel_);

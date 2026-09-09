@@ -56,4 +56,12 @@ struct ChannelView {
 // or the checkerboard would disappear the moment a channel view was switched on.
 void applyChannelView(PixelBuffer& img, ChannelView view);
 
+// Extract the composite's brightness as a grayscale, fully-opaque raster, in the same shape
+// extractChannel produces: the Rec.601 luma replicated to R=G=B with alpha 255.
+//
+// This is the plane behind the RGB row of a Channels panel. Loading it as a selection is the
+// luminosity mask, which selects the highlights in proportion to how bright they are, and is
+// the most-reached-for of the channel selections. Empty input yields an empty buffer.
+[[nodiscard]] PixelBuffer extractLuminance(const PixelBuffer& img);
+
 }  // namespace pe

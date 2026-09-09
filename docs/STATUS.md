@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **687 engine cases + 171 shell cases, 0 failed**. The engine tests
+Test suite: **691 engine cases + 178 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -114,7 +114,12 @@ The engine is no longer headless-only; the Qt6 app provides a real
   here touches the document, the undo stack or the dirty bit. Thumbnails pull a bounded
   downscale through the canvas renderer's cache rather than `Document::compositeImage()`,
   so they keep working above the composite cap, and are only rebuilt while the dock is on
-  screen. Spot channels and saved-selection channels are specified
+  screen. **Load as Selection** reads the current row as coverage (bright selected, dark
+  not, greys partly): a colour plane through `pe::extractChannel`, or the RGB row through
+  `pe::extractLuminance`, which is the luminosity mask. That one runs at full resolution on
+  the worker, like the Magic Wand, and refuses out loud above the composite cap or when the
+  plane is black everywhere, rather than handing back an active selection of nothing. Spot
+  channels and saving a selection AS a channel are specified
   ([19](systems/19-channels.md)) and not built; the panel says so.
 - The panels that are **not built yet** (Gradients, Patterns, Libraries, Paths) now say what
   they will be for and that they are not implemented. They used to show their own name

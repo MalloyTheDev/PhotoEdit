@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QPainter>
 #include <QPixmap>
+#include <QPushButton>
 #include <QShowEvent>
 #include <QSize>
 #include <QTreeWidget>
@@ -99,9 +100,18 @@ ChannelsPanel::ChannelsPanel(QWidget* parent) : QWidget(parent) {
     tree_->installEventFilter(this);
     root->addWidget(tree_, 1);
 
+    // The one action a channel supports today. Photoshop's panel has three more buttons
+    // beside it (save a selection as a channel, new, delete), and all three need somewhere on
+    // the document to keep a channel, which does not exist yet.
+    loadButton_ = new QPushButton(QStringLiteral("Load as Selection"), this);
+    loadButton_->setObjectName(QStringLiteral("ChannelsLoadSelection"));
+    connect(loadButton_, &QPushButton::clicked, this,
+            [this] { emit loadAsSelectionRequested(channelOfCurrentRow()); });
+    root->addWidget(loadButton_, 0);
+
     auto* hint = new QLabel(
-        QStringLiteral("Click a channel to view it on its own. The eyes combine. Spot channels "
-                       "and saved selections are not implemented."),
+        QStringLiteral("Click a channel to view it on its own. The eyes combine. Spot channels, "
+                       "and saving a selection as a channel, are not implemented."),
         this);
     hint->setObjectName(QStringLiteral("PanelHint"));
     hint->setWordWrap(true);
@@ -111,6 +121,8 @@ ChannelsPanel::ChannelsPanel(QWidget* parent) : QWidget(parent) {
     buildRows();
     connect(tree_, &QTreeWidget::itemChanged, this, &ChannelsPanel::onItemChanged);
     connect(tree_, &QTreeWidget::itemClicked, this, &ChannelsPanel::onItemClicked);
+    connect(tree_, &QTreeWidget::currentItemChanged, this, [this] { syncLoadButton(); });
+    syncLoadButton();
 }
 
 ChannelsPanel::~ChannelsPanel() {
@@ -266,6 +278,42 @@ void ChannelsPanel::onItemChanged(QTreeWidgetItem* item, int column) {
     }
     syncEyes();  // the composite row follows the three below it
     if (!(view_ == before)) emitView();
+}
+
+std::optional<pe::Channel> ChannelsPanel::channelOfCurrentRow() const {
+    if (tree_ == nullptr) return std::nullopt;
+    switch (tree_->indexOfTopLevelItem(tree_->currentItem())) {
+        case Red:
+            return pe::Channel::Red;
+        case Green:
+            return pe::Channel::Green;
+        case Blue:
+            return pe::Channel::Blue;
+        default:
+            return std::nullopt;  // the composite row: its brightness
+    }
+}
+
+void ChannelsPanel::syncLoadButton() {
+    if (loadButton_ == nullptr) return;
+    // Names what it will actually load. The button text stays fixed so the dock does not
+    // reflow every time a row is picked, but a button that reads the same for four different
+    // outcomes has to say somewhere which one it means.
+    const std::optional<pe::Channel> ch = channelOfCurrentRow();
+    if (!ch.has_value()) {
+        loadButton_->setToolTip(
+            QStringLiteral("Load the image's brightness as a selection: the luminosity mask. "
+                           "Bright pixels end up selected, dark ones do not, and the greys "
+                           "between them are partly selected."));
+        return;
+    }
+    const QString name = ch == pe::Channel::Red     ? QStringLiteral("Red")
+                         : ch == pe::Channel::Green ? QStringLiteral("Green")
+                                                    : QStringLiteral("Blue");
+    loadButton_->setToolTip(
+        QStringLiteral("Load the %1 channel as a selection. Bright pixels end up selected, dark "
+                       "ones do not, and the greys between them are partly selected.")
+            .arg(name));
 }
 
 void ChannelsPanel::onItemClicked(QTreeWidgetItem* item, int column) {
