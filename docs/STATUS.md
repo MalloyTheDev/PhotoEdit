@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **679 engine cases + 132 shell cases, 0 failed**. The engine tests
+Test suite: **679 engine cases + 138 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -92,6 +92,15 @@ The engine is no longer headless-only; the Qt6 app provides a real
   the panel to say why. Both are persisted from `.pedoc` v8.
 - **History panel** — a state timeline (uses `History::undoNames/redoNames`) with
   click-to-seek; the current state is highlighted, redoable states dimmed.
+- **Swatches panel**: a palette of colour chips (the neutrals plus a hue wheel at three
+  lightnesses). Clicking one loads it as the foreground; the grid marks whichever chip
+  matches, wherever the colour came from. Usable from the keyboard, and it goes through
+  the one `setForegroundColor` path the picker, the eyedropper and the colour dialog use,
+  so the brush, the tool-strip swatch and the two panels cannot drift apart.
+- The panels that are **not built yet** (Gradients, Patterns, Adjustments, Libraries,
+  Channels, Paths) now say what they will be for and that they are not implemented. They
+  used to show their own name centred in a blank dock, which reads as a panel that failed
+  to load.
 
 ### Visual design system (dark pro theme)
 

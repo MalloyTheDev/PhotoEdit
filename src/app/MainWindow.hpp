@@ -32,6 +32,7 @@ class CanvasView;
 class LayersPanel;
 class HistoryPanel;
 class ColorPanel;
+class SwatchesPanel;
 class PropertiesPanel;
 
 // What the user chose when asked about unsaved changes.
@@ -200,12 +201,17 @@ private:
     [[nodiscard]] QString describeState() const;  // the context field: what was true
     void refineSelection(const char* action, const std::function<void(pe::Selection&)>& apply);
     void onColorPicked(const QColor& c);
+    // The single place the foreground colour changes. The eyedropper, the colour dialog, the
+    // Color panel and the Swatches grid all arrive here, so the brush, the tool-strip swatch,
+    // the picker and the palette cannot end up disagreeing about what colour is loaded.
+    void setForegroundColor(const QColor& c);
 
     std::unique_ptr<pe::Document> doc_;
     CanvasView* canvas_ = nullptr;
     LayersPanel* layers_ = nullptr;
     HistoryPanel* history_ = nullptr;
     ColorPanel* colorPanel_ = nullptr;
+    SwatchesPanel* swatchesPanel_ = nullptr;
     PropertiesPanel* properties_ = nullptr;
     QLabel* toolLabel_ = nullptr;        // status bar: active tool
     QLabel* toolHintLabel_ = nullptr;    // status bar: what the active tool does

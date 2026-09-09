@@ -203,6 +203,14 @@ QWidget#DocTabStrip { background: @window@; border-bottom: 1px solid @border@; }
 QLabel#DocTab { background: @panel@; color: @text@; padding: 5px 14px;
     border-right: 1px solid @border@; }
 QToolBar QLabel { background: transparent; }
+
+/* A panel that is not built yet. Reads as a deliberate empty state rather than as a panel
+   that failed to load, which is what a lone centred label looked like. */
+QWidget#PanelPlaceholder { background: @panel@; }
+QLabel#PlaceholderTitle { color: @text@; font-weight: 600; background: transparent; }
+QLabel#PlaceholderBody { color: @textDim@; background: transparent; }
+QLabel#PlaceholderNote { color: @textDim@; font-style: italic; background: transparent; }
+QWidget#SwatchesPanel { background: @base@; }
 )QSS");
 
     struct Tok {

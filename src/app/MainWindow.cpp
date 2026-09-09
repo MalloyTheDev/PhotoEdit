@@ -13,6 +13,7 @@
 #include "IconUtil.hpp"
 #include "LayersPanel.hpp"
 #include "PropertiesPanel.hpp"
+#include "SwatchesPanel.hpp"
 #include "TextDialog.hpp"
 #include "TextRender.hpp"
 #include "pe/core/Adjustment.hpp"
@@ -1274,26 +1275,25 @@ void MainWindow::updateSwatches() {
     if (bgSwatch_ != nullptr) bgSwatch_->setStyleSheet(style(bgColor_));
 }
 
-void MainWindow::onColorPicked(const QColor& c) {
+void MainWindow::setForegroundColor(const QColor& c) {
     if (!c.isValid()) return;
     fgColor_ = c;
-    // Mirror chooseForegroundColor: the eyedropper sets the actual paint color and
-    // syncs the picker, not just the swatch.
     canvas_->tool().setColor(pe::Rgbaf{static_cast<float>(c.redF()), static_cast<float>(c.greenF()),
                                        static_cast<float>(c.blueF()), 1.0f});
+    // setColor on both panels deliberately does not echo back, so this cannot recurse.
     if (colorPanel_ != nullptr) colorPanel_->setColor(fgColor_);
+    if (swatchesPanel_ != nullptr) swatchesPanel_->setCurrentColor(fgColor_);
     updateSwatches();
+}
+
+void MainWindow::onColorPicked(const QColor& c) {
+    if (!c.isValid()) return;
+    setForegroundColor(c);
     statusBar()->showMessage(QStringLiteral("Picked %1").arg(c.name()), 2000);
 }
 
 void MainWindow::chooseForegroundColor() {
-    const QColor c = QColorDialog::getColor(fgColor_, this, QStringLiteral("Foreground Color"));
-    if (!c.isValid()) return;
-    fgColor_ = c;
-    canvas_->tool().setColor(pe::Rgbaf{static_cast<float>(c.redF()), static_cast<float>(c.greenF()),
-                                       static_cast<float>(c.blueF()), 1.0f});
-    if (colorPanel_ != nullptr) colorPanel_->setColor(fgColor_);  // keep the picker in sync
-    updateSwatches();
+    setForegroundColor(QColorDialog::getColor(fgColor_, this, QStringLiteral("Foreground Color")));
 }
 
 void MainWindow::chooseBackgroundColor() {
@@ -2117,11 +2117,34 @@ void MainWindow::buildDockPanels() {
         dock->setWidget(content);
         return dock;
     };
-    auto placeholder = [](const QString& name) {
-        auto* l = new QLabel(name);
-        l->setObjectName(QStringLiteral("PanelPlaceholder"));
-        l->setAlignment(Qt::AlignCenter);
-        return static_cast<QWidget*>(l);
+    // A panel that is not built yet says so, and says what it will be for. It used to show
+    // its own name centred in an otherwise blank dock, which is indistinguishable from a
+    // panel that is broken: the user reported these as "empty". This is the same honest
+    // treatment the scaffolded tools already get in their tooltips.
+    auto placeholder = [](const QString& name, const QString& purpose) {
+        auto* w = new QWidget();
+        w->setObjectName(QStringLiteral("PanelPlaceholder"));
+        w->setAccessibleName(name);
+        w->setAccessibleDescription(QStringLiteral("Not yet implemented"));
+        auto* v = new QVBoxLayout(w);
+        v->setContentsMargins(16, 16, 16, 16);
+        v->setSpacing(6);
+        v->addStretch(1);
+        auto* title = new QLabel(name, w);
+        title->setObjectName(QStringLiteral("PlaceholderTitle"));
+        title->setAlignment(Qt::AlignCenter);
+        auto* body = new QLabel(purpose, w);
+        body->setObjectName(QStringLiteral("PlaceholderBody"));
+        body->setAlignment(Qt::AlignCenter);
+        body->setWordWrap(true);
+        auto* note = new QLabel(QStringLiteral("Not yet implemented"), w);
+        note->setObjectName(QStringLiteral("PlaceholderNote"));
+        note->setAlignment(Qt::AlignCenter);
+        v->addWidget(title);
+        v->addWidget(body);
+        v->addWidget(note);
+        v->addStretch(1);
+        return static_cast<QWidget*>(w);
     };
 
     layers_ = new LayersPanel();
@@ -2149,17 +2172,19 @@ void MainWindow::buildDockPanels() {
     });
     history_ = new HistoryPanel();
     colorPanel_ = new ColorPanel();
+    swatchesPanel_ = new SwatchesPanel();
     properties_ = new PropertiesPanel();
 
     // The Color panel drives the foreground/brush colour; seed it and keep in sync.
     colorPanel_->setColor(fgColor_);
-    connect(colorPanel_, &ColorPanel::colorChanged, this, [this](const QColor& c) {
-        fgColor_ = c;
-        canvas_->tool().setColor(pe::Rgbaf{static_cast<float>(c.redF()),
-                                           static_cast<float>(c.greenF()),
-                                           static_cast<float>(c.blueF()), 1.0f});
-        updateSwatches();
-    });
+    connect(colorPanel_, &ColorPanel::colorChanged, this,
+            [this](const QColor& c) { setForegroundColor(c); });
+    // The Swatches grid is a palette, not a second editor: choosing a chip goes through the
+    // same one place the picker and the eyedropper do, so the two panels, the tool strip's
+    // swatch and the brush cannot drift apart.
+    swatchesPanel_->setCurrentColor(fgColor_);
+    connect(swatchesPanel_, &SwatchesPanel::colorChosen, this,
+            [this](const QColor& c) { setForegroundColor(c); });
 
     // Group anchors (one per stacked group).
     auto* colorDock = makeDock(QStringLiteral("Color"), colorPanel_);
@@ -2174,22 +2199,44 @@ void MainWindow::buildDockPanels() {
 
     // Then fill each group's tabs, always tabifying onto the group's anchor so the
     // insertion order (and grouping) is preserved.
-    tabifyDockWidget(colorDock,
-                     makeDock(QStringLiteral("Swatches"), placeholder(QStringLiteral("Swatches"))));
+    tabifyDockWidget(colorDock, makeDock(QStringLiteral("Swatches"), swatchesPanel_));
     tabifyDockWidget(
-        colorDock, makeDock(QStringLiteral("Gradients"), placeholder(QStringLiteral("Gradients"))));
+        colorDock,
+        makeDock(QStringLiteral("Gradients"),
+                 placeholder(QStringLiteral("Gradients"),
+                             QStringLiteral("Saved gradients to drag onto the canvas. The "
+                                            "Gradient tool already draws foreground to "
+                                            "background."))));
     tabifyDockWidget(colorDock,
-                     makeDock(QStringLiteral("Patterns"), placeholder(QStringLiteral("Patterns"))));
+                     makeDock(QStringLiteral("Patterns"),
+                              placeholder(QStringLiteral("Patterns"),
+                                          QStringLiteral("Tiling images to fill a selection "
+                                                         "or a layer with."))));
 
-    tabifyDockWidget(propsDock, makeDock(QStringLiteral("Adjustments"),
-                                         placeholder(QStringLiteral("Adjustments"))));
+    tabifyDockWidget(propsDock,
+                     makeDock(QStringLiteral("Adjustments"),
+                              placeholder(QStringLiteral("Adjustments"),
+                                          QStringLiteral("One-click adjustment presets. Layer "
+                                                         "> New Adjustment Layer already "
+                                                         "creates them."))));
     tabifyDockWidget(
-        propsDock, makeDock(QStringLiteral("Libraries"), placeholder(QStringLiteral("Libraries"))));
+        propsDock, makeDock(QStringLiteral("Libraries"),
+                            placeholder(QStringLiteral("Libraries"),
+                                        QStringLiteral("Assets shared between documents: colours, "
+                                                       "gradients, graphics."))));
 
     tabifyDockWidget(layersDock,
-                     makeDock(QStringLiteral("Channels"), placeholder(QStringLiteral("Channels"))));
+                     makeDock(QStringLiteral("Channels"),
+                              placeholder(QStringLiteral("Channels"),
+                                          QStringLiteral("The document's colour channels, and "
+                                                         "selections saved as alpha "
+                                                         "channels."))));
     tabifyDockWidget(layersDock,
-                     makeDock(QStringLiteral("Paths"), placeholder(QStringLiteral("Paths"))));
+                     makeDock(QStringLiteral("Paths"),
+                              placeholder(QStringLiteral("Paths"),
+                                          QStringLiteral("Vector paths from the Pen tool, and "
+                                                         "selections converted to and from "
+                                                         "them."))));
     tabifyDockWidget(layersDock, makeDock(QStringLiteral("History"), history_));
 
     colorDock->raise();  // first tab of each group is the active one

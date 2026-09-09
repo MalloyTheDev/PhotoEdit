@@ -40,6 +40,7 @@ qt_add_library(pe_app STATIC
     HistoryPanel.cpp
     HistoryPanel.hpp
     ColorPanel.cpp
+    SwatchesPanel.cpp
     ColorPanel.hpp
     PropertiesPanel.cpp
     PropertiesPanel.hpp
