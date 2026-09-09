@@ -1460,6 +1460,20 @@ QString openFailureReason(const QString& path, pe::LoadError err) {
     return QStringLiteral("Could not open \"%1\".").arg(path);
 }
 
+QString noAdjustmentEditorReason(pe::AdjustmentKind kind, const QString& name) {
+    if (kind == pe::AdjustmentKind::Invert) {
+        // Not a gap: inverting takes no parameters at all. The layer can still be hidden,
+        // faded with opacity, masked, moved or deleted, so say what CAN be done with it
+        // rather than leaving a dead end.
+        return QStringLiteral(
+                   "“%1” has no settings to change: it inverts every "
+                   "channel. Use the layer's opacity, blend mode or a mask to "
+                   "control how much of it shows.")
+            .arg(name);
+    }
+    return QStringLiteral("Editing “%1” isn't supported yet.").arg(name);
+}
+
 bool MainWindow::saveDocument() {
     if (currentPath_.isEmpty()) return saveDocumentAs();
     return writeTo(currentPath_);
@@ -1890,9 +1904,9 @@ void MainWindow::editAdjustmentLayer(pe::LayerId id) {
             return;
         }
         default:
-            QMessageBox::information(this, QStringLiteral("Edit Adjustment"),
-                                     QStringLiteral("Editing “%1” isn't supported yet.")
-                                         .arg(QString::fromStdString(adj.name())));
+            QMessageBox::information(
+                this, QStringLiteral("Edit Adjustment"),
+                noAdjustmentEditorReason(adj.kind(), QString::fromStdString(layer->name())));
             return;
     }
 

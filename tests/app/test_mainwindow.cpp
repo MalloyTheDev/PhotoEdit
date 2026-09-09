@@ -1243,3 +1243,25 @@ PE_TEST(mainwindow_painting_a_mask_keeps_the_brush_s_own_settings) {
     PE_CHECK_NEAR(w.canvas()->tool().brush().diameter, 64.0f);
     PE_CHECK_EQ(sizeBox->value(), 64);
 }
+
+PE_TEST(mainwindow_an_adjustment_with_no_settings_is_not_reported_as_unsupported) {
+    // The one message used to serve two situations. Invert takes no parameters at all, so
+    // "Editing this isn't supported yet" is simply false: it IS supported, there is nothing
+    // to adjust. That layer is one click away now that the Adjustments panel offers it as
+    // Negative, and a user who double-clicks the row deserves to be told which it is.
+    const QString invert =
+        pe::app::noAdjustmentEditorReason(pe::AdjustmentKind::Invert, QStringLiteral("Negative"));
+    PE_CHECK(invert.contains(QStringLiteral("Negative")));  // the layer's name, not the type
+    PE_CHECK(invert.contains(QStringLiteral("no settings")));
+    PE_CHECK(!invert.contains(QStringLiteral("supported")));
+    // And it points somewhere rather than dead-ending.
+    PE_CHECK(invert.contains(QStringLiteral("opacity")));
+
+    // A kind whose editor genuinely is not written yet still says so. Every kind has one
+    // today, so this branch is exercised with a kind that does: the function is being asked
+    // what to SAY when there is no editor, not which kinds lack one.
+    const QString later =
+        pe::app::noAdjustmentEditorReason(pe::AdjustmentKind::Curves, QStringLiteral("Tone"));
+    PE_CHECK(later.contains(QStringLiteral("supported")));
+    PE_CHECK(later.contains(QStringLiteral("Tone")));
+}

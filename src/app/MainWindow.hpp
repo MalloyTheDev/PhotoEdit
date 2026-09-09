@@ -12,6 +12,7 @@
 #include <QMainWindow>
 #include <QString>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -27,8 +28,9 @@ class QToolButton;
 class QWidget;
 
 namespace pe {
-class Adjustment;  // only ever held by pointer here; Adjustment.hpp stays out of this header
-}
+class Adjustment;                          // only ever held by pointer here, so a declaration
+enum class AdjustmentKind : std::uint8_t;  // does; Adjustment.hpp stays out of this header
+}  // namespace pe
 
 namespace pe::app {
 
@@ -58,10 +60,6 @@ enum class DiscardAnswer { Save, Discard, Cancel };
                                          const std::function<DiscardAnswer()>& ask,
                                          const std::function<bool()>& save);
 
-// The top-level application window. Wires the menus to the engine's document I/O and
-// shows the active document on a CanvasView. Color, Properties, Layers and History are
-// real panels; Swatches, Gradients, Patterns, Adjustments, Libraries, Channels and
-// Paths are still placeholders. See docs/systems/24-ui-workspace.md.
 // Why pe::saveDocument() refused, phrased for a dialog. Three cases the app can tell
 // apart: a canvas too large to flatten to a raster format (every raster format goes
 // through compositeImage(), which returns nothing above kMaxCompositeImagePixels, so
@@ -78,6 +76,17 @@ enum class DiscardAnswer { Save, Discard, Cancel };
 // as one opening a corrupt file.
 [[nodiscard]] QString openFailureReason(const QString& path, pe::LoadError err);
 
+// Why an adjustment layer's parameters cannot be edited. Two different situations that one
+// message used to conflate: Invert HAS no parameters, so there is nothing a dialog could
+// offer, while a kind whose editor is simply not written yet will grow one. Telling someone
+// that inverting "isn't supported yet" is false; it is supported, it is just not adjustable,
+// and the Adjustments panel makes that layer one click away.
+[[nodiscard]] QString noAdjustmentEditorReason(pe::AdjustmentKind kind, const QString& name);
+
+// The top-level application window. Wires the menus to the engine's document I/O and
+// shows the active document on a CanvasView. Color, Swatches, Adjustments, Properties,
+// Layers and History are real panels; Gradients, Patterns, Libraries, Channels and Paths
+// are still placeholders. See docs/systems/24-ui-workspace.md.
 class MainWindow : public QMainWindow, public pe::DocumentObserver {
     Q_OBJECT
 
