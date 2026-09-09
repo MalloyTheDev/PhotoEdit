@@ -881,7 +881,8 @@ std::unique_ptr<PaintCommand> moveLayerContent(Document& doc, LayerId layerId, i
 }
 
 std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layerId,
-                                                    const Affine2D& srcToDst) {
+                                                    const Affine2D& srcToDst,
+                                                    Rect regionOfInterest) {
     Layer* layer = doc.findLayer(layerId);
     if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
     const Rect src = static_cast<PixelLayer*>(layer)->contentBounds();
@@ -901,6 +902,9 @@ std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layer
     if (srcToDst.m00 == 1.0 && srcToDst.m11 == 1.0 && srcToDst.m01 == 0.0 && srcToDst.m10 == 0.0 &&
         std::floor(srcToDst.m02) == srcToDst.m02 && std::floor(srcToDst.m12) == srcToDst.m12 &&
         std::fabs(srcToDst.m02) <= kBound && std::fabs(srcToDst.m12) <= kBound) {
+        // Not narrowed by the region of interest: a translation is a copy rather than a
+        // resample, so it is already cheap enough not to need one, and keeping it whole
+        // preserves the bit-exactness that is the whole reason for this path.
         return moveLayerContent(doc, layerId, static_cast<int>(srcToDst.m02),
                                 static_cast<int>(srcToDst.m12));
     }
@@ -940,8 +944,12 @@ std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layer
 
     // The edit spans both the vacated source and the destination: clear the old pixels and
     // write the resampled ones in one reversible in-region transform.
-    const Rect region = src.united(dst);
+    Rect region = src.united(dst);
     if (!withinCoordinateRange(region)) return nullptr;
+    // An empty intersection needs no special case: it spans no tiles, so the resample below
+    // produces no deltas and returns nullptr on its own, which is what a drag whose whole
+    // effect is off screen should hand back.
+    if (!regionOfInterest.isEmpty()) region = region.intersected(regionOfInterest);
 
     // Bounded in BYTES by the tiles it touches, exactly as a Move is, rather than by
     // kMaxFilterPixels. The resample builds one destination tile at a time out of the store,

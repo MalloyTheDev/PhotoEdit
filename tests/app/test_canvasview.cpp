@@ -667,3 +667,72 @@ PE_TEST(canvasview_a_press_inside_the_transform_box_is_still_a_move) {
 
     view.setDocument(nullptr);
 }
+
+PE_TEST(canvasview_a_transform_drag_only_resamples_what_is_on_screen) {
+    // Free Transform rebuilt the whole layer on every motion event, which on a 16 megapixel
+    // document was about a second per mouse-move: not a slow tool but an unusable one. The
+    // preview is bounded to the viewport, so the cost follows the window rather than the
+    // document. What must stay true is that the commit is NOT bounded: an off-screen pixel
+    // keeps its original value during the drag and is transformed when the drag ends.
+    constexpr int kDim = 1200;
+    auto doc = pe::Document::createBlank(pe::Size{kDim, kDim});
+    PE_REQUIRE(doc != nullptr);
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    for (int y = 0; y < kDim; ++y) {
+        pl->tiles().fillRect(pe::Rect{0, y, kDim, 1},
+                             pe::Rgba8{static_cast<std::uint8_t>(y % 251), 90, 200, 255});
+    }
+    pe::app::CanvasView view;
+    view.resize(300, 300);
+    view.setDocument(doc.get());
+    view.actualPixels();  // 100% zoom, so most of the document is off screen
+
+    const pe::Rect visible = view.visibleDocRect();
+    PE_REQUIRE(!visible.isEmpty());
+    PE_REQUIRE(visible.width < kDim);  // the point of the case: the view shows only part
+
+    // A document pixel well outside the viewport, and one inside it.
+    const pe::Point off{kDim - 40, kDim - 40};
+    const pe::Point on{visible.x + visible.width / 2, visible.y + visible.height / 2};
+    PE_REQUIRE(!visible.contains(off));
+    const pe::Rgba8 offBefore = pl->tiles().pixel(off.x, off.y);
+    const pe::Rgba8 onBefore = pl->tiles().pixel(on.x, on.y);
+
+    // setTool begins the session, so the top-left corner handle is live straight away.
+    view.setTool(pe::app::CanvasView::Tool::Transform);
+    const QPointF corner = view.docToWidget(pe::PointD{0.0, 0.0});
+    pressAt(view, corner);
+    moveTo(view, corner + QPointF(-40.0, -40.0));
+
+    // Mid-drag: the visible pixel is being previewed, the off-screen one is not touched.
+    PE_CHECK(pl->tiles().pixel(on.x, on.y) != onBefore);
+    PE_CHECK(pl->tiles().pixel(off.x, off.y) == offBefore);
+
+    releaseAt(view, corner + QPointF(-40.0, -40.0));
+    view.setTool(pe::app::CanvasView::Tool::Move);  // leaving Free Transform commits it
+
+    // Committed: the off-screen pixel has moved too, and it is one undo step.
+    PE_CHECK(pl->tiles().pixel(off.x, off.y) != offBefore);
+    PE_CHECK(doc->history().undoDepth() >= static_cast<std::size_t>(1));
+
+    view.setDocument(nullptr);
+}
+
+PE_TEST(canvasview_the_visible_rect_covers_the_widget_and_is_padded) {
+    // What bounds the preview. Too small and the drag tears at the window edge; unpadded and
+    // a bilinear tap at the boundary reads a neighbour that was never resampled.
+    auto doc = pe::Document::createBlank(pe::Size{2000, 2000});
+    PE_REQUIRE(doc != nullptr);
+    pe::app::CanvasView view;
+    view.resize(400, 300);
+    view.setDocument(doc.get());
+    view.actualPixels();
+
+    const pe::Rect r = view.visibleDocRect();
+    PE_REQUIRE(!r.isEmpty());
+    // At 100% zoom it is the widget plus a little padding on each side, and no more: a rect
+    // that grew with the document would defeat the whole point.
+    PE_CHECK(r.width >= 400 + 8 && r.width <= 400 + 16);
+    PE_CHECK(r.height >= 300 + 8 && r.height <= 300 + 16);
+    view.setDocument(nullptr);
+}

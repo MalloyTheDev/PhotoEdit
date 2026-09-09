@@ -411,7 +411,13 @@ void CanvasView::updateTransformPreview() {
         reverted = transformPreview_->undo(*doc_).dirtyRegion;
         transformPreview_.reset();
     }
-    transformPreview_ = pe::transformLayerContent(*doc_, transformLayer_, transformMatrix());
+    // Bounded to what is on screen. The preview is rebuilt on EVERY motion event, and
+    // resampling the whole layer each time cost about a second per mouse-move on a 16 MP
+    // document, which is not a slow tool but an unusable one. Off-screen pixels keep their
+    // original content until commitTransform builds the real, whole-layer command on
+    // release, and the user cannot pan or zoom mid-drag to see the difference.
+    transformPreview_ =
+        pe::transformLayerContent(*doc_, transformLayer_, transformMatrix(), visibleDocRect());
     pe::Rect applied{};
     if (transformPreview_) applied = transformPreview_->execute(*doc_).dirtyRegion;
     // As in the Move drag: the revert's rect matters most when the rebuild returns null, and
@@ -456,6 +462,23 @@ void CanvasView::cancelTransform() {
         repaintRegion(reverted);
         update();
     }
+}
+
+pe::Rect CanvasView::visibleDocRect() const {
+    // The widget rect mapped back to document space, padded so a bilinear tap at the very
+    // edge still reads the neighbour it needs and a rounding wobble cannot expose a seam.
+    // Deliberately NOT clipped to the canvas: content dragged onto the pasteboard is still
+    // on screen, and a preview that stopped at the canvas edge would tear there.
+    constexpr int kPad = 4;
+    const pe::PointD tl = view_.viewToDoc(pe::PointD{0.0, 0.0});
+    const pe::PointD br =
+        view_.viewToDoc(pe::PointD{static_cast<double>(width()), static_cast<double>(height())});
+    const int l = static_cast<int>(std::floor(std::min(tl.x, br.x))) - kPad;
+    const int t = static_cast<int>(std::floor(std::min(tl.y, br.y))) - kPad;
+    const int r = static_cast<int>(std::ceil(std::max(tl.x, br.x))) + kPad;
+    const int b = static_cast<int>(std::ceil(std::max(tl.y, br.y))) + kPad;
+    if (r <= l || b <= t) return pe::Rect{};
+    return pe::Rect{l, t, r - l, b - t};
 }
 
 QPointF CanvasView::docToWidget(pe::PointD docPos) const {

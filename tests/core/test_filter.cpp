@@ -1139,3 +1139,112 @@ PE_TEST(bake_refusal_agrees_with_what_the_bake_actually_does) {
         PE_CHECK(!r.context.empty());
     }
 }
+
+// --- the transform preview's region of interest (#147) ------------------------------------
+
+namespace {
+
+// A layer whose rows differ, so a resample actually changes pixels: a uniform fill scales
+// to the same colours in its interior and the command is correctly dropped as a no-op.
+std::unique_ptr<pe::Document> stripedDoc(int dim) {
+    auto doc = pe::Document::createBlank(pe::Size{dim, dim});
+    if (doc == nullptr) return doc;
+    auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    for (int y = 0; y < dim; ++y) {
+        pl->tiles().fillRect(pe::Rect{0, y, dim, 1},
+                             pe::Rgba8{static_cast<std::uint8_t>(y % 251), 90, 200, 255});
+    }
+    return doc;
+}
+
+pe::Rgba8 pixelOf(const pe::Document& doc, pe::LayerId id, int x, int y) {
+    const auto* pl = static_cast<const pe::PixelLayer*>(doc.findLayer(id));
+    return pl->tiles().pixel(x, y);
+}
+
+}  // namespace
+
+PE_TEST(filter_a_region_of_interest_bounds_what_the_transform_rewrites) {
+    // The interactive preview rebuilds this on every motion event, and resampling a whole
+    // layer each time is what made Free Transform unusable on any real photograph. Narrowed
+    // to what is on screen, it has to change the pixels inside that region and leave every
+    // pixel outside it exactly as it was.
+    constexpr int kDim = 600;
+    auto doc = stripedDoc(kDim);
+    PE_REQUIRE(doc != nullptr);
+    const pe::LayerId id = doc->activeLayer();
+
+    const pe::Rgba8 insideBefore = pixelOf(*doc, id, 300, 300);
+    const pe::Rgba8 outsideBefore = pixelOf(*doc, id, 60, 60);
+
+    pe::Affine2D m;
+    m.m00 = 1.10;
+    m.m11 = 1.10;
+    const pe::Rect roi{200, 200, 200, 200};
+    auto cmd = pe::transformLayerContent(*doc, id, m, roi);
+    PE_REQUIRE(cmd != nullptr);
+    const pe::Rect dirty = cmd->execute(*doc).dirtyRegion;
+
+    // Everything it touched is inside the region it was given.
+    PE_CHECK(dirty.intersected(roi) == dirty);
+    // Inside: resampled. Outside: untouched.
+    PE_CHECK(pixelOf(*doc, id, 300, 300) != insideBefore);
+    PE_CHECK(pixelOf(*doc, id, 60, 60) == outsideBefore);
+
+    (void)cmd->undo(*doc);
+    PE_CHECK(pixelOf(*doc, id, 300, 300) == insideBefore);
+    PE_CHECK(pixelOf(*doc, id, 60, 60) == outsideBefore);
+}
+
+PE_TEST(filter_no_region_of_interest_still_transforms_the_whole_layer) {
+    // The command committed on release must not be narrowed, or the parts of the layer that
+    // were off screen during the drag would keep their original pixels forever.
+    constexpr int kDim = 600;
+    auto doc = stripedDoc(kDim);
+    PE_REQUIRE(doc != nullptr);
+    const pe::LayerId id = doc->activeLayer();
+    const pe::Rgba8 farBefore = pixelOf(*doc, id, 60, 60);
+
+    pe::Affine2D m;
+    m.m00 = 1.10;
+    m.m11 = 1.10;
+    auto cmd = pe::transformLayerContent(*doc, id, m);
+    PE_REQUIRE(cmd != nullptr);
+    (void)cmd->execute(*doc);
+    PE_CHECK(pixelOf(*doc, id, 60, 60) != farBefore);  // the far corner moved too
+    PE_CHECK(pixelOf(*doc, id, 300, 300) != pe::Rgba8{});
+}
+
+PE_TEST(filter_a_region_of_interest_that_misses_the_transform_yields_nothing) {
+    // A drag whose whole effect is off screen has nothing to preview. Returning a command
+    // that changes no pixel would put an empty entry in front of the caller instead.
+    constexpr int kDim = 400;
+    auto doc = stripedDoc(kDim);
+    PE_REQUIRE(doc != nullptr);
+    pe::Affine2D m;
+    m.m00 = 1.10;
+    m.m11 = 1.10;
+    PE_CHECK(pe::transformLayerContent(*doc, doc->activeLayer(), m,
+                                       pe::Rect{100000, 100000, 50, 50}) == nullptr);
+    // An empty region means "no narrowing", not "narrow to nothing".
+    PE_CHECK(pe::transformLayerContent(*doc, doc->activeLayer(), m, pe::Rect{}) != nullptr);
+}
+
+PE_TEST(filter_a_region_of_interest_does_not_narrow_the_integer_translation_path) {
+    // A whole-pixel translation takes the lossless Move path, which copies rather than
+    // resamples and is already cheap. Narrowing it would trade its bit-exactness for
+    // nothing, so the whole layer still moves.
+    constexpr int kDim = 400;
+    auto doc = stripedDoc(kDim);
+    PE_REQUIRE(doc != nullptr);
+    const pe::LayerId id = doc->activeLayer();
+    const pe::Rgba8 farBefore = pixelOf(*doc, id, 350, 30);
+
+    pe::Affine2D m;
+    m.m02 = 20.0;  // a pure integer translation
+    auto cmd = pe::transformLayerContent(*doc, id, m, pe::Rect{0, 0, 50, 50});
+    PE_REQUIRE(cmd != nullptr);
+    (void)cmd->execute(*doc);
+    // Far outside the region of interest, and moved anyway.
+    PE_CHECK(pixelOf(*doc, id, 370, 30) == farBefore);
+}

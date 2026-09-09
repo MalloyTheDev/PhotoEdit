@@ -153,6 +153,11 @@ public:
     // the zoom and the centring is how a test ends up passing for the wrong reason.
     [[nodiscard]] QPointF docToWidget(pe::PointD docPos) const;
 
+    // The document-space rect currently on screen, padded. Public because it is what bounds
+    // an interactive preview to work the user can actually see, and a test needs to be able
+    // to say what that region is.
+    [[nodiscard]] pe::Rect visibleDocRect() const;
+
     // DocumentObserver: re-flatten and repaint after any committed change.
     void onDocumentChanged(const pe::Document&, const pe::DocumentChange&) override;
 

@@ -124,8 +124,19 @@ inline constexpr std::int64_t kMaxMoveBytes = 1LL << 30;
 // resampled (premultiplied bilinear, transparent outside the source). Returns nullptr for a
 // non-pixel/empty layer, a singular/non-finite transform, or a destination beyond the engine's
 // per-op size caps.
+// `regionOfInterest`, when non-empty, narrows the pixels the command rewrites; everything
+// outside it keeps its ORIGINAL content, so the result is not the full transform. It exists
+// for the interactive preview, which repeats this on every motion event and only has to be
+// right where the user can see it: the cost then follows the viewport instead of the layer,
+// which on a 16 MP document is the difference between a second per mouse-move and a twelfth
+// of one. The command committed on release must be built WITHOUT it.
+//
+// The size budget below is deliberately still charged on the whole source and destination,
+// not on the narrowed region. A transform too large to commit must not preview either, or
+// the user would drag something that cannot be applied.
 [[nodiscard]] std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layerId,
-                                                                  const Affine2D& srcToDst);
+                                                                  const Affine2D& srcToDst,
+                                                                  Rect regionOfInterest = Rect{});
 
 // Paint Bucket: flood-fill the contiguous (4-connected) region of layer `layerId` reachable
 // from the seed whose color is within `tolerance` (max per-channel, 0..255) of the seed's,
