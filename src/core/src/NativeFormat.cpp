@@ -30,18 +30,41 @@ namespace pe {
 namespace {
 
 // Magic is "PEDOC" + a version digit. v5 adds adjustment & solid-color layer records; v6 adds text
-// layers; v7 allows content rects to lie outside the canvas. The reader checks only the "PEDOC"
-// prefix + the u32 version, so it still accepts v4/v5 files (they only ever contained the earlier
-// kinds, which read identically).
+// layers; v7 allows content rects to lie outside the canvas; v8 carries fill opacity, the clipping
+// flag and the per-layer locks. The reader checks only the "PEDOC" prefix + the u32 version, so it
+// still accepts v4/v5 files (they only ever contained the earlier kinds, which read identically).
 //
-// v7 is written ONLY when a document actually has off-canvas content, so an ordinary file stays
-// readable by builds that predate it. A v7 file is correctly refused by those builds rather than
-// silently losing the content they cannot represent.
+// A newer version is written ONLY when the document actually needs it, so an ordinary file stays
+// readable by builds that predate it, and a file that does need it is correctly REFUSED by those
+// builds rather than silently losing what they cannot represent. That rule is why the version is a
+// property of the content rather than of the writer, and it is why fill opacity and clipping had to
+// arrive this way: they change the composited picture, so dropping them would change the image
+// without saying so.
 constexpr char kMagicPrefix[5] = {'P', 'E', 'D', 'O', 'C'};
-constexpr std::uint32_t kVersion = 7;              // newest this writer can emit
-constexpr std::uint32_t kVersionOnCanvas = 6;      // emitted when nothing is off-canvas
-constexpr std::uint32_t kMinReadVersion = 4;       // oldest format this reader accepts
-constexpr std::uint32_t kMinOffCanvasVersion = 7;  // first version allowed a negative origin
+constexpr std::uint32_t kVersion = 8;                  // newest this writer can emit
+constexpr std::uint32_t kVersionOnCanvas = 6;          // nothing off-canvas, no extended props
+constexpr std::uint32_t kVersionOffCanvas = 7;         // off-canvas content, no extended props
+constexpr std::uint32_t kMinReadVersion = 4;           // oldest format this reader accepts
+constexpr std::uint32_t kMinOffCanvasVersion = 7;      // first version allowed a negative origin
+constexpr std::uint32_t kMinExtendedPropsVersion = 8;  // first version carrying fill/clip/locks
+
+// Bit positions for LayerLocks in the single byte v8 writes. Appended-to only: a reader must
+// ignore bits it does not know rather than reject them.
+constexpr std::uint8_t kLockTransparency = 1u << 0;
+constexpr std::uint8_t kLockPixels = 1u << 1;
+constexpr std::uint8_t kLockPosition = 1u << 2;
+constexpr std::uint8_t kLockAll = 1u << 3;
+
+[[nodiscard]] std::uint8_t packLocks(LayerLocks l) noexcept {
+    return static_cast<std::uint8_t>((l.transparency ? kLockTransparency : 0) |
+                                     (l.pixels ? kLockPixels : 0) |
+                                     (l.position ? kLockPosition : 0) | (l.all ? kLockAll : 0));
+}
+
+[[nodiscard]] LayerLocks unpackLocks(std::uint8_t bits) noexcept {
+    return LayerLocks{(bits & kLockTransparency) != 0, (bits & kLockPixels) != 0,
+                      (bits & kLockPosition) != 0, (bits & kLockAll) != 0};
+}
 // Text-raster caps live in TextLayer.hpp (pe::kMaxTextRasterDim / pe::kMaxTextRasterPixels) so the
 // app producer, the engine type, and this reader share one source of truth.
 constexpr std::uint32_t kMaxLayers = 100'000;
@@ -899,7 +922,7 @@ bool readContentRect(Reader& r, int canvasW, int canvasH, bool allowOffCanvas, s
 }
 
 void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active, BitDepth depth,
-                const PreparedTree& prepared) {
+                const PreparedTree& prepared, bool extendedProps) {
     const PreparedLayer& pre = preparedFor(prepared, layer);
     const bool isGroup = layer.kind() == LayerKind::Group;
     const bool isAdjustment = layer.isAdjustment();
@@ -918,6 +941,14 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
     const std::string& name = layer.name();
     w.u32(static_cast<std::uint32_t>(name.size()));
     w.bytes(name.data(), name.size());
+
+    // v8 and later. Written for every layer once the document needs the version at all, so
+    // the record layout depends on the file's version and never on the individual layer.
+    if (extendedProps) {
+        w.f32(layer.fillOpacity());
+        w.u8(layer.clipped() ? 1 : 0);
+        w.u8(packLocks(layer.locks()));
+    }
 
     // Optional layer mask (common to pixel and group layers).
     const Mask* mask = layer.mask();
@@ -972,7 +1003,7 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
         }
         w.u32(static_cast<std::uint32_t>(kids.size()));
         for (const Layer* child : kids) {
-            writeLayer(w, *child, canvasBounds, active, depth, prepared);
+            writeLayer(w, *child, canvasBounds, active, depth, prepared, extendedProps);
         }
         return;
     }
@@ -1061,8 +1092,9 @@ void writeLayer(Writer& w, const Layer& layer, Rect canvasBounds, LayerId active
 // Reads one layer (recursively for groups). Returns nullptr on any inconsistency.
 // Sets activeId/haveActive if a record carries the active flag.
 std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allowOffCanvas,
-                                 BitDepth depth, LayerId& activeId, bool& haveActive,
-                                 int depthGuard, std::int64_t& budget, std::int64_t& nodeCount) {
+                                 bool extendedProps, BitDepth depth, LayerId& activeId,
+                                 bool& haveActive, int depthGuard, std::int64_t& budget,
+                                 std::int64_t& nodeCount) {
     if (depthGuard > kMaxGroupDepth) return nullptr;
     // Global node cap across the WHOLE tree: the childCount/topCount checks are per-level only, so
     // without this a crafted file could declare ~kMaxLayers groups each with ~kMaxLayers (zero-
@@ -1081,6 +1113,23 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allow
     }
     std::string name(nameLen, '\0');
     if (nameLen > 0 && !r.read(name.data(), nameLen)) return nullptr;
+
+    // v8 and later. A pre-v8 file carries none of these and gets the model's own defaults,
+    // which are exactly the values that made those files render the way they did.
+    float fillOpacity = 1.0f;
+    bool clipped = false;
+    LayerLocks locks{};
+    if (extendedProps) {
+        fillOpacity = r.f32();
+        const std::uint8_t clipRaw = r.u8();
+        const std::uint8_t lockBits = r.u8();
+        // Unknown lock bits are IGNORED rather than refused, so a later version may add one
+        // without making its files unreadable here. A clip flag is a boolean though, and any
+        // other value means the stream is not what it claims to be.
+        if (!r.ok() || clipRaw > 1) return nullptr;
+        clipped = clipRaw != 0;
+        locks = unpackLocks(lockBits);
+    }
 
     // Optional layer mask (common to pixel and group layers).
     std::unique_ptr<Mask> mask;
@@ -1126,8 +1175,8 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allow
         if (!r.ok() || childCount > kMaxLayers) return nullptr;
         group->setIsolated(isolated != 0);
         for (std::uint32_t i = 0; i < childCount; ++i) {
-            auto child = readLayer(r, canvasW, canvasH, allowOffCanvas, depth, activeId, haveActive,
-                                   depthGuard + 1, budget, nodeCount);
+            auto child = readLayer(r, canvasW, canvasH, allowOffCanvas, extendedProps, depth,
+                                   activeId, haveActive, depthGuard + 1, budget, nodeCount);
             if (child == nullptr) return nullptr;
             group->addChild(std::move(child));
         }
@@ -1242,6 +1291,10 @@ std::unique_ptr<Layer> readLayer(Reader& r, int canvasW, int canvasH, bool allow
     layer->setVisible(visible);
     layer->setOpacity(opacity);
     layer->setBlendMode(static_cast<BlendMode>(blendRaw));
+    // Defaults for a pre-v8 file, which are the values it rendered with.
+    layer->setFillOpacity(fillOpacity);
+    layer->setClipped(clipped);
+    layer->setLocks(locks);
     if (activeFlag != 0) {
         activeId = layer->id();
         haveActive = true;
@@ -1278,6 +1331,27 @@ bool hasOffCanvasContent(const Layer& layer, Rect canvasBounds, const PreparedTr
     return false;
 }
 
+// Does this layer use a property only v8 can carry? Checked against the model's defaults,
+// so a document that never touches any of them keeps the older, wider-compatibility version.
+bool hasExtendedLayerProps(const Layer& layer) {
+    if (layer.fillOpacity() != 1.0f || layer.clipped() || !(layer.locks() == LayerLocks{})) {
+        return true;
+    }
+    if (const auto* group = dynamic_cast<const GroupLayer*>(&layer)) {
+        for (const auto& child : group->children()) {
+            if (child != nullptr && hasExtendedLayerProps(*child)) return true;
+        }
+    }
+    return false;
+}
+
+bool hasExtendedLayerProps(const Document& doc) {
+    for (const auto& layer : doc.topLevelLayers()) {
+        if (layer != nullptr && hasExtendedLayerProps(*layer)) return true;
+    }
+    return false;
+}
+
 bool hasOffCanvasContent(const Document& doc, const PreparedTree& prepared) {
     const Rect canvasBounds = doc.canvasBounds();
     for (const auto& layer : doc.topLevelLayers()) {
@@ -1309,7 +1383,10 @@ std::vector<std::byte> serializeDocument(const Document& doc) {
     // still in memory.
     if (!treeIsWritable(prepared)) return {};
     const bool offCanvas = hasOffCanvasContent(doc, prepared);
-    const std::uint32_t version = offCanvas ? kVersion : kVersionOnCanvas;
+    const bool extendedProps = hasExtendedLayerProps(doc);
+    const std::uint32_t version = extendedProps ? kVersion
+                                  : offCanvas   ? kVersionOffCanvas
+                                                : kVersionOnCanvas;
     w.bytes(kMagicPrefix, sizeof(kMagicPrefix));
     w.u8(static_cast<std::uint8_t>('0' + version));
     w.u32(version);
@@ -1329,7 +1406,7 @@ std::vector<std::byte> serializeDocument(const Document& doc) {
     const Rect canvasBounds = doc.canvasBounds();
     const BitDepth depth = doc.bitDepth();
     for (const Layer* layer : tops) {
-        writeLayer(w, *layer, canvasBounds, doc.activeLayer(), depth, prepared);
+        writeLayer(w, *layer, canvasBounds, doc.activeLayer(), depth, prepared, extendedProps);
     }
     return w.take();
 }
@@ -1348,6 +1425,7 @@ std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data,
     const std::uint32_t ver = r.u32();
     if (!r.ok() || ver < kMinReadVersion || ver > kVersion) return nullptr;
     const bool allowOffCanvas = ver >= kMinOffCanvasVersion;
+    const bool extendedProps = ver >= kMinExtendedPropsVersion;
 
     const std::int32_t canvasW = r.i32();
     const std::int32_t canvasH = r.i32();
@@ -1379,8 +1457,8 @@ std::unique_ptr<Document> deserializeDocument(std::span<const std::byte> data,
     std::int64_t budget = maxTotalContentBytes < 0 ? 0 : maxTotalContentBytes;
     std::int64_t nodeCount = 0;  // total layers across the whole tree (global cap, not per-level)
     for (std::uint32_t i = 0; i < topCount; ++i) {
-        auto layer = readLayer(r, canvasW, canvasH, allowOffCanvas, depth, activeId, haveActive, 0,
-                               budget, nodeCount);
+        auto layer = readLayer(r, canvasW, canvasH, allowOffCanvas, extendedProps, depth, activeId,
+                               haveActive, 0, budget, nodeCount);
         if (layer == nullptr) return nullptr;
         doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(layer));
     }

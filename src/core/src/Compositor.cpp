@@ -46,6 +46,12 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
         // Adjustment layers transform the accumulated backdrop instead of
         // contributing pixels (the "twist" in the compositor loop). They cover the
         // whole backdrop, so they are never culled; the mask scopes where they apply.
+        //
+        // An adjustment never becomes a clipping BASE either, whether or not it is itself
+        // clipped: it adds no coverage of its own, so it has no alpha for a layer above to
+        // be confined to, and treating it as a base would zero the run above it. It is
+        // therefore transparent to the base chain, and a clipped run spanning one stays
+        // bound to the pixel layer beneath.
         if (layer->isAdjustment()) {
             if (hidden) continue;
             if (adjusted.size() < static_cast<std::size_t>(kTilePixels)) {
@@ -69,8 +75,23 @@ void compositeStack(std::span<const std::unique_ptr<Layer>> stack, TileCoord coo
                 hasMask ? mask->buffer().findTile(coord) : nullptr;
             const BlendMode mode = layer->blendMode();
             const float op = layer->opacity() * layer->fillOpacity();
+            // A clipped adjustment is confined to the base layer's coverage, exactly as a
+            // clipped pixel layer is. This branch used to run before the clipping logic and
+            // `continue` past it, so "clip to the layer below" silently did nothing on an
+            // adjustment and it recoloured the whole backdrop: the single most common
+            // clipping workflow in a layered editor, and the one that looks most broken.
+            // With no base beneath it there is nothing to confine it to, which is how the
+            // pixel path treats the same case. That sub-case cannot be told apart by any
+            // rendered pixel, here or in the pixel path: a stack always starts transparent,
+            // so an adjustment reached before any base has nothing under it to change. The
+            // condition is written out anyway so the two paths state the same rule.
+            //
+            // baseClipAlpha is only read when the layer is clipped, and a clipped layer
+            // anywhere in the stack is exactly what sizes it, so the read below is in range.
+            const bool clipHere = layer->clipped() && baseValid;
             for (std::size_t i = 0; i < static_cast<std::size_t>(kTilePixels); ++i) {
                 float t = op;
+                if (clipHere) t *= baseClipAlpha[i];
                 if (hasMask) {
                     t *= mask->evaluateValue(maskTile != nullptr ? (*maskTile)[i]
                                                                  : MaskBuffer::kOpaque);

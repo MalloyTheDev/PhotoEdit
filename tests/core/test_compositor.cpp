@@ -438,3 +438,140 @@ PE_TEST(golden_compositor_with_reference_buffer) {
         PE_CHECK(near8(img.at(x, y), ref.at(x, y)));
     }
 }
+
+// --- clipped adjustment layers (#141) -----------------------------------------------------
+
+PE_TEST(compositor_a_clipped_adjustment_is_confined_to_its_base) {
+    // The adjustment branch ran BEFORE the clipping logic and continued past it, so "clip to
+    // the layer below" did nothing at all on an adjustment layer: it recoloured the whole
+    // backdrop. That is the most common clipping workflow in a layered editor, and the one
+    // whose failure looks most like the feature being broken.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    // A dark backdrop across the whole canvas, then a base covering only the left half.
+    auto* back = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    back->tiles().fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{40, 40, 40, 255});
+
+    auto base = std::make_unique<pe::PixelLayer>("Base");
+    base->tiles().fillRect(pe::Rect{0, 0, 32, 64}, pe::Rgba8{40, 40, 40, 255});
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(base));
+
+    auto adj = std::make_unique<pe::AdjustmentLayer>(std::make_unique<pe::Invert>(), "Invert");
+    adj->setClipped(true);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(adj));
+
+    const pe::PixelBuffer img = doc->compositeImage();
+    PE_REQUIRE(!img.isEmpty());
+    // Left half: inside the base, so the invert applies.
+    PE_CHECK(img.at(10, 10).r > 200);
+    // Right half: outside the base, so it must be untouched.
+    PE_CHECK(img.at(50, 10).r < 60);
+}
+
+PE_TEST(compositor_an_unclipped_adjustment_still_covers_everything) {
+    // The inverse of the case above, so the fix cannot have been "confine every adjustment".
+    //
+    // The stack deliberately contains a clipped layer of its own, so the base coverage is
+    // both tracked and non-trivial when the adjustment is reached. Without one, the
+    // compositor skips that bookkeeping entirely and this case passes whatever the
+    // adjustment branch does with it.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    auto* back = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    back->tiles().fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{40, 40, 40, 255});
+
+    auto base = std::make_unique<pe::PixelLayer>("Base");
+    base->tiles().fillRect(pe::Rect{0, 0, 32, 64}, pe::Rgba8{40, 40, 40, 255});
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(base));
+
+    auto clippedTint = std::make_unique<pe::PixelLayer>("Tint");
+    clippedTint->tiles().fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{40, 40, 40, 255});
+    clippedTint->setClipped(true);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(clippedTint));
+
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::make_unique<pe::AdjustmentLayer>(
+                                                     std::make_unique<pe::Invert>(), "Invert"));
+
+    const pe::PixelBuffer img = doc->compositeImage();
+    PE_REQUIRE(!img.isEmpty());
+    PE_CHECK(img.at(10, 10).r > 200);  // inside the base coverage
+    PE_CHECK(img.at(50, 10).r > 200);  // outside it, and it did not ask to be confined
+}
+
+PE_TEST(compositor_an_adjustment_does_not_break_a_clipping_run_it_sits_in) {
+    // An adjustment adds no coverage of its own, so it is never a clipping base: a run of
+    // clipped layers stays bound to the pixel layer beneath it even with an adjustment in
+    // the middle. Treating the adjustment as a base would zero the rest of the run.
+    auto doc = pe::Document::createBlank(pe::Size{64, 64});
+    PE_REQUIRE(doc != nullptr);
+    auto* back = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    back->tiles().fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{0, 0, 0, 255});
+
+    auto base = std::make_unique<pe::PixelLayer>("Base");
+    base->tiles().fillRect(pe::Rect{0, 0, 32, 64}, pe::Rgba8{0, 0, 0, 255});
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(base));
+
+    auto adj = std::make_unique<pe::AdjustmentLayer>(std::make_unique<pe::Invert>(), "Invert");
+    adj->setClipped(true);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(adj));
+
+    auto tint = std::make_unique<pe::PixelLayer>("Tint");
+    tint->tiles().fillRect(pe::Rect{0, 0, 64, 64}, pe::Rgba8{0, 0, 255, 255});
+    tint->setClipped(true);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(tint));
+
+    const pe::PixelBuffer img = doc->compositeImage();
+    PE_REQUIRE(!img.isEmpty());
+    PE_CHECK(img.at(10, 10).b > 200);  // inside the base: the clipped tint lands
+    PE_CHECK(img.at(50, 10).b < 60);   // outside it: still bound to the base, not the adjustment
+}
+
+PE_TEST(compositor_fill_opacity_scales_a_layer_independently_of_opacity) {
+    // fillOpacity is persisted now, so what it does needs pinning: it multiplies with
+    // opacity rather than replacing it, which is what makes the two independent controls.
+    auto doc = pe::Document::createBlank(pe::Size{16, 16});
+    PE_REQUIRE(doc != nullptr);
+    auto* back = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    back->tiles().fillRect(pe::Rect{0, 0, 16, 16}, pe::Rgba8{0, 0, 0, 255});
+
+    auto over = std::make_unique<pe::PixelLayer>("Over");
+    over->tiles().fillRect(pe::Rect{0, 0, 16, 16}, pe::Rgba8{255, 255, 255, 255});
+    pe::Layer* overRaw = over.get();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(over));
+
+    const int full = doc->compositeImage().at(8, 8).r;
+    PE_CHECK(full > 245);
+
+    overRaw->setFillOpacity(0.5f);
+    const int half = doc->compositeImage().at(8, 8).r;
+    PE_CHECK(half > 100 && half < 155);
+
+    // Halved again by opacity, so the two multiply.
+    overRaw->setOpacity(0.5f);
+    const int quarter = doc->compositeImage().at(8, 8).r;
+    PE_CHECK(quarter > 40 && quarter < 90);
+    PE_CHECK(quarter < half);
+}
+
+PE_TEST(compositor_fill_opacity_scales_an_adjustment_too) {
+    // The adjustment branch has its own opacity arithmetic, so covering fill opacity on a
+    // pixel layer says nothing about it here. It is the strength of the adjustment: a
+    // half-strength Invert lands halfway between the original colour and its inverse.
+    auto doc = pe::Document::createBlank(pe::Size{16, 16});
+    PE_REQUIRE(doc != nullptr);
+    auto* back = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    back->tiles().fillRect(pe::Rect{0, 0, 16, 16}, pe::Rgba8{0, 0, 0, 255});
+
+    auto adj = std::make_unique<pe::AdjustmentLayer>(std::make_unique<pe::Invert>(), "Invert");
+    pe::Layer* adjRaw = adj.get();
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(adj));
+    PE_CHECK(doc->compositeImage().at(8, 8).r > 245);  // full strength: black becomes white
+
+    adjRaw->setFillOpacity(0.5f);
+    const int half = doc->compositeImage().at(8, 8).r;
+    PE_CHECK(half > 100 && half < 155);
+
+    adjRaw->setOpacity(0.5f);  // and the two multiply here as well
+    const int quarter = doc->compositeImage().at(8, 8).r;
+    PE_CHECK(quarter > 40 && quarter < 90);
+}

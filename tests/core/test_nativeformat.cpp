@@ -1415,3 +1415,151 @@ PE_TEST(native_format_refuses_to_write_a_rect_it_could_not_read_back) {
         PE_CHECK(serializeDocument(*doc).empty());
     }
 }
+
+// --- fill opacity, clipping and locks (#141) ----------------------------------------------
+
+PE_TEST(native_format_round_trips_fill_opacity_clipping_and_locks) {
+    // The writer emitted kind, visible, opacity, blend mode, the active flag and the name,
+    // and nothing else. fillOpacity and clipped both change the composited picture, so a
+    // document round-tripped through its own native format came back rendering differently
+    // from the one that was saved, and said nothing about it.
+    auto doc = Document::createBlank(Size{32, 32});
+    auto* base = asPixel(*doc, 0);
+    base->tiles().fillRect(Rect{0, 0, 32, 32}, Rgba8{10, 20, 30, 255});
+    base->setLocks(
+        LayerLocks{.transparency = true, .pixels = false, .position = true, .all = false});
+
+    auto over = std::make_unique<PixelLayer>("Over");
+    over->tiles().fillRect(Rect{0, 0, 32, 32}, Rgba8{200, 0, 0, 255});
+    over->setFillOpacity(0.25f);
+    over->setClipped(true);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(over));
+
+    // A group, so the extended fields are exercised through the nested record path too.
+    auto group = std::make_unique<GroupLayer>("G");
+    auto inner = std::make_unique<PixelLayer>("Inner");
+    inner->tiles().fillRect(Rect{4, 4, 8, 8}, Rgba8{0, 200, 0, 255});
+    inner->setFillOpacity(0.5f);
+    inner->setLocks(
+        LayerLocks{.transparency = false, .pixels = true, .position = false, .all = true});
+    group->addChild(std::move(inner));
+    group->setClipped(true);
+    doc->cmdInsertTopLevel(doc->topLevelCount(), std::move(group));
+
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_REQUIRE(blob.size() > 6);
+    // The version is a property of the CONTENT: this document needs v8, so it says so, and
+    // a build that predates v8 refuses it rather than dropping what it cannot represent.
+    PE_CHECK_EQ(static_cast<int>(blob[5]), static_cast<int>(std::byte{'8'}));
+
+    auto back = deserializeDocument(blob);
+    PE_REQUIRE(back != nullptr);
+    PE_REQUIRE(back->topLevelCount() == static_cast<std::size_t>(3));
+
+    const Layer* rbase = back->topLevelLayers()[0].get();
+    PE_CHECK_NEAR(rbase->fillOpacity(), 1.0f);
+    PE_CHECK(!rbase->clipped());
+    PE_CHECK(rbase->locks() ==
+             LayerLocks{.transparency = true, .pixels = false, .position = true, .all = false});
+
+    const Layer* rover = back->topLevelLayers()[1].get();
+    PE_CHECK_NEAR(rover->fillOpacity(), 0.25f);
+    PE_CHECK(rover->clipped());
+    PE_CHECK(rover->locks() == LayerLocks{});
+
+    const Layer* rgroup = back->topLevelLayers()[2].get();
+    PE_CHECK(rgroup->clipped());
+    const auto* g = dynamic_cast<const GroupLayer*>(rgroup);
+    PE_REQUIRE(g != nullptr && g->childCount() == static_cast<std::size_t>(1));
+    const Layer* rinner = g->children()[0].get();
+    PE_CHECK_NEAR(rinner->fillOpacity(), 0.5f);
+    PE_CHECK(rinner->locks() ==
+             LayerLocks{.transparency = false, .pixels = true, .position = false, .all = true});
+}
+
+PE_TEST(native_format_stays_on_the_old_version_when_no_layer_uses_the_new_properties) {
+    // Same rule the off-canvas bump follows: claiming the newer version on every save would
+    // stop older builds reading ordinary files, for a document that uses none of it.
+    auto doc = Document::createBlank(Size{32, 32});
+    asPixel(*doc, 0)->tiles().fillRect(Rect{0, 0, 32, 32}, Rgba8{1, 2, 3, 255});
+    PE_CHECK_EQ(static_cast<int>(serializeDocument(*doc)[5]), static_cast<int>(std::byte{'6'}));
+
+    // Setting a property back to its default keeps the file on the old version: the test is
+    // the VALUE, not whether a setter was called.
+    asPixel(*doc, 0)->setFillOpacity(1.0f);
+    asPixel(*doc, 0)->setClipped(false);
+    asPixel(*doc, 0)->setLocks(LayerLocks{});
+    PE_CHECK_EQ(static_cast<int>(serializeDocument(*doc)[5]), static_cast<int>(std::byte{'6'}));
+
+    // Each of the three on its own is enough to need v8.
+    asPixel(*doc, 0)->setFillOpacity(0.5f);
+    PE_CHECK_EQ(static_cast<int>(serializeDocument(*doc)[5]), static_cast<int>(std::byte{'8'}));
+    asPixel(*doc, 0)->setFillOpacity(1.0f);
+    asPixel(*doc, 0)->setClipped(true);
+    PE_CHECK_EQ(static_cast<int>(serializeDocument(*doc)[5]), static_cast<int>(std::byte{'8'}));
+    asPixel(*doc, 0)->setClipped(false);
+    asPixel(*doc, 0)->setLocks(LayerLocks{.transparency = true});
+    PE_CHECK_EQ(static_cast<int>(serializeDocument(*doc)[5]), static_cast<int>(std::byte{'8'}));
+
+    // And off-canvas content alone still produces v7, not v8: the two reasons are separate.
+    asPixel(*doc, 0)->setLocks(LayerLocks{});
+    asPixel(*doc, 0)->tiles().setPixel(-1, -1, Rgba8{4, 5, 6, 255});
+    PE_CHECK_EQ(static_cast<int>(serializeDocument(*doc)[5]), static_cast<int>(std::byte{'7'}));
+
+    // A property on a NESTED layer needs v8 just as much: the record layout is per file, so
+    // a scan that stopped at the top level would emit a v6 header and then v8 records.
+    auto nested = Document::createBlank(Size{32, 32});
+    auto group = std::make_unique<GroupLayer>("G");
+    auto inner = std::make_unique<PixelLayer>("Inner");
+    inner->tiles().fillRect(Rect{2, 2, 4, 4}, Rgba8{9, 9, 9, 255});
+    group->addChild(std::move(inner));
+    nested->cmdInsertTopLevel(nested->topLevelCount(), std::move(group));
+    PE_CHECK_EQ(static_cast<int>(serializeDocument(*nested)[5]), static_cast<int>(std::byte{'6'}));
+
+    auto* g = dynamic_cast<GroupLayer*>(
+        const_cast<Layer*>(nested->topLevelLayers()[1].get()));  // NOLINT: test convenience
+    PE_REQUIRE(g != nullptr && g->childCount() == static_cast<std::size_t>(1));
+    const_cast<Layer*>(g->children()[0].get())->setFillOpacity(0.5f);  // NOLINT
+    PE_CHECK_EQ(static_cast<int>(serializeDocument(*nested)[5]), static_cast<int>(std::byte{'8'}));
+    auto backNested = deserializeDocument(serializeDocument(*nested));
+    PE_REQUIRE(backNested != nullptr);
+    const auto* bg = dynamic_cast<const GroupLayer*>(backNested->topLevelLayers()[1].get());
+    PE_REQUIRE(bg != nullptr && bg->childCount() == static_cast<std::size_t>(1));
+    PE_CHECK_NEAR(bg->children()[0]->fillOpacity(), 0.5f);
+}
+
+PE_TEST(native_format_gives_a_pre_v8_file_the_model_defaults) {
+    // A v6 file carries none of the three, and must read back with exactly the values it
+    // rendered with rather than whatever happened to be in memory.
+    auto doc = Document::createBlank(Size{32, 32});
+    asPixel(*doc, 0)->tiles().fillRect(Rect{0, 0, 32, 32}, Rgba8{1, 2, 3, 255});
+    const std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_REQUIRE(blob.size() > 6);
+    PE_REQUIRE(static_cast<int>(blob[5]) == static_cast<int>(std::byte{'6'}));
+
+    auto back = deserializeDocument(blob);
+    PE_REQUIRE(back != nullptr && back->topLevelCount() == static_cast<std::size_t>(1));
+    const Layer* rl = back->topLevelLayers()[0].get();
+    PE_CHECK_NEAR(rl->fillOpacity(), 1.0f);
+    PE_CHECK(!rl->clipped());
+    PE_CHECK(rl->locks() == LayerLocks{});
+}
+
+PE_TEST(native_format_rejects_a_bad_clip_flag) {
+    // The clip flag is a boolean. Any other byte means the stream is not the record it
+    // claims to be, and reading on would misinterpret every field after it.
+    auto doc = Document::createBlank(Size{4, 4});
+    asPixel(*doc, 0)->setName("");  // no name bytes, so the offsets below are stable
+    asPixel(*doc, 0)->setClipped(true);
+    std::vector<std::byte> blob = serializeDocument(*doc);
+    PE_REQUIRE(!blob.empty());
+
+    // header: 6 magic + 4 version + 4 w + 4 h + 1 mode + 1 depth + 4 ppi + 4 topCount = 28
+    // record: 1 kind + 1 visible + 4 opacity + 1 blend + 1 active + 4 nameLen = 12, then
+    // 4 fillOpacity, then the clip byte.
+    constexpr std::size_t kClipByte = 28 + 12 + 4;
+    PE_REQUIRE(blob.size() > kClipByte);
+    PE_REQUIRE(static_cast<int>(blob[kClipByte]) == 1);  // the flag we set, where we expect it
+    blob[kClipByte] = std::byte{2};
+    PE_CHECK(deserializeDocument(blob) == nullptr);
+}

@@ -252,6 +252,14 @@ purpose:
   the edge keeps its full extent, which is what makes moving it back non-destructive. A
   file is written as v7 only when something in it is actually off-canvas, so an ordinary
   document stays v6 and older builds keep reading it.
+- **Fill opacity, the clipping flag and the per-layer locks arrive in v8.** The first two
+  change the composited picture, so a file that dropped them would come back rendering
+  differently from the one that was saved, and say nothing about it. The version follows the
+  same content rule: v8 is claimed only when some layer actually differs from the model's
+  defaults, so ordinary documents stay v6 (or v7) and remain readable by older builds, and a
+  document that does use them is refused by those builds rather than silently flattened. The
+  locks byte is a bitfield, and a reader ignores bits it does not know rather than rejecting
+  the file, so a later version can add one without breaking this one.
 - **Pre-v7 files keep the stricter rule.** Such a file could never legitimately contain a
   negative origin, so accepting one would widen what a legacy file may claim.
 - **Outside the canvas is not the same as invalid.** What makes a rect invalid is being
