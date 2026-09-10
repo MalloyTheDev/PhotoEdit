@@ -161,6 +161,20 @@ private:
     // Reopen the text dialog for a text layer (double-click in the Layers panel), seeded from its
     // model; commits one EditTextCommand on OK. A no-op for a non-text layer.
     void editTextLayer(pe::LayerId id);
+
+    // ---- Clipboard ----
+    //
+    // The engine has no clipboard: it has region copy, clear and paste primitives (Filter.hpp),
+    // and the system clipboard is Qt's. These five are the join. The image on the clipboard is
+    // a plain QImage, so it interoperates with other applications; within this process Qt hands
+    // back the same image, so alpha survives a copy and paste of its own pixels.
+    void copyToClipboard(bool merged);
+    void cutToClipboard();
+    void clearSelection();
+    void pasteFromClipboard(bool into);
+    // The pixels a copy would take, and where from: the selection's tight bounds, or the whole
+    // canvas. Empty when there is a selection that selects nothing, which the caller refuses.
+    [[nodiscard]] pe::Rect clipboardRegion() const;
     bool writeTo(const QString& path);
 
 public:

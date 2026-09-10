@@ -36,6 +36,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QCloseEvent>
 #include <QColor>
 #include <QColorDialog>
@@ -43,6 +44,7 @@
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
@@ -218,6 +220,28 @@ void MainWindow::buildMenuBar() {
     undoAct_->setShortcut(QKeySequence::Undo);
     redoAct_ = editMenu->addAction(QStringLiteral("&Redo"), this, &MainWindow::redo);
     redoAct_->setShortcut(QKeySequence::Redo);
+    editMenu->addSeparator();
+    // Cut/Copy/Paste did not exist at all, in the shell or the engine, so the two most
+    // conventional shortcuts in any editor did nothing. Ctrl+Shift+C is Copy Merged (the
+    // composite rather than one layer) and Ctrl+Shift+V is Paste Into, both as in Photoshop.
+    docActions_.push_back(editMenu->addAction(QStringLiteral("Cu&t"),
+                                              standardOr(QKeySequence::Cut, "Ctrl+X"), this,
+                                              [this] { cutToClipboard(); }));
+    docActions_.push_back(editMenu->addAction(QStringLiteral("&Copy"),
+                                              standardOr(QKeySequence::Copy, "Ctrl+C"), this,
+                                              [this] { copyToClipboard(false); }));
+    docActions_.push_back(editMenu->addAction(QStringLiteral("Copy &Merged"),
+                                              QKeySequence(QStringLiteral("Ctrl+Shift+C")), this,
+                                              [this] { copyToClipboard(true); }));
+    docActions_.push_back(editMenu->addAction(QStringLiteral("&Paste"),
+                                              standardOr(QKeySequence::Paste, "Ctrl+V"), this,
+                                              [this] { pasteFromClipboard(false); }));
+    docActions_.push_back(editMenu->addAction(QStringLiteral("Paste &Into"),
+                                              QKeySequence(QStringLiteral("Ctrl+Shift+V")), this,
+                                              [this] { pasteFromClipboard(true); }));
+    docActions_.push_back(editMenu->addAction(QStringLiteral("Cl&ear"),
+                                              standardOr(QKeySequence::Delete, "Del"), this,
+                                              [this] { clearSelection(); }));
     editMenu->addSeparator();
     QAction* freeTransformAct =
         editMenu->addAction(QStringLiteral("Free &Transform"), this, [this] {
@@ -1627,6 +1651,142 @@ void MainWindow::editTextLayer(pe::LayerId id) {
     }
     doc_->history().push(
         std::make_unique<pe::EditTextCommand>(id, model, std::move(raster), rasterOrigin));
+}
+
+namespace {
+
+// A QImage over a PixelBuffer, copied so it owns its bytes.
+[[nodiscard]] QImage toQImage(const pe::PixelBuffer& buf) {
+    if (buf.isEmpty()) return QImage();
+    const QImage view(reinterpret_cast<const uchar*>(buf.data()), buf.width(), buf.height(),
+                      buf.width() * 4, QImage::Format_RGBA8888);
+    return view.copy();
+}
+
+[[nodiscard]] pe::PixelBuffer toPixelBuffer(const QImage& img) {
+    if (img.isNull()) return pe::PixelBuffer{};
+    // Converted rather than assumed: an image off the system clipboard arrives in whatever
+    // format the other application used, and reinterpreting those bytes as RGBA8888 would
+    // paste swapped channels or read past the end of a shorter row.
+    const QImage rgba = img.convertToFormat(QImage::Format_RGBA8888);
+    if (rgba.isNull()) return pe::PixelBuffer{};
+    pe::PixelBuffer out(rgba.width(), rgba.height());
+    for (int y = 0; y < rgba.height(); ++y) {
+        const auto* row = reinterpret_cast<const pe::Rgba8*>(rgba.constScanLine(y));
+        for (int x = 0; x < rgba.width(); ++x) out.set(x, y, row[x]);
+    }
+    return out;
+}
+
+}  // namespace
+
+pe::Rect MainWindow::clipboardRegion() const {
+    if (doc_ == nullptr) return pe::Rect{};
+    return pe::copyRegionFor(*doc_, &doc_->selection());
+}
+
+void MainWindow::copyToClipboard(bool merged) {
+    const char* const action = merged ? "Edit > Copy Merged" : "Edit > Copy";
+    if (refuseIf(doc_ == nullptr, "edit.copy", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return;
+    }
+    const pe::Rect region = clipboardRegion();
+    if (refuseIf(region.isEmpty(), "edit.copy", pe::RefusalCode::NoEffect, action,
+                 QStringLiteral("That selection selects nothing, so there is nothing to "
+                                "copy."))) {
+        return;
+    }
+
+    pe::PixelBuffer pixels;
+    if (merged) {
+        pixels = canvas_->compositeRegion(region);
+        if (refuseIf(pixels.isEmpty(), "edit.copy", pe::RefusalCode::OverSizeBudget, action,
+                     QStringLiteral("Copying the merged image means flattening it, and this one "
+                                    "is over the %1 megapixel limit.")
+                         .arg(pe::kMaxCompositeImagePixels / 1'000'000))) {
+            return;
+        }
+        // The composite arrives as a rectangle; the selection shapes it, exactly as it shapes a
+        // single-layer copy.
+        pe::applySelectionAlpha(pixels, pe::Point{region.x, region.y}, &doc_->selection());
+    } else {
+        pixels = pe::copyLayerRegion(*doc_, doc_->activeLayer(), region, &doc_->selection());
+        if (refuseIf(pixels.isEmpty(), "edit.copy", pe::RefusalCode::LayerNotPixel, action,
+                     QStringLiteral("Select a pixel layer to copy from, or use Copy Merged to "
+                                    "take the flattened image."))) {
+            return;
+        }
+    }
+
+    QGuiApplication::clipboard()->setImage(toQImage(pixels));
+    statusBar()->showMessage(
+        QStringLiteral("Copied %1 x %2 pixels.").arg(pixels.width()).arg(pixels.height()), 3000);
+}
+
+void MainWindow::cutToClipboard() {
+    if (doc_ == nullptr) return;
+    // Copy first: if it refuses, nothing has been removed, and the refusal it already reported
+    // is the right one. A cut that clears without having copied is unrecoverable in one step.
+    const std::size_t refusalsBefore = refusals().size();
+    copyToClipboard(false);
+    if (refusals().size() != refusalsBefore) return;
+    clearSelection();
+}
+
+void MainWindow::clearSelection() {
+    const char* const action = "Edit > Clear";
+    if (refuseIf(doc_ == nullptr, "edit.clear", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return;
+    }
+    const pe::Rect region = clipboardRegion();
+    if (refuseIf(region.isEmpty(), "edit.clear", pe::RefusalCode::NoEffect, action,
+                 QStringLiteral("That selection selects nothing, so there is nothing to "
+                                "clear."))) {
+        return;
+    }
+    auto cmd = pe::clearRegion(*doc_, doc_->activeLayer(), region, &doc_->selection());
+    if (refuseIf(cmd == nullptr, "edit.clear", pe::RefusalCode::LayerNotPixel, action,
+                 QStringLiteral("Select a pixel layer to clear."))) {
+        return;
+    }
+    doc_->history().push(std::move(cmd));
+}
+
+void MainWindow::pasteFromClipboard(bool into) {
+    const char* const action = into ? "Edit > Paste Into" : "Edit > Paste";
+    if (refuseIf(doc_ == nullptr, "edit.paste", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return;
+    }
+    const pe::PixelBuffer pixels = toPixelBuffer(QGuiApplication::clipboard()->image());
+    if (refuseIf(pixels.isEmpty(), "edit.paste", pe::RefusalCode::NoEffect, action,
+                 QStringLiteral("The clipboard has no image in it."))) {
+        return;
+    }
+    const bool haveSelection = doc_->selection().active();
+    if (refuseIf(into && !haveSelection, "edit.paste", pe::RefusalCode::NoSelection, action,
+                 QStringLiteral("Paste Into puts the pasted pixels inside a selection. Select "
+                                "something first, or use Paste."))) {
+        return;
+    }
+
+    // Centred on the selection when pasting into one, so the pixels line up with the mask made
+    // from it; otherwise centred on the canvas, which is where the eye is.
+    const pe::Rect over = into ? doc_->selection().tightBounds() : doc_->canvasBounds();
+    const pe::Point origin{over.x + (over.width - pixels.width()) / 2,
+                           over.y + (over.height - pixels.height()) / 2};
+    auto layer = pe::layerFromBuffer(pixels, origin, into ? "Pasted Into" : "Pasted",
+                                     into ? &doc_->selection() : nullptr);
+    if (refuseIf(layer == nullptr, "edit.paste", pe::RefusalCode::OverSizeBudget, action,
+                 QStringLiteral("That image is too large to paste into this document."))) {
+        return;
+    }
+    const pe::LayerId id = layer->id();
+    doc_->history().push(
+        std::make_unique<pe::AddLayerCommand>(std::move(layer), doc_->topLevelCount()));
+    doc_->setActiveLayer(id);
 }
 
 void MainWindow::addAdjustmentLayer(std::unique_ptr<pe::Adjustment> adj, const QString& name) {

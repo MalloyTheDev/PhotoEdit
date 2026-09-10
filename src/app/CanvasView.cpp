@@ -185,6 +185,18 @@ pe::PixelBuffer CanvasView::canvasPreview(int maxPixels) {
                                          std::max(1, maxPixels));
 }
 
+pe::PixelBuffer CanvasView::compositeRegion(pe::Rect region) {
+    if (frozen_ || doc_ == nullptr || renderer_ == nullptr) return pe::PixelBuffer{};
+    const pe::Rect want = region.intersected(doc_->canvasBounds());
+    if (want.isEmpty()) return pe::PixelBuffer{};
+    pe::PixelBuffer out;
+    const TaskResult task =
+        runCanvasTask(QStringLiteral("Copy Merged"), TaskAccess::LiveDocument,
+                      [this, want, &out] { out = renderer_->renderRegion(want); });
+    if (!task.ran || task.threw) return pe::PixelBuffer{};
+    return out;
+}
+
 void CanvasView::loadSelectionFromChannel(std::optional<pe::Channel> channel) {
     const char* const action = "Channels: Load as Selection";
     if (doc_ == nullptr || renderer_ == nullptr) {

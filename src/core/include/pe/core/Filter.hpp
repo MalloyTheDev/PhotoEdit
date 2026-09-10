@@ -5,6 +5,7 @@
 #include "pe/core/Geometry.hpp"
 #include "pe/core/Gradient.hpp"
 #include "pe/core/Layer.hpp"
+#include "pe/core/PixelLayer.hpp"
 #include "pe/core/Refusal.hpp"
 
 #include <cstdint>
@@ -156,6 +157,43 @@ inline constexpr std::int64_t kMaxMoveBytes = 1LL << 30;
                                                         Point origin, const PixelBuffer& src,
                                                         std::string name,
                                                         const Selection* selection = nullptr);
+
+// ---- Region copy / clear (the engine half of cut, copy and paste) ----
+
+// The region a copy should take: the selection's tight pixel bounds clipped to the canvas, or
+// the whole canvas when there is no selection. Empty when the selection is active but selects
+// nothing, which is the case a caller has to refuse rather than copy.
+[[nodiscard]] Rect copyRegionFor(const Document& doc, const Selection* selection);
+
+// Read a rectangular region of a pixel layer's content, with the selection folded into alpha:
+// a pixel the selection only half covers comes out half transparent, so a feathered selection
+// copies with a soft edge instead of a stair-stepped one. Pixels outside the layer's content
+// read as transparent.
+//
+// Not a command: nothing is modified. Empty for a non-pixel layer, an empty region, or a
+// region beyond the engine's per-op size caps.
+[[nodiscard]] PixelBuffer copyLayerRegion(const Document& doc, LayerId layerId, Rect region,
+                                          const Selection* selection = nullptr);
+
+// Fold a selection's coverage into an already-extracted raster's alpha, where `origin` is the
+// document position of the raster's top-left. Exposed separately because Copy Merged reads its
+// pixels from the renderer's composite rather than from a layer, and both must apply the
+// selection the same way.
+void applySelectionAlpha(PixelBuffer& img, Point origin, const Selection* selection);
+
+// Clear a region of a pixel layer to transparent as a reversible tile-delta command: the second
+// half of Cut, and Edit > Clear on its own. Honors the selection, so a feathered edge clears
+// proportionally. nullptr for a non-pixel layer, an empty region, or one over the size caps.
+[[nodiscard]] std::unique_ptr<PaintCommand> clearRegion(Document& doc, LayerId layerId, Rect region,
+                                                        const Selection* selection = nullptr);
+
+// A new pixel layer holding `src`, its top-left at `origin`. The caller wraps it in an
+// AddLayerCommand, so a paste is one undo step rather than an add followed by a stamp.
+// `selectionMask`, when given, becomes the layer's mask, which is what Paste Into is: the
+// pasted pixels are all there, and the selection decides how much of them shows.
+[[nodiscard]] std::unique_ptr<PixelLayer> layerFromBuffer(const PixelBuffer& src, Point origin,
+                                                          std::string name,
+                                                          const Selection* selectionMask = nullptr);
 
 // Gradient: composite a linear gradient over layer `layerId`, from c0 (at `start`) to c1 (at
 // `end`), each pixel's stop color interpolated by its projection onto the start->end axis (clamped

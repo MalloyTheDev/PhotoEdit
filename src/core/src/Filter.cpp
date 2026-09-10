@@ -1,4 +1,5 @@
 #include "pe/core/Filter.hpp"
+#include "pe/core/Mask.hpp"
 
 #include "pe/core/BlendMode.hpp"    // compositeOver (bucket fill)
 #include "pe/core/Document.hpp"     // kMaxCanvasDimension
@@ -1031,6 +1032,105 @@ std::unique_ptr<PaintCommand> bucketFill(Document& doc, LayerId layerId, int see
             }
         },
         selection);
+}
+
+// ---- Region copy / clear ----
+
+Rect copyRegionFor(const Document& doc, const Selection* selection) {
+    const Rect canvas = doc.canvasBounds();
+    if (selection == nullptr || !selection->active()) return canvas;
+    // tightBounds, not selectedBounds: the latter snaps out to whole tiles, so copying a small
+    // selection would drag along up to 255 pixels of its neighbours on every side.
+    return selection->tightBounds().intersected(canvas);
+}
+
+void applySelectionAlpha(PixelBuffer& img, Point origin, const Selection* selection) {
+    if (img.isEmpty() || selection == nullptr || !selection->active()) return;
+    Rgba8* p = img.data();
+    for (int y = 0; y < img.height(); ++y) {
+        for (int x = 0; x < img.width(); ++x) {
+            const float cov = selection->coverage(origin.x + x, origin.y + y);
+            Rgba8& px = p[static_cast<std::size_t>(y) * static_cast<std::size_t>(img.width()) +
+                          static_cast<std::size_t>(x)];
+            const float a = static_cast<float>(px.a) * cov;
+            px.a = static_cast<std::uint8_t>(std::clamp(std::lround(a), 0L, 255L));
+        }
+    }
+}
+
+PixelBuffer copyLayerRegion(const Document& doc, LayerId layerId, Rect region,
+                            const Selection* selection) {
+    const Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return PixelBuffer{};
+    if (region.isEmpty()) return PixelBuffer{};
+    // Caps before the allocation, as everywhere else in this file: a region is caller-supplied
+    // and a bad one must be refused rather than sized into a multi-hundred-MB buffer first.
+    if (region.width > kMaxCanvasDimension || region.height > kMaxCanvasDimension) {
+        return PixelBuffer{};
+    }
+    if (static_cast<int64_t>(region.width) * static_cast<int64_t>(region.height) >
+        kMaxFilterPixels) {
+        return PixelBuffer{};
+    }
+    const auto* pl = static_cast<const PixelLayer*>(layer);
+    PixelBuffer out(region.width, region.height);
+    for (int y = 0; y < region.height; ++y) {
+        for (int x = 0; x < region.width; ++x) {
+            out.set(x, y, pl->tiles().pixel(region.x + x, region.y + y));
+        }
+    }
+    applySelectionAlpha(out, Point{region.x, region.y}, selection);
+    return out;
+}
+
+std::unique_ptr<PaintCommand> clearRegion(Document& doc, LayerId layerId, Rect region,
+                                          const Selection* selection) {
+    if (region.isEmpty()) return nullptr;
+    return bakePixelEditRegion(
+        doc, layerId, "Clear", region,
+        [](std::span<Rgbaf> img, int, int) {
+            // Every channel, not only alpha. A pixel left with its colour and zero alpha is
+            // invisible but not empty, and a later operation that raises alpha again (or an
+            // export that ignores it) would bring the old colour back.
+            for (Rgbaf& px : img) px = Rgbaf{0.0f, 0.0f, 0.0f, 0.0f};
+        },
+        selection);
+}
+
+std::unique_ptr<PixelLayer> layerFromBuffer(const PixelBuffer& src, Point origin, std::string name,
+                                            const Selection* selectionMask) {
+    if (src.isEmpty()) return nullptr;
+    if (src.width() > kMaxCanvasDimension || src.height() > kMaxCanvasDimension) return nullptr;
+    if (static_cast<int64_t>(src.width()) * static_cast<int64_t>(src.height()) > kMaxFilterPixels) {
+        return nullptr;
+    }
+    auto layer = std::make_unique<PixelLayer>(std::move(name));
+    for (int y = 0; y < src.height(); ++y) {
+        for (int x = 0; x < src.width(); ++x) {
+            const Rgba8 px = src.at(x, y);
+            // Skip fully transparent pixels rather than writing them: the tile store is sparse,
+            // and materializing a tile per empty region would make a paste of a small shape cost
+            // as much as a paste of its whole bounding box.
+            if (px.a != 0) layer->tiles().setPixel(origin.x + x, origin.y + y, px);
+        }
+    }
+    if (selectionMask != nullptr && selectionMask->active()) {
+        auto mask = std::make_unique<Mask>(Mask::Kind::Layer);
+        const Rect bounds{origin.x, origin.y, src.width(), src.height()};
+        for (int y = 0; y < bounds.height; ++y) {
+            for (int x = 0; x < bounds.width; ++x) {
+                const std::uint8_t v = selectionMask->value(bounds.x + x, bounds.y + y);
+                // An ABSENT mask pixel reads as kOpaque, so it is the revealing value that is
+                // free and the hiding one that has to be written. Skipping the zeros instead
+                // would produce a mask that reveals everything, which is no mask at all.
+                if (v != MaskBuffer::kOpaque) {
+                    mask->buffer().setValue(bounds.x + x, bounds.y + y, v);
+                }
+            }
+        }
+        layer->setMask(std::move(mask));
+    }
+    return layer;
 }
 
 std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId, Point start, Point end,

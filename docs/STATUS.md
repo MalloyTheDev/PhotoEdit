@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **703 engine cases + 192 shell cases, 0 failed**. The engine tests
+Test suite: **718 engine cases + 207 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -54,6 +54,18 @@ The engine is no longer headless-only; the Qt6 app provides a real
   read cap on untrusted files.
 - **`MainWindow`** — File ▸ New (blank 800×600), Open…, Save, Save As… wired to
   `DocumentIO`; window title and canvas track the active document.
+- **Clipboard** — Cut, Copy, Copy Merged, Paste, Paste Into and Clear, on the conventional
+  shortcuts. None of it existed before: the Edit menu was Undo, Redo and Free Transform, so
+  Ctrl+C and Ctrl+V did nothing at all. The engine half is region primitives in `Filter.hpp`
+  (`copyRegionFor`, `copyLayerRegion`, `applySelectionAlpha`, `clearRegion`,
+  `layerFromBuffer`), all headless and tested without Qt; the system clipboard is the shell's,
+  and the image on it is a plain `QImage`, so it interoperates with other applications. The
+  selection is folded into alpha rather than taken as a bounding box, so a feathered selection
+  copies with a soft edge. Copy Merged reads the composite at full resolution through the
+  renderer, on the worker, and refuses above the composite cap. Paste adds one undoable layer
+  centred on the canvas; Paste Into centres on the selection and carries it as the layer's
+  mask, so every pasted pixel is present and the mask decides which show. Cut copies before
+  it clears, and a cut whose copy is refused clears nothing.
 - **`CanvasView`** — paints `Document::compositeImage()` (→ `QImage` RGBA8888),
   observes the document (auto-refresh on commit/undo/redo/load), and routes mouse
   input to the brush tool.
