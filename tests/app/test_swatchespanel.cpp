@@ -165,10 +165,9 @@ PE_TEST(mainwindow_an_unbuilt_panel_says_what_it_will_be_and_that_it_is_not_buil
     pe::app::MainWindow w;
     const QList<QWidget*> placeholders =
         w.findChildren<QWidget*>(QStringLiteral("PanelPlaceholder"));
-    // Gradients, Patterns, Libraries, Paths. One fewer each time a panel becomes real, so
-    // this number going down is the point; it is here so the loop below cannot pass by
-    // finding nothing.
-    PE_CHECK(placeholders.size() >= 4);
+    // Patterns, Libraries, Paths. One fewer each time a panel becomes real, so this number
+    // going down is the point; it is here so the loop below cannot pass by finding nothing.
+    PE_CHECK(placeholders.size() >= 3);
 
     for (QWidget* p : placeholders) {
         PE_CHECK(!p->accessibleName().isEmpty());

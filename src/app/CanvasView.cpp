@@ -1448,8 +1448,8 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e) {
                                static_cast<float>(bgColor_.greenF()),
                                static_cast<float>(bgColor_.blueF()),
                                static_cast<float>(bgColor_.alphaF())};  // background = far stop
-            if (auto cmd = pe::gradientFill(*doc_, doc_->activeLayer(), start, end, fg, bg,
-                                            &doc_->selection())) {
+            if (auto cmd = pe::gradientFill(*doc_, doc_->activeLayer(), start, end, gradient_, fg,
+                                            bg, &doc_->selection())) {
                 doc_->history().push(std::move(cmd));
             } else if (start.x != end.x || start.y != end.y) {
                 // A genuine drag (not a zero-length click) that produced nothing is a failure

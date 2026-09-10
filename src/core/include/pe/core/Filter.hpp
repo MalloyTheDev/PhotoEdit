@@ -3,6 +3,7 @@
 #include "pe/core/Brush.hpp"  // PaintCommand (reused as the generic tile-delta command)
 #include "pe/core/Color.hpp"
 #include "pe/core/Geometry.hpp"
+#include "pe/core/Gradient.hpp"
 #include "pe/core/Layer.hpp"
 #include "pe/core/Refusal.hpp"
 
@@ -163,6 +164,15 @@ inline constexpr std::int64_t kMaxMoveBytes = 1LL << 30;
 // nullptr for a non-pixel layer, a zero-length drag, or an over-budget canvas.
 [[nodiscard]] std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId,
                                                          Point start, Point end, Rgbaf c0, Rgbaf c1,
+                                                         const Selection* selection = nullptr);
+
+// The same, through a multi-stop pe::Gradient. `foreground` and `background` fill in the stops
+// that follow the loaded colours, so a preset like "Foreground to Transparent" draws with
+// whatever is loaded now. The two-colour overload above is this one with a two-stop ramp.
+[[nodiscard]] std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId,
+                                                         Point start, Point end,
+                                                         const Gradient& gradient, Rgbaf foreground,
+                                                         Rgbaf background,
                                                          const Selection* selection = nullptr);
 
 // ---- Reference filter kernels ----

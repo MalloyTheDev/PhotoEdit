@@ -29,6 +29,7 @@ add_library(pe_core
     src/HitTest.cpp
     src/Histogram.cpp
     src/Channels.cpp
+    src/Gradient.cpp
     src/NativeFormat.cpp
     src/DocumentIO.cpp
     src/Psd.cpp

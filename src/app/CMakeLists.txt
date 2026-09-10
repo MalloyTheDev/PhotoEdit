@@ -47,6 +47,8 @@ qt_add_library(pe_app STATIC
     AdjustmentsPanel.hpp
     ChannelsPanel.cpp
     ChannelsPanel.hpp
+    GradientsPanel.cpp
+    GradientsPanel.hpp
     PropertiesPanel.cpp
     PropertiesPanel.hpp
     Theme.cpp

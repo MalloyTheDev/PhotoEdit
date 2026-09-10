@@ -4,6 +4,7 @@
 
 #include "pe/core/Channels.hpp"
 #include "pe/core/Document.hpp"
+#include "pe/core/Gradient.hpp"
 #include "pe/core/PaintToolController.hpp"
 #include "pe/core/Refusal.hpp"
 #include "pe/core/ViewTransform.hpp"
@@ -142,6 +143,13 @@ public:
     // over the same composite budget the Magic Wand runs into, and on the same worker, since
     // flattening a large canvas on the GUI thread is indistinguishable from a hang.
     void loadSelectionFromChannel(std::optional<pe::Channel> channel);
+
+    // The ramp the Gradient tool draws (the Gradients panel). The default is foreground to
+    // background, which is the only gradient that needs no preset and what the tool drew
+    // before there was anything to choose. Stops that follow the loaded colours are resolved
+    // at draw time, so changing the foreground changes the next drag rather than the setting.
+    void setGradient(pe::Gradient g) { gradient_ = std::move(g); }
+    [[nodiscard]] const pe::Gradient& gradient() const noexcept { return gradient_; }
 
 signals:
     void zoomChanged(double percent);   // for the status-bar zoom readout
@@ -311,6 +319,7 @@ private:
     // Display state, not document state: which colour channels get drawn. Default is the
     // composite, so a canvas nobody has touched the Channels panel on pays nothing.
     pe::ChannelView channelView_{};
+    pe::Gradient gradient_ = pe::Gradient::foregroundToBackground();
 
     // Brush settings, kept per paint mode.
     //

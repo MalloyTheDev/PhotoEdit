@@ -1035,6 +1035,14 @@ std::unique_ptr<PaintCommand> bucketFill(Document& doc, LayerId layerId, int see
 
 std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId, Point start, Point end,
                                            Rgbaf c0, Rgbaf c1, const Selection* selection) {
+    // One implementation. A two-colour gradient is a two-stop ramp, and the colours are already
+    // literal, so nothing is substituted into it.
+    return gradientFill(doc, layerId, start, end, Gradient::twoStop(c0, c1), c0, c1, selection);
+}
+
+std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId, Point start, Point end,
+                                           const Gradient& gradient, Rgbaf foreground,
+                                           Rgbaf background, const Selection* selection) {
     Layer* layer = doc.findLayer(layerId);
     if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
     const double dx = static_cast<double>(end.x) - start.x;
@@ -1045,7 +1053,8 @@ std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId, Point
     if (region.isEmpty()) return nullptr;
     return bakePixelEditRegion(
         doc, layerId, "Gradient", region,
-        [start, dx, dy, len2, c0, c1, region](std::span<Rgbaf> img, int w, int h) {
+        [start, dx, dy, len2, &gradient, foreground, background, region](std::span<Rgbaf> img,
+                                                                         int w, int h) {
             const std::vector<Rgbaf> orig(img.begin(),
                                           img.end());  // composite the gradient over these
             for (int y = 0; y < h; ++y) {
@@ -1055,9 +1064,8 @@ std::unique_ptr<PaintCommand> gradientFill(Document& doc, LayerId layerId, Point
                     const double py = region.y + y + 0.5 - start.y;
                     double t = (px * dx + py * dy) / len2;
                     t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
-                    const float tf = static_cast<float>(t);
-                    const Rgbaf stop{c0.r + (c1.r - c0.r) * tf, c0.g + (c1.g - c0.g) * tf,
-                                     c0.b + (c1.b - c0.b) * tf, c0.a + (c1.a - c0.a) * tf};
+                    const Rgbaf stop =
+                        gradient.sample(static_cast<float>(t), foreground, background);
                     // Composite straight-alpha (Normal) over the backdrop, like bucketFill: a
                     // semi-transparent stop lets existing pixels show through, and compositeOver
                     // clamps every channel (sinking NaN / bounding range) at any layer depth.

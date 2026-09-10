@@ -55,6 +55,10 @@ struct Rgbaf {
     float g = 0.0f;
     float b = 0.0f;
     float a = 0.0f;
+
+    // Exact equality, like Rgba8 and Rgba16: this answers "is this the same value", not "do
+    // these look alike". Anything comparing computed colours wants a tolerance instead.
+    constexpr bool operator==(const Rgbaf&) const = default;
 };
 
 [[nodiscard]] constexpr float toLinearUnit(uint8_t v) noexcept {

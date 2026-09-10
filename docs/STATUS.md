@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **691 engine cases + 178 shell cases, 0 failed**. The engine tests
+Test suite: **703 engine cases + 192 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -121,9 +121,19 @@ The engine is no longer headless-only; the Qt6 app provides a real
   plane is black everywhere, rather than handing back an active selection of nothing. Spot
   channels and saving a selection AS a channel are specified
   ([19](systems/19-channels.md)) and not built; the panel says so.
-- The panels that are **not built yet** (Gradients, Patterns, Libraries, Paths) now say what
-  they will be for and that they are not implemented. They used to show their own name
-  centred in a blank dock, which reads as a panel that failed to load.
+- **Gradients panel**: nine ramps to draw with, each shown as its real `pe::Gradient`
+  sampled over a checkerboard, so one that fades to transparent looks like one. The engine's
+  gradient fill was two colours end to end, which is the single gradient a panel is not
+  needed for; it now takes a **multi-stop `pe::Gradient`**, and the two-colour overload is
+  that one with a two-stop ramp, so the old callers cannot drift from the new path. Two
+  presets follow the loaded foreground/background rather than carrying their own colours
+  (`pe::StopColor`), which is what makes "Foreground to Transparent" one preset instead of
+  one per colour; their swatches are redrawn when a colour is picked anywhere in the window,
+  and the fixed ones are not. Editing stops, and saving your own, are not implemented; the
+  panel says so.
+- The panels that are **not built yet** (Patterns, Libraries, Paths) now say what they will
+  be for and that they are not implemented. They used to show their own name centred in a
+  blank dock, which reads as a panel that failed to load.
 
 ### Visual design system (dark pro theme)
 

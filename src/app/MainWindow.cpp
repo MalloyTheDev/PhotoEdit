@@ -10,6 +10,7 @@
 #include "CurvesDialog.hpp"
 #include "EffectDialog.hpp"
 #include "ExportDialog.hpp"
+#include "GradientsPanel.hpp"
 #include "GroupedSlidersDialog.hpp"
 #include "HistoryPanel.hpp"
 #include "IconUtil.hpp"
@@ -1295,6 +1296,10 @@ void MainWindow::updateSwatches() {
     };
     if (fgSwatch_ != nullptr) fgSwatch_->setStyleSheet(style(fgColor_));
     if (bgSwatch_ != nullptr) bgSwatch_->setStyleSheet(style(bgColor_));
+    // Two of the gradient presets follow these colours, so their swatches are stale the moment
+    // either changes. Every path that alters a colour ends up here, which is why it hangs off
+    // this rather than off setForegroundColor alone (the background has its own setter).
+    if (gradients_ != nullptr) gradients_->setColors(fgColor_, bgColor_);
 }
 
 void MainWindow::setForegroundColor(const QColor& c) {
@@ -2224,6 +2229,7 @@ void MainWindow::buildDockPanels() {
     swatchesPanel_ = new SwatchesPanel();
     adjustments_ = new AdjustmentsPanel();
     channels_ = new ChannelsPanel();
+    gradients_ = new GradientsPanel();
     properties_ = new PropertiesPanel();
 
     // The Color panel drives the foreground/brush colour; seed it and keep in sync.
@@ -2251,6 +2257,14 @@ void MainWindow::buildDockPanels() {
             [this](pe::ChannelView v) { canvas_->setChannelView(v); });
     connect(channels_, &ChannelsPanel::loadAsSelectionRequested, this,
             [this](std::optional<pe::Channel> ch) { canvas_->loadSelectionFromChannel(ch); });
+    // The chosen ramp is a tool setting, like the brush size: the panel picks it, the canvas
+    // draws with it, and the two stops that follow the loaded colours are resolved on each
+    // drag rather than baked in here.
+    gradients_->setColors(fgColor_, bgColor_);
+    connect(gradients_, &GradientsPanel::gradientChosen, this, [this](int index) {
+        if (gradients_ == nullptr) return;
+        canvas_->setGradient(gradients_->preset(index).gradient);
+    });
 
     // Group anchors (one per stacked group).
     auto* colorDock = makeDock(QStringLiteral("Color"), colorPanel_);
@@ -2266,13 +2280,7 @@ void MainWindow::buildDockPanels() {
     // Then fill each group's tabs, always tabifying onto the group's anchor so the
     // insertion order (and grouping) is preserved.
     tabifyDockWidget(colorDock, makeDock(QStringLiteral("Swatches"), swatchesPanel_));
-    tabifyDockWidget(
-        colorDock,
-        makeDock(QStringLiteral("Gradients"),
-                 placeholder(QStringLiteral("Gradients"),
-                             QStringLiteral("Saved gradients to drag onto the canvas. The "
-                                            "Gradient tool already draws foreground to "
-                                            "background."))));
+    tabifyDockWidget(colorDock, makeDock(QStringLiteral("Gradients"), gradients_));
     tabifyDockWidget(colorDock,
                      makeDock(QStringLiteral("Patterns"),
                               placeholder(QStringLiteral("Patterns"),
