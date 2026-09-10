@@ -158,6 +158,12 @@ private:
     // The only path: Layer▸New Adjustment Layer and the Adjustments panel both come through
     // here, so where the layer lands and what it is called cannot differ between them.
     void addAdjustmentLayer(std::unique_ptr<pe::Adjustment> adj, const QString& name);
+
+    // Combine layers into one. Down takes the active layer and the one under it, Visible takes
+    // every visible layer, Flatten takes all of them. Each refuses out loud when it cannot run,
+    // rather than pushing a history entry that did nothing.
+    enum class MergeMode { Down, Visible, Flatten };
+    void mergeLayers(MergeMode mode);
     // Reopen the text dialog for a text layer (double-click in the Layers panel), seeded from its
     // model; commits one EditTextCommand on OK. A no-op for a non-text layer.
     void editTextLayer(pe::LayerId id);

@@ -40,6 +40,7 @@ add_executable(pe_core_tests
     core/test_channels.cpp
     core/test_gradient.cpp
     core/test_clipboard.cpp
+    core/test_merge.cpp
     core/test_autotone.cpp
     core/test_colorspace.cpp
     core/test_colorprofile.cpp
@@ -98,6 +99,7 @@ if(PHOTOEDIT_BUILD_APP)
         app/test_channelspanel.cpp
         app/test_gradientspanel.cpp
         app/test_clipboard.cpp
+        app/test_mergeui.cpp
         app/test_busytask.cpp
     )
 

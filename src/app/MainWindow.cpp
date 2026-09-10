@@ -203,9 +203,11 @@ void MainWindow::buildMenuBar() {
                                               standardOr(QKeySequence::SaveAs, "Ctrl+Shift+S"),
                                               this, &MainWindow::saveDocumentAs));
     // No StandardKey for export; Ctrl+Shift+E is the common convention.
+    // Ctrl+Shift+Alt+W, not Ctrl+Shift+E. This used to hold Ctrl+Shift+E, which in every
+    // editor that has one is Merge Visible; both bindings are now the conventional ones.
     docActions_.push_back(fileMenu->addAction(QStringLiteral("E&xport As..."),
-                                              QKeySequence(QStringLiteral("Ctrl+Shift+E")), this,
-                                              &MainWindow::exportDocumentAs));
+                                              QKeySequence(QStringLiteral("Ctrl+Shift+Alt+W")),
+                                              this, &MainWindow::exportDocumentAs));
     fileActions_.insert(fileActions_.end(), docActions_.end() - 3, docActions_.end());
     fileMenu->addSeparator();
     // Explicit Ctrl+Q rather than QKeySequence::Quit: on Windows that standard key
@@ -502,6 +504,19 @@ void MainWindow::buildMenuBar() {
             }
             doc_->history().push(std::make_unique<pe::RemoveLayerMaskCommand>(doc_->activeLayer()));
         });
+
+        // Merging: the stack could grow and never combine. Ctrl+E / Ctrl+Shift+E are the
+        // conventional bindings, and Flatten deliberately has none, because it is the one that
+        // throws away the most and should take a deliberate trip to the menu.
+        layerMenu->addSeparator();
+        docActions_.push_back(layerMenu->addAction(QStringLiteral("&Merge Down"),
+                                                   QKeySequence(QStringLiteral("Ctrl+E")), this,
+                                                   [this] { mergeLayers(MergeMode::Down); }));
+        docActions_.push_back(layerMenu->addAction(
+            QStringLiteral("Merge &Visible"), QKeySequence(QStringLiteral("Ctrl+Shift+E")), this,
+            [this] { mergeLayers(MergeMode::Visible); }));
+        docActions_.push_back(layerMenu->addAction(QStringLiteral("&Flatten Image"), this,
+                                                   [this] { mergeLayers(MergeMode::Flatten); }));
 
         // New Adjustment Layer: a non-destructive layer that transforms the composite beneath it at
         // render time. Added on top of the stack as one undo step;
@@ -1787,6 +1802,76 @@ void MainWindow::pasteFromClipboard(bool into) {
     doc_->history().push(
         std::make_unique<pe::AddLayerCommand>(std::move(layer), doc_->topLevelCount()));
     doc_->setActiveLayer(id);
+}
+
+void MainWindow::mergeLayers(MergeMode mode) {
+    const char* const action = mode == MergeMode::Down      ? "Layer > Merge Down"
+                               : mode == MergeMode::Visible ? "Layer > Merge Visible"
+                                                            : "Layer > Flatten Image";
+    if (refuseIf(doc_ == nullptr, "layer.merge", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return;
+    }
+
+    std::vector<std::size_t> indices;
+    QString historyName;
+    QString mergedName;
+    switch (mode) {
+        case MergeMode::Down: {
+            indices = pe::mergeDownIndices(*doc_, doc_->activeLayer());
+            historyName = QStringLiteral("Merge Down");
+            // Photoshop's rule, and the useful one: the survivor keeps the LOWER layer's name,
+            // because that is the one staying where it was.
+            if (!indices.empty()) {
+                const pe::Layer* lower = doc_->topLevelLayers()[indices.front()].get();
+                mergedName = QString::fromStdString(lower->name());
+            }
+            break;
+        }
+        case MergeMode::Visible:
+            indices = pe::mergeVisibleIndices(*doc_);
+            historyName = QStringLiteral("Merge Visible");
+            mergedName = QStringLiteral("Merged");
+            break;
+        case MergeMode::Flatten:
+            indices = pe::flattenIndices(*doc_);
+            historyName = QStringLiteral("Flatten Image");
+            mergedName = QStringLiteral("Background");
+            break;
+    }
+
+    if (refuseIf(indices.empty(), "layer.merge", pe::RefusalCode::NoEffect, action,
+                 mode == MergeMode::Down
+                     ? QStringLiteral("There is no layer under this one to merge it into.")
+                     : QStringLiteral("There are not two layers here to merge."))) {
+        return;
+    }
+
+    // Asked before pushing, so a merge that cannot run never becomes a history entry the user
+    // has to undo to get rid of.
+    switch (pe::mergeBlocker(*doc_, indices)) {
+        case pe::MergeBlock::LowestIsClipped:
+            (void)refuseIf(true, "layer.merge", pe::RefusalCode::LayerIsClipped, action,
+                           QStringLiteral("The bottom layer of this merge is clipped to the one "
+                                          "under it, which is not part of the merge. Merging "
+                                          "would change how it looks. Un-clip it first."));
+            return;
+        case pe::MergeBlock::OverCompositeCap:
+            (void)refuseIf(true, "layer.merge", pe::RefusalCode::OverSizeBudget, action,
+                           QStringLiteral("Merging means flattening the image, and this one is "
+                                          "over the %1 megapixel limit.")
+                               .arg(pe::kMaxCompositeImagePixels / 1'000'000));
+            return;
+        case pe::MergeBlock::TooFewLayers:
+            (void)refuseIf(true, "layer.merge", pe::RefusalCode::NoEffect, action,
+                           QStringLiteral("There are not two layers here to merge."));
+            return;
+        case pe::MergeBlock::None:
+            break;
+    }
+
+    doc_->history().push(std::make_unique<pe::MergeLayersCommand>(
+        std::move(indices), historyName.toStdString(), mergedName.toStdString()));
 }
 
 void MainWindow::addAdjustmentLayer(std::unique_ptr<pe::Adjustment> adj, const QString& name) {

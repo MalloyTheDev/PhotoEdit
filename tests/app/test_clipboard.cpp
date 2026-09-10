@@ -147,6 +147,7 @@ PE_TEST(clipboard_copy_from_a_layer_with_no_pixels_is_refused_and_says_what_to_d
     PE_REQUIRE(trigger(w, QStringLiteral("Copy")));
     PE_CHECK_EQ(w.refusals().size(), static_cast<std::size_t>(1));
     PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::LayerNotPixel);
+    PE_REQUIRE(!w.refusals().empty());
     PE_CHECK(w.refusals().back().explanation.find("Copy Merged") != std::string::npos);
 }
 

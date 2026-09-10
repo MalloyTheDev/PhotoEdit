@@ -1,4 +1,5 @@
 #include "pe/core/Commands.hpp"
+#include "pe/core/Compositor.hpp"
 
 #include <cstdint>
 #include "pe/core/SolidColorLayer.hpp"
@@ -137,6 +138,132 @@ DocumentChange RemoveLayerCommand::undo(Document& doc) {
     // exists again; restore it if this command had cleared it.
     if (clearedActive_) doc.setActiveLayer(prevActive_);
     return structureChange(region, layerId_);
+}
+
+// ----------------------------------------------------------- MergeLayers
+
+MergeBlock mergeBlocker(const Document& doc, std::span<const std::size_t> indices) {
+    if (indices.size() < 2) return MergeBlock::TooFewLayers;
+    const std::span<const std::unique_ptr<Layer>> top = doc.topLevelLayers();
+    for (std::size_t i : indices) {
+        if (i >= top.size() || top[i] == nullptr) return MergeBlock::TooFewLayers;
+    }
+    // The lowest layer's clipping base sits below the set. Merging would render it unclipped
+    // and the picture would change, which is the one thing a merge must not do.
+    if (top[indices.front()]->clipped()) return MergeBlock::LowestIsClipped;
+    const Rect canvas = doc.canvasBounds();
+    if (canvas.isEmpty()) return MergeBlock::TooFewLayers;
+    // compositeToImage returns an empty buffer past this, and a merge that composited nothing
+    // would erase every layer it took.
+    if (static_cast<int64_t>(canvas.width) * static_cast<int64_t>(canvas.height) >
+        kMaxCompositeImagePixels) {
+        return MergeBlock::OverCompositeCap;
+    }
+    return MergeBlock::None;
+}
+
+MergeLayersCommand::MergeLayersCommand(std::vector<std::size_t> indices, std::string name,
+                                       std::string mergedLayerName)
+    : indices_(std::move(indices)),
+      name_(std::move(name)),
+      mergedLayerName_(std::move(mergedLayerName)) {
+    std::sort(indices_.begin(), indices_.end());
+    indices_.erase(std::unique(indices_.begin(), indices_.end()), indices_.end());
+}
+
+MergeLayersCommand::~MergeLayersCommand() = default;
+
+DocumentChange MergeLayersCommand::execute(Document& doc) {
+    // Re-executed after an undo: the originals are back in the document, so start over rather
+    // than reusing the previous run's state.
+    removed_.clear();
+    mergedId_ = kNoLayer;
+
+    if (mergeBlocker(doc, indices_) != MergeBlock::None) return structureChange(Rect{}, kNoLayer);
+
+    const Rect canvas = doc.canvasBounds();
+    prevActive_ = doc.activeLayer();
+
+    // Take the layers out in ASCENDING order and keep them: they are both what gets
+    // composited and exactly what undo has to put back. Removing from the highest index down
+    // keeps the lower indices valid while the removals happen.
+    const std::span<const std::unique_ptr<Layer>> top = doc.topLevelLayers();
+    std::vector<LayerId> ids;
+    ids.reserve(indices_.size());
+    for (std::size_t i : indices_) ids.push_back(top[i]->id());
+    removed_.resize(ids.size());
+    for (std::size_t k = ids.size(); k-- > 0;) removed_[k] = doc.cmdRemoveTopLevel(ids[k]);
+
+    // Composited by the same code that draws the canvas, so a merged layer looks like what it
+    // replaced rather than like a second implementation's idea of it.
+    const PixelBuffer flat = compositeToImage(removed_, canvas);
+    if (flat.isEmpty()) {
+        // Put everything back and report nothing: an empty composite here would mean merging
+        // to a blank layer.
+        for (std::size_t k = 0; k < indices_.size(); ++k) {
+            doc.cmdInsertTopLevel(indices_[k], std::move(removed_[k]));
+        }
+        removed_.clear();
+        return structureChange(Rect{}, kNoLayer);
+    }
+
+    auto layer = std::make_unique<PixelLayer>(mergedLayerName_);
+    for (int y = 0; y < flat.height(); ++y) {
+        for (int x = 0; x < flat.width(); ++x) {
+            const Rgba8 px = flat.at(x, y);
+            // Sparse: a merged layer of a small shape must not allocate a tile per canvas
+            // tile just to hold transparency.
+            if (px.a != 0) layer->tiles().setPixel(canvas.x + x, canvas.y + y, px);
+        }
+    }
+    mergedId_ = layer->id();
+    doc.cmdInsertTopLevel(indices_.front(), std::move(layer));
+    // The layers the active one may have been inside are gone; land on the survivor, which is
+    // where the user's attention is.
+    doc.setActiveLayer(mergedId_);
+    return structureChange(canvas, mergedId_);
+}
+
+DocumentChange MergeLayersCommand::undo(Document& doc) {
+    if (mergedId_ == kNoLayer) return structureChange(Rect{}, kNoLayer);
+    const Rect canvas = doc.canvasBounds();
+    (void)doc.cmdRemoveTopLevel(mergedId_);
+    // Ascending, so each insert lands at the index it was taken from: the lower ones are
+    // already back by the time a higher index is used.
+    for (std::size_t k = 0; k < indices_.size(); ++k) {
+        doc.cmdInsertTopLevel(indices_[k], std::move(removed_[k]));
+    }
+    removed_.clear();
+    mergedId_ = kNoLayer;
+    if (prevActive_ != kNoLayer && doc.findLayer(prevActive_) != nullptr) {
+        doc.setActiveLayer(prevActive_);
+    }
+    return structureChange(canvas, prevActive_);
+}
+
+std::vector<std::size_t> mergeDownIndices(const Document& doc, LayerId active) {
+    const std::size_t idx = doc.topLevelIndexOf(active);
+    // Index 0 is the bottom of the stack, so there is nothing under it to merge into.
+    if (idx == GroupLayer::npos || idx == 0) return {};
+    return {idx - 1, idx};
+}
+
+std::vector<std::size_t> mergeVisibleIndices(const Document& doc) {
+    std::vector<std::size_t> out;
+    const std::span<const std::unique_ptr<Layer>> top = doc.topLevelLayers();
+    for (std::size_t i = 0; i < top.size(); ++i) {
+        if (top[i] != nullptr && top[i]->visible()) out.push_back(i);
+    }
+    if (out.size() < 2) return {};
+    return out;
+}
+
+std::vector<std::size_t> flattenIndices(const Document& doc) {
+    const std::size_t n = doc.topLevelCount();
+    if (n < 2) return {};
+    std::vector<std::size_t> out(n);
+    for (std::size_t i = 0; i < n; ++i) out[i] = i;
+    return out;
 }
 
 // ----------------------------------------------------------- DuplicateLayer

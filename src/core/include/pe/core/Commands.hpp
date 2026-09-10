@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -62,6 +63,65 @@ private:
     LayerId cloneId_ = kNoLayer;
     std::size_t index_ = 0;
 };
+
+// Flatten a set of TOP-LEVEL layers into one pixel layer, in place.
+//
+// `indices` are top-level indices, ascending; the merged layer takes the position of the
+// lowest of them and every other one is removed. Not necessarily contiguous, because Merge
+// Visible skips the hidden layers between the visible ones, which is what Photoshop does: the
+// result lands where the bottom-most merged layer was, and anything skipped stays put.
+//
+// The merged pixels are the ordinary composite of exactly those layers, so opacity, blend
+// mode, masks, clipping and adjustment layers are all baked in by the same code that draws
+// them, rather than by a second implementation that could disagree with the canvas. The
+// survivor is a plain pixel layer at full opacity in Normal, because everything that made it
+// look the way it does is now in its pixels.
+//
+// Groups merge too: compositing one flattens it, which is what merging a group means.
+//
+// Refuses (execute is a no-op returning an unchanged document) when fewer than two layers are
+// named, when an index is out of range, when the canvas is over the composite cap, or when the
+// LOWEST named layer is clipped - its clipping base sits below the set, so merging would
+// change the picture rather than preserve it.
+class MergeLayersCommand final : public Command {
+public:
+    MergeLayersCommand(std::vector<std::size_t> indices, std::string name,
+                       std::string mergedLayerName);
+    ~MergeLayersCommand() override;
+    [[nodiscard]] std::string name() const override { return name_; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+    // Whether the last execute() actually merged. A refused merge leaves the document alone;
+    // the caller checks this to report a refusal rather than pushing a command that did
+    // nothing.
+    [[nodiscard]] bool merged() const noexcept { return mergedId_ != kNoLayer; }
+
+private:
+    std::vector<std::size_t> indices_;
+    std::string name_;
+    std::string mergedLayerName_;
+    std::vector<std::unique_ptr<Layer>> removed_;  // the originals, ascending, while undone
+    LayerId mergedId_ = kNoLayer;
+    LayerId prevActive_ = kNoLayer;
+};
+
+// Why a merge of `indices` cannot run, or None when it can. The command asks this too, so a
+// caller that checks first and a command that refuses cannot disagree about what is mergeable.
+enum class MergeBlock : std::uint8_t {
+    None = 0,
+    TooFewLayers,      // fewer than two named, or an index that is not a top-level layer
+    LowestIsClipped,   // its clipping base sits below the set, so merging would change the picture
+    OverCompositeCap,  // the canvas cannot be flattened in one allocation
+};
+[[nodiscard]] MergeBlock mergeBlocker(const Document& doc, std::span<const std::size_t> indices);
+
+// The top-level indices each merge mode would take, ascending. Empty when the mode cannot run:
+// no layer below the active one for Down, fewer than two visible layers for Visible, fewer than
+// two layers for Flatten. The caller turns an empty result into a refusal.
+[[nodiscard]] std::vector<std::size_t> mergeDownIndices(const Document& doc, LayerId active);
+[[nodiscard]] std::vector<std::size_t> mergeVisibleIndices(const Document& doc);
+[[nodiscard]] std::vector<std::size_t> flattenIndices(const Document& doc);
 
 // Move a top-level layer to a new top-level index.
 class ReorderLayerCommand final : public Command {

@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **718 engine cases + 207 shell cases, 0 failed**. The engine tests
+Test suite: **735 engine cases + 216 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -101,7 +101,13 @@ The engine is no longer headless-only; the Qt6 app provides a real
   beside Opacity (the two multiply, so they are independent controls), and Layer > Clip to
   Layer Below (Ctrl+Alt+G), a checkable entry that follows the active layer. A clipped row
   is marked in its thumbnail, since the state otherwise changes the picture with nothing in
-  the panel to say why. Both are persisted from `.pedoc` v8.
+  the panel to say why. Both are persisted from `.pedoc` v8. **Merge Down** (Ctrl+E), **Merge
+  Visible** (Ctrl+Shift+E) and **Flatten Image** combine layers through one
+  `MergeLayersCommand`: the merged pixels are the ordinary composite of exactly the layers
+  taken, so opacity, blend mode, masks, clipping, adjustment layers and whole groups are baked
+  in by the same code that draws them. Merge Visible leaves hidden layers where they are;
+  Flatten discards them. A merge whose lowest layer is clipped is refused, because its
+  clipping base sits below the set and merging would change the picture.
 - **History panel** — a state timeline (uses `History::undoNames/redoNames`) with
   click-to-seek; the current state is highlighted, redoable states dimmed.
 - **Swatches panel**: a palette of colour chips (the neutrals plus a hue wheel at three

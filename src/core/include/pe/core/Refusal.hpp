@@ -39,6 +39,7 @@ enum class RefusalCode : std::uint16_t {
     LayerNotText = 14,
     LayerNotTopLevel = 15,
     LayerNotGroup = 16,
+    LayerIsClipped = 17,
 
     // Valid, but it would change nothing, so performing it would only add a history entry
     // the user would then have to undo.
@@ -123,6 +124,7 @@ public:
         case RefusalCode::LayerNotText:
         case RefusalCode::LayerNotTopLevel:
         case RefusalCode::LayerNotGroup:
+        case RefusalCode::LayerIsClipped:
         case RefusalCode::PointOutsideCanvas:
             return RefusalCategory::WrongTarget;
         case RefusalCode::NoEffect:
