@@ -55,8 +55,11 @@ PE_TEST(mask_evaluate_density_and_invert) {
     Mask m;
     m.buffer().setValue(0, 0, 128);
     PE_CHECK_NEAR(m.evaluate(0, 0), 128.0f / 255.0f);
+    // Half density halves the HIDING: a mid-grey hides 50%, so at density 0.5 it hides 25%
+    // and reveals 75%. The old expectation here was (128/255) * 0.5, which is the formula
+    // that made density 0 delete the layer.
     m.setDensity(0.5f);
-    PE_CHECK_NEAR(m.evaluate(0, 0), (128.0f / 255.0f) * 0.5f);
+    PE_CHECK_NEAR(m.evaluate(0, 0), 1.0f - (1.0f - 128.0f / 255.0f) * 0.5f);
     m.setDensity(1.0f);
     m.setInverted(true);
     PE_CHECK_NEAR(m.evaluate(0, 0), 1.0f - 128.0f / 255.0f);
@@ -86,10 +89,36 @@ PE_TEST(compositor_inverted_empty_mask_hides_all) {
 }
 
 PE_TEST(compositor_density_half_mask) {
+    // A mask that hides half of what it would hide at full strength. Painted black, so there
+    // is something for the density to act on: an empty buffer reveals everything at every
+    // density, and asserting on THAT was how the inverted formula went unnoticed.
     auto mask = std::make_unique<Mask>();
-    mask->setDensity(0.5f);  // empty buffer (reveal) at 50% density
+    mask->buffer().setValue(0, 0, MaskBuffer::kClear);  // fully hidden at density 1
+    mask->setDensity(0.5f);
     PixelBuffer img = renderMasked(std::move(mask));
     PE_CHECK(near8(img.at(0, 0), Rgba8{255, 0, 0, 128}));
+}
+
+PE_TEST(compositor_density_zero_ignores_the_mask_instead_of_deleting_the_layer) {
+    // The headline case. A user drags Density to 0 to switch a mask off for a moment; the
+    // layer must show in full, not vanish. The mask multiplies into alpha, so "does nothing"
+    // is a factor of 1.
+    auto mask = std::make_unique<Mask>();
+    mask->buffer().setValue(0, 0, MaskBuffer::kClear);  // black: hides everything at density 1
+    mask->setDensity(0.0f);
+    PixelBuffer img = renderMasked(std::move(mask));
+    PE_CHECK(near8(img.at(0, 0), Rgba8{255, 0, 0, 255}));
+}
+
+PE_TEST(compositor_a_reveal_all_mask_shows_the_layer_at_every_density) {
+    // White reveals. Nothing density does to a mask that hides nothing should dim the layer,
+    // which is exactly what the old formula did.
+    for (const float d : {0.0f, 0.25f, 0.5f, 1.0f}) {
+        auto mask = std::make_unique<Mask>();
+        mask->setDensity(d);  // empty buffer reads as kOpaque everywhere
+        PixelBuffer img = renderMasked(std::move(mask));
+        PE_CHECK(near8(img.at(0, 0), Rgba8{255, 0, 0, 255}));
+    }
 }
 
 PE_TEST(compositor_disabled_mask_ignored) {
@@ -230,4 +259,35 @@ PE_TEST(maskbuffer_translate_zero_and_empty_are_no_ops) {
     const std::size_t tilesBefore = m.tileCount();
     PE_CHECK(m.translate(0, 0, /*maxPixels=*/0));
     PE_CHECK_EQ(m.tileCount(), tilesBefore);
+}
+
+PE_TEST(mask_is_fully_revealing_covers_both_ways_of_being_a_no_op) {
+    // The compositor skips a mask's whole loop on this, so it must never claim a mask that
+    // hides something. Now that density scales the hiding there are two independent ways to be
+    // a no-op, and the old predicate (which also demanded density >= 1) knew only one of them.
+    Mask empty;
+    PE_CHECK(empty.isFullyRevealing());  // nothing painted, full strength
+
+    Mask emptyHalf;
+    emptyHalf.setDensity(0.5f);
+    PE_CHECK(emptyHalf.isFullyRevealing());  // white hides nothing at any density
+
+    Mask painted;
+    painted.buffer().setValue(0, 0, MaskBuffer::kClear);
+    PE_CHECK(!painted.isFullyRevealing());  // it hides a pixel, so the loop has to run
+    painted.setDensity(0.0f);
+    PE_CHECK(painted.isFullyRevealing());  // ...until density switches the mask off entirely
+
+    Mask invertedEmpty;
+    invertedEmpty.setInverted(true);
+    PE_CHECK(!invertedEmpty.isFullyRevealing());  // inverted white hides everything
+    invertedEmpty.setDensity(0.0f);
+    PE_CHECK(invertedEmpty.isFullyRevealing());
+
+    // And the claim is not merely a label: where it says fully revealing, evaluate() is 1.
+    for (const Mask* m : {&empty, &emptyHalf, &painted, &invertedEmpty}) {
+        if (!m->isFullyRevealing()) continue;
+        PE_CHECK_NEAR(m->evaluate(0, 0), 1.0f);
+        PE_CHECK_NEAR(m->evaluate(500, 500), 1.0f);
+    }
 }

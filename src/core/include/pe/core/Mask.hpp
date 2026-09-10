@@ -114,9 +114,20 @@ public:
     [[nodiscard]] float evaluateValue(uint8_t v) const noexcept {
         float m = static_cast<float>(v) / 255.0f;
         if (inverted_) m = 1.0f - m;
-        // clamp01 keeps the result valid even if density_ were ever set out of
-        // range by a future path (e.g. deserialization) that bypasses setDensity.
-        return clamp01(m * density_);
+        // Density scales the HIDING, not the revealing: hide_effective = (1 - m) * density.
+        //
+        // This was `m * density`, which is the wrong end. The mask enters the compositor as a
+        // multiply into alpha, so "the mask does nothing" is a factor of 1, not 0 - and under
+        // the old formula density 0 made every masked layer vanish outright, while a black
+        // region at density 0.5 stayed 100% hidden and the untouched white around it dropped
+        // to half coverage instead. Density moved the wrong half of the mask.
+        //
+        // The difference is a uniform (1 - density) of coverage across the whole layer, so at
+        // density 1 the two agree exactly, which is why nothing but the density tests noticed.
+        //
+        // clamp01 keeps the result valid even if density_ were ever set out of range by a
+        // future path (e.g. deserialization) that bypasses setDensity.
+        return clamp01(1.0f - (1.0f - m) * density_);
     }
 
     // Effective coverage in [0,1] at a document pixel: (value/255, inverted if set)
@@ -125,10 +136,16 @@ public:
         return evaluateValue(buffer_.value(x, y));
     }
 
-    // True when this mask reveals everything at full strength, so multiplying by it is
-    // a no-op and the caller can skip its loop entirely.
+    // True when this mask reveals everything, so multiplying by it is a no-op and the caller
+    // can skip its loop entirely.
+    //
+    // Two independent ways to be a no-op now that density scales the hiding: a density of zero
+    // ignores the mask whatever is painted in it, and an empty non-inverted buffer reads as
+    // fully revealing at ANY density. The old predicate also demanded density >= 1, which was
+    // sound but is now stale reasoning: it would skip the loop for exactly the masks the old
+    // formula happened to leave alone.
     [[nodiscard]] bool isFullyRevealing() const noexcept {
-        return !inverted_ && density_ >= 1.0f && buffer_.empty();
+        return density_ <= 0.0f || (!inverted_ && buffer_.empty());
     }
 
 private:

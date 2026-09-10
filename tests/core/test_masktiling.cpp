@@ -164,7 +164,9 @@ PE_TEST(compositor_layer_mask_density_follows_the_tile_grid) {
     m->setDensity(0.5f);
     const PixelBuffer img = renderMasked(std::move(m));
     for (const Point& p : probePoints()) {
-        const int want = static_cast<int>(static_cast<float>(expectedByte(p.x, p.y)) * 0.5f);
+        // Half the hiding, not half the coverage: 255 - (255 - byte) * 0.5.
+        const float hidden = (255.0f - static_cast<float>(expectedByte(p.x, p.y))) * 0.5f;
+        const int want = static_cast<int>(255.0f - hidden);
         PE_CHECK(std::abs(alphaAt(img, p) - want) <= 1);
     }
 }
@@ -188,7 +190,8 @@ PE_TEST(compositor_adjustment_mask_inverted_and_density_follow_the_tile_grid) {
     m->setDensity(0.5f);
     const PixelBuffer img = renderAdjusted(std::move(m));
     for (const Point& p : probePoints()) {
-        const float cov = (1.0f - static_cast<float>(expectedByte(p.x, p.y)) / 255.0f) * 0.5f;
+        const float m = 1.0f - static_cast<float>(expectedByte(p.x, p.y)) / 255.0f;  // inverted
+        const float cov = 1.0f - (1.0f - m) * 0.5f;
         const int want = static_cast<int>(255.0f - 255.0f * cov);
         PE_CHECK(std::abs(redAt(img, p) - want) <= 1);
     }

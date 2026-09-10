@@ -110,7 +110,7 @@ public:
     [[nodiscard]] const MaskBuffer& buffer() const noexcept;
 
     // Effective mask value at p in [0,1], after density and live feather:
-    //   m = feathered(sample(p)/255) * density
+    //   m = 1 - (1 - feathered(sample(p)/255)) * density
     [[nodiscard]] float evaluate(Point p) const noexcept;
 };
 
@@ -171,8 +171,12 @@ from neighboring mask tiles, so the blur is seamless across tile boundaries (the
 standard wide-kernel tile handling from [ADR-0003](../adr/0003-tile-based-engine.md)).
 A baked feather (destructive) is also offered for very large radii.
 
-**Density** is a trivial post-multiply: `m_effective = m * density`. It lets a
-black region become "80% hidden" without repainting the mask.
+**Density** scales how much the mask HIDES: `m_effective = 1 - (1 - m) * density`.
+It lets a black region become "80% hidden" without repainting the mask. Note which
+end it acts on: the mask multiplies into alpha, so the identity is 1, and density 0
+means the mask is ignored entirely rather than hiding everything. A plain
+`m * density` would delete the layer at density 0, and would leave a black region
+fully hidden while dimming the untouched white around it.
 
 **Refine edge** runs as a command that, given the current mask: detects the soft
 edge band, optionally classifies foreground/background (hair/fur cases use the
@@ -245,8 +249,9 @@ Both are lossless because both are the same grayscale tile format.
 - **Linked vs. unlinked transform** — a linked mask transforms with the layer; an
   unlinked mask stays put while the layer moves (the engine tracks two transforms;
   the compositor samples the mask in its own space).
-- **Density 0 with content** — layer fully hidden but still present and editable;
-  must not be confused with `visible() == false`.
+- **Density 0 with content** — the mask is ignored and the layer shows in full; the
+  painted content is still there and comes back as density rises. Not the same as
+  deleting the mask, which also discards what was painted in it.
 - **Vector + raster mask both present** — coverage multiplies; either being
   disabled drops it from the product.
 - **Apply mask (bake)** — destructive: composites coverage into the layer's alpha
