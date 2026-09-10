@@ -173,6 +173,49 @@ MergeLayersCommand::MergeLayersCommand(std::vector<std::size_t> indices, std::st
 
 MergeLayersCommand::~MergeLayersCommand() = default;
 
+namespace {
+
+// Resident bytes of a detached layer subtree: its tiles at its own depth, its mask, and the
+// same for every descendant. Approximate and deliberately over-counting, like every other
+// retainedBytes in the engine: over-counting trims history sooner, under-counting is how a
+// budget gets silently blown.
+[[nodiscard]] std::int64_t layerResidentBytes(const Layer* layer) {
+    if (layer == nullptr) return 0;
+    const auto perTile = static_cast<std::int64_t>(kTilePixels);
+    std::int64_t bytes = 0;
+    if (const auto* pl = dynamic_cast<const PixelLayer*>(layer); pl != nullptr) {
+        switch (pl->depth()) {
+            case BitDepth::U16:
+                bytes += static_cast<std::int64_t>(pl->tiles16().tileCount()) * perTile * 8;
+                break;
+            case BitDepth::F32:
+                bytes += static_cast<std::int64_t>(pl->tilesF().tileCount()) * perTile * 16;
+                break;
+            case BitDepth::U8:
+            default:
+                bytes += static_cast<std::int64_t>(pl->tiles().tileCount()) * perTile * 4;
+                break;
+        }
+    }
+    if (const Mask* m = layer->mask(); m != nullptr) {
+        bytes += static_cast<std::int64_t>(m->buffer().tileCount()) * perTile;  // 1 byte/px
+    }
+    if (const auto* g = dynamic_cast<const GroupLayer*>(layer); g != nullptr) {
+        for (const std::unique_ptr<Layer>& child : g->children()) {
+            bytes += layerResidentBytes(child.get());
+        }
+    }
+    return bytes;
+}
+
+}  // namespace
+
+std::int64_t MergeLayersCommand::retainedBytes() const noexcept {
+    std::int64_t bytes = 0;
+    for (const std::unique_ptr<Layer>& l : removed_) bytes += layerResidentBytes(l.get());
+    return bytes;
+}
+
 DocumentChange MergeLayersCommand::execute(Document& doc) {
     // Re-executed after an undo: the originals are back in the document, so start over rather
     // than reusing the previous run's state.

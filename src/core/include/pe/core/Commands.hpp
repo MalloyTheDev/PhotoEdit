@@ -97,6 +97,11 @@ public:
     // nothing.
     [[nodiscard]] bool merged() const noexcept { return mergedId_ != kNoLayer; }
 
+    // Whole detached layers, held for undo: exactly what Command::retainedBytes exists for.
+    // A merge of a full-canvas stack is hundreds of megabytes, and reporting zero would let
+    // History carry it while believing the stack was empty.
+    [[nodiscard]] std::int64_t retainedBytes() const noexcept override;
+
 private:
     std::vector<std::size_t> indices_;
     std::string name_;

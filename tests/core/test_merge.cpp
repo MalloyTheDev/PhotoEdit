@@ -343,3 +343,23 @@ PE_TEST(merge_executing_again_without_an_undo_starts_over_rather_than_stacking_s
     PE_CHECK(!cmd.merged());
     PE_CHECK_EQ(doc->topLevelCount(), static_cast<std::size_t>(1));
 }
+
+PE_TEST(merge_reports_the_bytes_it_is_holding_to_history) {
+    // It holds whole detached layers for undo. Reporting zero, which is what the base class
+    // does, would let History carry hundreds of megabytes while believing its stacks were
+    // empty, and the byte budget that exists to stop that would never trip.
+    auto doc = stackOf({Rgba8{255, 0, 0, 255}, Rgba8{0, 0, 255, 255}}, Size{512, 512});
+    MergeLayersCommand cmd(mergeDownIndices(*doc, topLevel(*doc, 1)->id()), "Merge Down", "M");
+
+    PE_CHECK_EQ(cmd.retainedBytes(), static_cast<std::int64_t>(0));  // nothing held yet
+    (void)cmd.execute(*doc);
+    PE_REQUIRE(cmd.merged());
+
+    // Two 512x512 8-bit layers is 2 x 4 tiles x 65536 px x 4 B = 2 MiB.
+    const std::int64_t want = 2LL * 4 * 65536 * 4;
+    PE_CHECK_EQ(cmd.retainedBytes(), want);
+
+    // And it lets go on undo, or the budget would count the layers twice over a redo cycle.
+    (void)cmd.undo(*doc);
+    PE_CHECK_EQ(cmd.retainedBytes(), static_cast<std::int64_t>(0));
+}
