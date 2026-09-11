@@ -1,5 +1,6 @@
 #include "pe/core/Filter.hpp"
 #include "pe/core/Mask.hpp"
+#include "pe/core/Resample.hpp"
 
 #include "pe/core/BlendMode.hpp"    // compositeOver (bucket fill)
 #include "pe/core/Document.hpp"     // kMaxCanvasDimension
@@ -973,6 +974,222 @@ std::unique_ptr<PaintCommand> transformLayerContent(Document& doc, LayerId layer
         case BitDepth::U8:
         default:
             return transformContentImpl<Rgba8>(layerId, pl->tiles(), src, region, inv, "Transform");
+    }
+}
+
+// ---- Image Size: a separable-scale resample of one pixel layer ------------------------------
+
+namespace {
+
+// Resample a pixel layer's content sampled over `srcCanvas` onto `dstCanvas`, as a reversible
+// tile-delta command. This is the axis-aligned-scale cousin of transformContentImpl: a scale is
+// separable (unlike the rotation transformContentImpl must handle), so each output pixel is a
+// 1-D horizontal combine of source columns then a 1-D vertical combine of the results, with the
+// Catmull-Rom weights precomputed once per axis (buildResampleAxis) and shared with the
+// contiguous resampleImage this is validated against.
+//
+// The sampling domain is the CANVAS, not the layer's tile-aligned contentBounds: clamp-to-edge
+// therefore replicates the canvas-edge pixel of a canvas-filling image (no transparent rim),
+// while a smaller layer's own edge still fades into the transparency around it (premultiplied).
+// The rewritten region is contentBounds united with dstCanvas, so old content outside the new
+// canvas is cleared rather than left behind at the old scale.
+//
+// Still tile-streamed: the horizontal pass builds an intermediate only for the columns and
+// source-row band the current destination tile needs, so nothing region-sized is allocated.
+template <class Pixel>
+std::unique_ptr<PaintCommand> resampleContentImpl(LayerId layerId, TileStoreT<Pixel>& store,
+                                                  Rect srcCanvas, Rect dstCanvas,
+                                                  std::string name) {
+    const ResampleAxis ax = buildResampleAxis(srcCanvas.width, dstCanvas.width);
+    const ResampleAxis ay = buildResampleAxis(srcCanvas.height, dstCanvas.height);
+    if (ax.empty() || ay.empty()) return nullptr;
+
+    const Rect region = store.contentBounds().united(dstCanvas);
+
+    // Premultiplied, clamp-to-edge source read with a one-entry tile memo. Indices are
+    // canvas-LOCAL (0-based within srcCanvas); clamp-to-edge reads the edge column/row for a tap
+    // past the canvas border. An absent tile inside the canvas still reads transparent.
+    TileCoord memoCoord{INT_MIN, INT_MIN};
+    const TileDataT<Pixel>* memoTile = nullptr;
+    const auto srcPremul = [&](int scLocal, int srLocal) -> Rgbaf {
+        const int sc =
+            scLocal < 0 ? 0 : (scLocal >= srcCanvas.width ? srcCanvas.width - 1 : scLocal);
+        const int sr =
+            srLocal < 0 ? 0 : (srLocal >= srcCanvas.height ? srcCanvas.height - 1 : srLocal);
+        const int docx = srcCanvas.x + sc;
+        const int docy = srcCanvas.y + sr;
+        const TileCoord c{floorDiv(docx, kTileSize), floorDiv(docy, kTileSize)};
+        if (c.col != memoCoord.col || c.row != memoCoord.row) {
+            memoCoord = c;
+            memoTile = store.find(c);
+        }
+        if (memoTile == nullptr) return Rgbaf{};
+        return premultiply(toFloat(memoTile->at(tileLocalOffset(docx), tileLocalOffset(docy))));
+    };
+
+    std::vector<PaintCommand::DeltaT<Pixel>> deltas;
+    Rect dirty{};
+    std::vector<Rgbaf> inter;  // per-tile horizontal-pass buffer, reused across tiles
+    const TileSpan span = tilesForRect(region);
+    for (int trow = span.rowBegin; trow < span.rowEnd; ++trow) {
+        for (int tcol = span.colBegin; tcol < span.colEnd; ++tcol) {
+            const TileCoord coord{tcol, trow};
+            const Rect tb = tileBounds(coord);
+            const Rect vis = tb.intersected(region);
+            if (vis.isEmpty()) continue;
+
+            std::shared_ptr<TileDataT<Pixel>> before = store.sharedTile(coord);
+            auto after = std::make_shared<TileDataT<Pixel>>();
+            if (before) *after = *before;
+            bool changed = false;
+
+            // Pixels of this tile outside the new canvas clear to transparent: the vacated
+            // source, and any old content beyond the resized canvas.
+            const Rect visInDst = vis.intersected(dstCanvas);
+            for (int y = vis.top(); y < vis.bottom(); ++y) {
+                const std::size_t rowBase =
+                    static_cast<std::size_t>(y - tb.top()) * static_cast<std::size_t>(kTileSize);
+                const bool rowInDst =
+                    visInDst.height > 0 && y >= visInDst.top() && y < visInDst.bottom();
+                for (int x = vis.left(); x < vis.right(); ++x) {
+                    const bool inDst = rowInDst && x >= visInDst.left() && x < visInDst.right();
+                    if (inDst) continue;  // written by the resample pass below
+                    const std::size_t li = rowBase + static_cast<std::size_t>(x - tb.left());
+                    if (!pixelEqual(after->px[li], Pixel{})) {
+                        after->px[li] = Pixel{};
+                        changed = true;
+                    }
+                }
+            }
+
+            if (!visInDst.isEmpty()) {
+                const int ox0 = visInDst.left() - dstCanvas.x;
+                const int ox1 = visInDst.right() - dstCanvas.x;
+                const int oy0 = visInDst.top() - dstCanvas.y;
+                const int oy1 = visInDst.bottom() - dstCanvas.y;
+                const int cols = ox1 - ox0;
+
+                int syLo = INT_MAX;
+                int syHi = INT_MIN;
+                for (int oy = oy0; oy < oy1; ++oy) {
+                    const int f = ay.first[static_cast<std::size_t>(oy)];
+                    if (f < syLo) syLo = f;
+                    if (f + ay.support - 1 > syHi) syHi = f + ay.support - 1;
+                }
+                const int bandRows = syHi - syLo + 1;
+
+                inter.assign(static_cast<std::size_t>(cols) * static_cast<std::size_t>(bandRows),
+                             Rgbaf{0.0f, 0.0f, 0.0f, 0.0f});
+                for (int sr = syLo; sr <= syHi; ++sr) {
+                    const std::size_t interRow =
+                        static_cast<std::size_t>(sr - syLo) * static_cast<std::size_t>(cols);
+                    for (int ox = ox0; ox < ox1; ++ox) {
+                        const int first = ax.first[static_cast<std::size_t>(ox)];
+                        const std::size_t wb =
+                            static_cast<std::size_t>(ox) * static_cast<std::size_t>(ax.support);
+                        Rgbaf acc{0.0f, 0.0f, 0.0f, 0.0f};
+                        for (int t = 0; t < ax.support; ++t) {
+                            const float w = ax.weights[wb + static_cast<std::size_t>(t)];
+                            if (w == 0.0f) continue;
+                            const Rgbaf pp = srcPremul(first + t, sr);
+                            acc.r += pp.r * w;
+                            acc.g += pp.g * w;
+                            acc.b += pp.b * w;
+                            acc.a += pp.a * w;
+                        }
+                        inter[interRow + static_cast<std::size_t>(ox - ox0)] = acc;
+                    }
+                }
+
+                for (int oy = oy0; oy < oy1; ++oy) {
+                    const int first = ay.first[static_cast<std::size_t>(oy)];
+                    const std::size_t wb =
+                        static_cast<std::size_t>(oy) * static_cast<std::size_t>(ay.support);
+                    const int docy = dstCanvas.y + oy;
+                    const std::size_t rowBase = static_cast<std::size_t>(docy - tb.top()) *
+                                                static_cast<std::size_t>(kTileSize);
+                    for (int ox = ox0; ox < ox1; ++ox) {
+                        Rgbaf acc{0.0f, 0.0f, 0.0f, 0.0f};
+                        for (int t = 0; t < ay.support; ++t) {
+                            const float w = ay.weights[wb + static_cast<std::size_t>(t)];
+                            if (w == 0.0f) continue;
+                            const Rgbaf& pp = inter[static_cast<std::size_t>(first + t - syLo) *
+                                                        static_cast<std::size_t>(cols) +
+                                                    static_cast<std::size_t>(ox - ox0)];
+                            acc.r += pp.r * w;
+                            acc.g += pp.g * w;
+                            acc.b += pp.b * w;
+                            acc.a += pp.a * w;
+                        }
+                        Rgbaf straight;
+                        if (acc.a <= 0.0f) {
+                            straight = Rgbaf{0.0f, 0.0f, 0.0f, 0.0f};
+                        } else {
+                            const float inv = 1.0f / acc.a;
+                            const float oa = acc.a > 1.0f ? 1.0f : acc.a;
+                            straight = Rgbaf{acc.r * inv, acc.g * inv, acc.b * inv, oa};
+                        }
+                        const Pixel np = fromFloat<Pixel>(straight);
+                        const std::size_t li =
+                            rowBase + static_cast<std::size_t>(dstCanvas.x + ox - tb.left());
+                        if (!pixelEqual(np, after->px[li])) {
+                            after->px[li] = np;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            if (changed) {
+                bool empty = true;
+                for (const Pixel& px : after->px) {
+                    if (!pixelEqual(px, Pixel{})) {
+                        empty = false;
+                        break;
+                    }
+                }
+                deltas.push_back(PaintCommand::DeltaT<Pixel>{coord, std::move(before),
+                                                             empty ? nullptr : std::move(after)});
+                dirty = dirty.united(vis);
+            }
+        }
+    }
+    if (deltas.empty()) return nullptr;
+    return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), std::move(name));
+}
+
+}  // namespace
+
+std::unique_ptr<PaintCommand> resampleLayerContent(Document& doc, LayerId layerId, Rect srcCanvas,
+                                                   Rect dstCanvas) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    if (srcCanvas.isEmpty() || dstCanvas.isEmpty()) return nullptr;
+
+    auto* pl = static_cast<PixelLayer*>(layer);
+    if (pl->contentBounds().isEmpty()) return nullptr;  // nothing to resample
+
+    const Rect region = pl->contentBounds().united(dstCanvas);
+    if (!withinCoordinateRange(region)) return nullptr;
+
+    // Bounded in bytes by the tiles it touches, like a Move and unlike a filter: it builds one
+    // destination tile at a time, so kMaxFilterPixels never applies and a photograph does not
+    // silently decline (#180).
+    const std::int64_t bytes =
+        tileCountOf(region) * static_cast<std::int64_t>(kTilePixels) * bytesPerPixelOf(pl->depth());
+    if (bytes > kMaxMoveBytes) return nullptr;
+
+    switch (pl->depth()) {
+        case BitDepth::U16:
+            return resampleContentImpl<Rgba16>(layerId, pl->tiles16(), srcCanvas, dstCanvas,
+                                               "Image Size");
+        case BitDepth::F32:
+            return resampleContentImpl<Rgbaf>(layerId, pl->tilesF(), srcCanvas, dstCanvas,
+                                              "Image Size");
+        case BitDepth::U8:
+        default:
+            return resampleContentImpl<Rgba8>(layerId, pl->tiles(), srcCanvas, dstCanvas,
+                                              "Image Size");
     }
 }
 

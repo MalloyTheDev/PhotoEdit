@@ -140,6 +140,14 @@ inline constexpr std::int64_t kMaxMoveBytes = 1LL << 30;
                                                                   const Affine2D& srcToDst,
                                                                   Rect regionOfInterest = Rect{});
 
+// Resample a pixel layer's content, sampled over srcCanvas onto dstCanvas, as a reversible
+// tile-delta command -- the per-layer engine behind Image Size. Separable Catmull-Rom (the same
+// kernel as resampleImage), tile-streamed so it allocates nothing region-sized and is bounded in
+// bytes by the tiles it touches rather than by kMaxFilterPixels. nullptr for a non-pixel/empty
+// layer, a non-positive/non-finite scale, or a destination beyond the engine's size caps.
+[[nodiscard]] std::unique_ptr<PaintCommand> resampleLayerContent(Document& doc, LayerId layerId,
+                                                                 Rect srcCanvas, Rect dstCanvas);
+
 // Paint Bucket: flood-fill the contiguous (4-connected) region of layer `layerId` reachable
 // from the seed whose color is within `tolerance` (max per-channel, 0..255) of the seed's,
 // compositing `fillColor` (straight alpha, Normal) over each. Bounded by the canvas; honors the
