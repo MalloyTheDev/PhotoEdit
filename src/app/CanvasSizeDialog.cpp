@@ -1,6 +1,6 @@
 #include "CanvasSizeDialog.hpp"
 
-#include "pe/core/Document.hpp"  // kMaxCanvasDimension
+#include "DimensionSpin.hpp"
 
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -44,16 +44,10 @@ CanvasSizeDialog::CanvasSizeDialog(QWidget* parent, pe::Size current)
     root->addWidget(currentLabel);
 
     auto* form = new QFormLayout();
-    width_ = new QSpinBox(this);
+    width_ = makeDimensionSpinBox(this, current.width);
     width_->setObjectName(QStringLiteral("CanvasWidth"));
-    width_->setRange(1, pe::kMaxCanvasDimension);
-    width_->setValue(current.width);
-    width_->setSuffix(QStringLiteral(" px"));
-    height_ = new QSpinBox(this);
+    height_ = makeDimensionSpinBox(this, current.height);
     height_->setObjectName(QStringLiteral("CanvasHeight"));
-    height_->setRange(1, pe::kMaxCanvasDimension);
-    height_->setValue(current.height);
-    height_->setSuffix(QStringLiteral(" px"));
     form->addRow(QStringLiteral("Width"), width_);
     form->addRow(QStringLiteral("Height"), height_);
     root->addLayout(form);

@@ -147,6 +147,17 @@ private:
 
     void newDocument();
     void openDocument();
+
+public:
+    // Build and install a blank document of the given shape, as File > New does once its dialog
+    // is accepted. Split out because the dialog's exec() is the untestable boundary (the same
+    // split askAboutUnsavedChanges draws around its modal): this, the part that decides what the
+    // document IS, is a plain call a test can make without a window blocking on it. Returns false
+    // only for a size createBlank refuses, which the spin boxes cannot actually produce.
+    [[nodiscard]] bool createNewDocument(pe::Size size, pe::BitDepth depth, int ppi,
+                                         bool whiteBackground);
+
+private:
     bool saveDocumentAs();    // always prompts
     void exportDocumentAs();  // flatten + encode to a raster format with per-format options
     void onAddText(const QPointF& docPos);  // Type tool: prompt + rasterize + stamp text

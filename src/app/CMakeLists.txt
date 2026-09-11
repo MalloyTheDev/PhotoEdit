@@ -25,6 +25,9 @@ qt_add_library(pe_app STATIC
     CurveEditorWidget.hpp
     CanvasSizeDialog.cpp
     CanvasSizeDialog.hpp
+    DimensionSpin.hpp
+    NewDocumentDialog.cpp
+    NewDocumentDialog.hpp
     CurvesDialog.cpp
     CurvesDialog.hpp
     EffectDialog.cpp

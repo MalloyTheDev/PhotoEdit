@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **750 engine cases + 224 shell cases, 0 failed**. The engine tests
+Test suite: **750 engine cases + 232 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -52,8 +52,11 @@ The engine is no longer headless-only; the Qt6 app provides a real
   `exportDocument` dispatching to every codec (each guarded so a missing codec
   degrades gracefully), and `loadDocument`/`saveDocument` path helpers with a 512 MB
   read cap on untrusted files.
-- **`MainWindow`** — File ▸ New (blank 800×600), Open…, Save, Save As… wired to
-  `DocumentIO`; window title and canvas track the active document.
+- **`MainWindow`** — File ▸ New (a dialog: size, resolution, 8/16/32-bit depth, white or
+  transparent background, with presets), Open…, Save, Save As… wired to `DocumentIO`; window
+  title and canvas track the active document. New used to hard-code 800×600, which made Canvas
+  Size the only route to any other shape; the document-building half is `createNewDocument`, a
+  plain call the tests drive, with only the dialog's `exec()` left as the untestable boundary.
 - **Canvas Size** (Image ▸ Canvas Size…, Ctrl+Alt+C) and **Crop to Selection**. The Image menu
   held one submenu and nothing else, so neither operation that changes the document's shape had
   a menu route. Canvas Size changes the canvas rectangle without resampling: content keeps every

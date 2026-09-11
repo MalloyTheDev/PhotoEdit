@@ -9,6 +9,9 @@
 // bottom of the file.
 
 #include "MainWindow.hpp"
+
+#include "pe/core/Geometry.hpp"
+#include "pe/core/PixelFormat.hpp"
 #include "pe_test.hpp"
 
 #include <QAction>
@@ -126,8 +129,8 @@ PE_TEST(mainwindow_title_marks_unsaved_changes) {
     PE_CHECK(!w.windowTitle().startsWith(QLatin1Char('*')));
     PE_CHECK(w.windowTitle().contains(QStringLiteral("no document")));
 
-    QMenu* file = topLevelMenu(w, QStringLiteral("File"));
-    PE_CHECK(triggerAction(file, QStringLiteral("New")));
+    PE_CHECK(w.createNewDocument(pe::Size{800, 600}, pe::BitDepth::U8, 72,
+                                 /*whiteBackground=*/false));
     // A freshly created document has nothing unsaved yet.
     PE_CHECK(!w.windowTitle().startsWith(QLatin1Char('*')));
 
@@ -146,8 +149,8 @@ PE_TEST(mainwindow_closes_without_prompting_when_there_is_nothing_to_lose) {
     PE_CHECK(empty.close());
 
     pe::app::MainWindow fresh;
-    QMenu* file = topLevelMenu(fresh, QStringLiteral("File"));
-    PE_CHECK(triggerAction(file, QStringLiteral("New")));
+    PE_CHECK(fresh.createNewDocument(pe::Size{800, 600}, pe::BitDepth::U8, 72,
+                                     /*whiteBackground=*/false));
     PE_CHECK(fresh.close());
 }
 

@@ -16,6 +16,7 @@
 #include "HistoryPanel.hpp"
 #include "IconUtil.hpp"
 #include "LayersPanel.hpp"
+#include "NewDocumentDialog.hpp"
 #include "PropertiesPanel.hpp"
 #include "SwatchesPanel.hpp"
 #include "TextDialog.hpp"
@@ -30,7 +31,8 @@
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Filter.hpp"
 #include "pe/core/ImageIO.hpp"
-#include "pe/core/TextLayer.hpp"  // pe::TextLayer / TextModel / EditTextCommand
+#include "pe/core/PixelLayer.hpp"  // fill the base layer for a White new document
+#include "pe/core/TextLayer.hpp"   // pe::TextLayer / TextModel / EditTextCommand
 #include "pe/core/Version.hpp"
 
 #include <QAction>
@@ -1381,8 +1383,52 @@ void MainWindow::chooseBackgroundColor() {
 
 void MainWindow::newDocument() {
     if (!confirmDiscard()) return;
-    setDocument(pe::Document::createBlank(pe::Size{800, 600}), QString());
-    statusBar()->showMessage(QStringLiteral("New 800x600 document"), 3000);
+    // File > New used to make an 800x600 document unconditionally, so this was the only shape a
+    // document could ever have unless it was opened from a file: Canvas Size was the only way to
+    // any other size, which is backwards. The dialog asks; 800x600 is now its default rather
+    // than its only answer.
+    NewDocumentDialog dlg(this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    (void)createNewDocument(dlg.size(), dlg.depth(), dlg.resolutionPpi(),
+                            dlg.background() == NewDocumentDialog::Background::White);
+}
+
+bool MainWindow::createNewDocument(pe::Size size, pe::BitDepth depth, int ppi,
+                                   bool whiteBackground) {
+    auto doc = pe::Document::createBlank(size, pe::ColorMode::RGB, depth, ppi);
+    if (doc == nullptr) {
+        // The spin boxes cap each side at kMaxCanvasDimension, so createBlank can only refuse a
+        // degenerate size the UI cannot actually produce. Saying so beats a silent nothing.
+        reportRefusal(pe::refuse("file.new", pe::RefusalCode::OverSizeBudget, "File > New",
+                                 "That size cannot be created."));
+        return false;
+    }
+
+    if (whiteBackground) {
+        // The engine's blank is a transparent base layer with no tiles; White fills it. At the
+        // layer's own depth, because filling a 16- or 32-bit layer with 8-bit white would band
+        // the moment anything is painted over it.
+        auto* pl = static_cast<pe::PixelLayer*>(doc->findLayer(doc->activeLayer()));
+        const pe::Rect r = doc->canvasBounds();
+        switch (depth) {
+            case pe::BitDepth::U16:
+                pl->tiles16().fillRect(r, pe::Rgba16{65535, 65535, 65535, 65535});
+                break;
+            case pe::BitDepth::F32:
+                pl->tilesF().fillRect(r, pe::Rgbaf{1.0f, 1.0f, 1.0f, 1.0f});
+                break;
+            case pe::BitDepth::U8:
+            default:
+                pl->tiles().fillRect(r, pe::Rgba8{255, 255, 255, 255});
+                break;
+        }
+    }
+
+    setDocument(std::move(doc), QString());
+    statusBar()->showMessage(
+        QStringLiteral("New %1 x %2 document").arg(size.width).arg(size.height), 3000);
+    return true;
 }
 
 void MainWindow::openDocument() {

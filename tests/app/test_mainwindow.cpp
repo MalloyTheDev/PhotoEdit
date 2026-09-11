@@ -15,6 +15,7 @@
 #include "pe/core/Adjustment.hpp"
 #include "pe/core/AdjustmentLayer.hpp"
 #include "pe/core/Commands.hpp"
+#include "pe/core/PixelFormat.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Refusal.hpp"
 #include "pe/core/Selection.hpp"
@@ -248,23 +249,7 @@ PE_TEST(mainwindow_help_menu_offers_about) {
 // regardless of the document's actual colour mode and depth.
 // ---------------------------------------------------------------------------
 
-namespace {
-
-// Drives a File menu entry by visible text; false if it is not there, so a rename
-// fails the test rather than silently skipping the setup.
-bool triggerFileAction(pe::app::MainWindow& w, const QString& label) {
-    QMenu* file = topLevelMenu(w, QStringLiteral("File"));
-    if (file == nullptr) return false;
-    for (QAction* a : file->actions()) {
-        if (plain(a->text()).compare(label, Qt::CaseInsensitive) == 0) {
-            a->trigger();
-            return true;
-        }
-    }
-    return false;
-}
-
-}  // namespace
+namespace {}  // namespace
 
 PE_TEST(mainwindow_zoom_strip_controls_exist_and_are_named) {
     pe::app::MainWindow w;
@@ -284,7 +269,8 @@ PE_TEST(mainwindow_zoom_strip_controls_exist_and_are_named) {
 PE_TEST(mainwindow_zoom_buttons_actually_change_the_zoom) {
     // The point of the change: the readout is now a control, not a display.
     pe::app::MainWindow w;
-    PE_CHECK(triggerFileAction(w, QStringLiteral("New")));
+    PE_CHECK(
+        w.createNewDocument(pe::Size{800, 600}, pe::BitDepth::U8, 72, /*whiteBackground=*/false));
 
     QToolButton* in = w.findChild<QToolButton*>(QStringLiteral("ZoomIn"));
     QToolButton* out = w.findChild<QToolButton*>(QStringLiteral("ZoomOut"));
@@ -322,7 +308,8 @@ PE_TEST(mainwindow_document_strip_reports_real_size_mode_and_depth) {
     if (tab == nullptr) return;
     PE_CHECK(tab->text().contains(QStringLiteral("No document")));
 
-    PE_CHECK(triggerFileAction(w, QStringLiteral("New")));
+    PE_CHECK(
+        w.createNewDocument(pe::Size{800, 600}, pe::BitDepth::U8, 72, /*whiteBackground=*/false));
 
     // New creates 800x600 RGB 8-bit. The dimensions can only come from the document,
     // so they are what proves the strip is derived rather than hard-coded.
@@ -434,7 +421,8 @@ PE_TEST(mainwindow_document_menus_are_disabled_until_there_is_a_document) {
         PE_CHECK(m != nullptr && m->isEnabled());
     }
 
-    PE_CHECK(triggerFileAction(w, QStringLiteral("New")));
+    PE_CHECK(
+        w.createNewDocument(pe::Size{800, 600}, pe::BitDepth::U8, 72, /*whiteBackground=*/false));
     for (const QString& name : gated) {
         QMenu* m = topLevelMenu(w, name);
         PE_CHECK(m != nullptr && m->isEnabled());
@@ -468,7 +456,8 @@ PE_TEST(mainwindow_save_and_export_are_disabled_until_there_is_a_document) {
         PE_CHECK(a != nullptr && a->isEnabled());
     }
 
-    PE_CHECK(triggerFileAction(w, QStringLiteral("New")));
+    PE_CHECK(
+        w.createNewDocument(pe::Size{800, 600}, pe::BitDepth::U8, 72, /*whiteBackground=*/false));
     for (const QString& label : gated) {
         QAction* a = actionNamed(label);
         PE_CHECK(a != nullptr && a->isEnabled());
@@ -493,7 +482,8 @@ PE_TEST(mainwindow_undo_and_redo_track_the_history) {
     PE_CHECK(!undo->isEnabled());  // nothing open, nothing to undo
     PE_CHECK(!redo->isEnabled());
 
-    PE_CHECK(triggerFileAction(w, QStringLiteral("New")));
+    PE_CHECK(
+        w.createNewDocument(pe::Size{800, 600}, pe::BitDepth::U8, 72, /*whiteBackground=*/false));
     PE_CHECK(!undo->isEnabled());  // a fresh document has an empty history
 
     QMenu* select = topLevelMenu(w, QStringLiteral("Select"));
