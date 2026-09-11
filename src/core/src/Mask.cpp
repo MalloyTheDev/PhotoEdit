@@ -1,10 +1,14 @@
 #include "pe/core/Mask.hpp"
 
+#include "pe/core/Resample.hpp"
+
 #include "pe/core/Document.hpp"  // kMaxCanvasDimension
 
 #include "pe/core/Selection.hpp"
 
 #include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace pe {
 
@@ -178,6 +182,41 @@ Mask maskFromSelection(const Selection& selection, Rect canvas) {
         }
     }
     return mask;
+}
+
+MaskBuffer resampleMask(const MaskBuffer& src, Rect srcCanvas, Rect dstCanvas) {
+    MaskBuffer out;
+    if (srcCanvas.isEmpty() || dstCanvas.isEmpty()) return out;
+
+    // Materialise the mask's coverage over the SOURCE CANVAS. Absent samples read kOpaque, so a
+    // region the mask does not cover resamples as revealing, and clamp-to-edge (in
+    // resampleCoverage) replicates the canvas edge rather than the tile-aligned content edge --
+    // the same domain the pixel resampler uses, so mask and pixels scale together.
+    const std::size_t n =
+        static_cast<std::size_t>(srcCanvas.width) * static_cast<std::size_t>(srcCanvas.height);
+    std::vector<std::uint8_t> cov(n);
+    for (int y = 0; y < srcCanvas.height; ++y) {
+        const std::size_t row =
+            static_cast<std::size_t>(y) * static_cast<std::size_t>(srcCanvas.width);
+        for (int x = 0; x < srcCanvas.width; ++x) {
+            cov[row + static_cast<std::size_t>(x)] = src.value(srcCanvas.x + x, srcCanvas.y + y);
+        }
+    }
+    const std::vector<std::uint8_t> scaled =
+        resampleCoverage(cov, srcCanvas.width, srcCanvas.height, dstCanvas.width, dstCanvas.height);
+    if (scaled.empty()) return out;
+
+    // Write the result at the destination origin, skipping kOpaque so the buffer stays canonical
+    // (an all-revealing tile is identical to an absent one).
+    for (int y = 0; y < dstCanvas.height; ++y) {
+        const std::size_t row =
+            static_cast<std::size_t>(y) * static_cast<std::size_t>(dstCanvas.width);
+        for (int x = 0; x < dstCanvas.width; ++x) {
+            const std::uint8_t v = scaled[row + static_cast<std::size_t>(x)];
+            if (v != MaskBuffer::kOpaque) out.setValue(dstCanvas.x + x, dstCanvas.y + y, v);
+        }
+    }
+    return out;
 }
 
 }  // namespace pe

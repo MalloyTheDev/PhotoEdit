@@ -42,6 +42,7 @@ add_executable(pe_core_tests
     core/test_gradient.cpp
     core/test_resample.cpp
     core/test_resamplelayer.cpp
+    core/test_resamplemask.cpp
     core/test_clipboard.cpp
     core/test_merge.cpp
     core/test_autotone.cpp

@@ -201,4 +201,13 @@ private:
 [[nodiscard]] Selection magicWandSelection(const PixelBuffer& image, int seedX, int seedY,
                                            int tolerance);
 
+// Resample a selection from `srcCanvas` onto `dstCanvas` (the scaled canvas), for Image Size:
+// the selection scales with the image around it. Modelled on the crop's translatedSelection --
+// tightBounds -> toMask -> resample the coverage -> loadMask at the scaled origin -- with the
+// same two guards, because both failure modes silently DEACTIVATE the selection (turning "this
+// area" into "everything"): an over-cap toMask returns empty, and loadMask of an empty buffer
+// deselects. An inactive or empty selection, or a downscale that rounds the coverage away to
+// nothing, is returned unchanged rather than loaded.
+[[nodiscard]] Selection resampledSelection(const Selection& sel, Rect srcCanvas, Rect dstCanvas);
+
 }  // namespace pe

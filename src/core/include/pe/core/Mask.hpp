@@ -161,6 +161,14 @@ private:
 // (fully revealing). Bounded to `canvas`.
 [[nodiscard]] Mask maskFromSelection(const Selection& selection, Rect canvas);
 
+// Resample a mask's coverage from `srcCanvas` onto `dstCanvas` (the scaled canvas), for Image
+// Size, returning a new buffer. Single-channel and clamp-to-edge to the canvas, matching the
+// pixel resampler so a layer's mask stays aligned with its pixels; absent samples read kOpaque
+// (255), never 0, so the parts a mask does not cover stay revealing. A free function, not a
+// method, because it needs the Catmull-Rom kernel that lives outside Mask, and because a
+// resample is lossy: the caller keeps the original for undo rather than inverting this.
+[[nodiscard]] MaskBuffer resampleMask(const MaskBuffer& src, Rect srcCanvas, Rect dstCanvas);
+
 // Whether a full-coverage mask over `canvas` can be materialized (within the mask buffer's tile/
 // pixel caps). fillRect / maskFromSelection silently no-op past that bound, so callers that need a
 // materialized mask (hide-all, mask-from-an-active-selection) check this first to avoid attaching a

@@ -1,5 +1,7 @@
 #include "pe/core/Selection.hpp"
 
+#include "pe/core/Resample.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -697,6 +699,53 @@ Selection magicWandSelection(const PixelBuffer& image, int seedX, int seedY, int
     }
     if (any) sel.loadMask(mask, 0, 0);  // 4-connected region as the new selection
     return sel;
+}
+
+Selection resampledSelection(const Selection& sel, Rect srcCanvas, Rect dstCanvas) {
+    if (!sel.active() || srcCanvas.isEmpty() || dstCanvas.isEmpty()) return sel;
+    const Rect bounds = sel.tightBounds();
+    if (bounds.isEmpty()) return sel;  // active but no coverage
+
+    const PixelBuffer mask = sel.toMask(bounds);
+    // Over-cap: a sparse selection can have a huge bbox but tiny coverage, and toMask returns
+    // empty rather than materialise it. Loading an empty mask would deactivate the selection, so
+    // keep it as-is (same guard the crop's translatedSelection uses).
+    if (mask.isEmpty()) return sel;
+
+    // Scale about the document origin, by the canvas ratio, so the selection tracks the pixels.
+    const double sx = static_cast<double>(dstCanvas.width) / static_cast<double>(srcCanvas.width);
+    const double sy = static_cast<double>(dstCanvas.height) / static_cast<double>(srcCanvas.height);
+    const int newX = static_cast<int>(std::lround(static_cast<double>(bounds.left()) * sx));
+    const int newY = static_cast<int>(std::lround(static_cast<double>(bounds.top()) * sy));
+    const int newW = static_cast<int>(std::lround(static_cast<double>(bounds.width) * sx));
+    const int newH = static_cast<int>(std::lround(static_cast<double>(bounds.height) * sy));
+    if (newW <= 0 || newH <= 0) return sel;  // rounded away to nothing: do not deactivate
+
+    // Resample the coverage (the mask's red channel) and rebuild a coverage PixelBuffer.
+    std::vector<std::uint8_t> cov(static_cast<std::size_t>(mask.width()) *
+                                  static_cast<std::size_t>(mask.height()));
+    for (int y = 0; y < mask.height(); ++y) {
+        for (int x = 0; x < mask.width(); ++x) {
+            cov[static_cast<std::size_t>(y) * static_cast<std::size_t>(mask.width()) +
+                static_cast<std::size_t>(x)] = mask.at(x, y).r;
+        }
+    }
+    const std::vector<std::uint8_t> scaled =
+        resampleCoverage(cov, mask.width(), mask.height(), newW, newH);
+    if (scaled.empty()) return sel;
+
+    PixelBuffer scaledMask(newW, newH);
+    for (int y = 0; y < newH; ++y) {
+        for (int x = 0; x < newW; ++x) {
+            const std::uint8_t v =
+                scaled[static_cast<std::size_t>(y) * static_cast<std::size_t>(newW) +
+                       static_cast<std::size_t>(x)];
+            scaledMask.set(x, y, Rgba8{v, v, v, 255});
+        }
+    }
+    Selection out;
+    out.loadMask(scaledMask, newX, newY);
+    return out;
 }
 
 }  // namespace pe
