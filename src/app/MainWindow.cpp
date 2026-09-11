@@ -15,6 +15,7 @@
 #include "GroupedSlidersDialog.hpp"
 #include "HistoryPanel.hpp"
 #include "IconUtil.hpp"
+#include "ImageSizeDialog.hpp"
 #include "LayersPanel.hpp"
 #include "NewDocumentDialog.hpp"
 #include "PropertiesPanel.hpp"
@@ -275,6 +276,9 @@ void MainWindow::buildMenuBar() {
     // The Image menu held exactly one submenu (Adjustments) and nothing else, so the two
     // operations that change the document's shape had no menu route at all: Canvas Size did not
     // exist, and Crop existed only as a drag with the Crop tool.
+    imageMenu->addAction(QStringLiteral("&Image Size..."),
+                         QKeySequence(QStringLiteral("Ctrl+Alt+I")), this,
+                         &MainWindow::changeImageSize);
     imageMenu->addAction(QStringLiteral("&Canvas Size..."),
                          QKeySequence(QStringLiteral("Ctrl+Alt+C")), this,
                          &MainWindow::changeCanvasSize);
@@ -1857,6 +1861,47 @@ void MainWindow::pasteFromClipboard(bool into) {
     doc_->history().push(
         std::make_unique<pe::AddLayerCommand>(std::move(layer), doc_->topLevelCount()));
     doc_->setActiveLayer(id);
+}
+
+void MainWindow::changeImageSize() {
+    const char* const action = "Image > Image Size...";
+    if (refuseIf(doc_ == nullptr, "image.size", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return;
+    }
+    ImageSizeDialog dlg(this, doc_->canvasSize());
+    if (dlg.exec() != QDialog::Accepted) return;
+    (void)applyImageSize(dlg.size());
+}
+
+bool MainWindow::applyImageSize(pe::Size want) {
+    const char* const action = "Image > Image Size...";
+    if (refuseIf(doc_ == nullptr, "image.size", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return false;
+    }
+    // Asked before the push, so a resize that cannot run never becomes a history entry the user
+    // has to undo to be rid of. The message names the way out of each refusal.
+    switch (pe::imageResizeBlocker(*doc_, want)) {
+        case pe::ImageResizeBlock::Unchanged:
+            (void)refuseIf(true, "image.size", pe::RefusalCode::NoEffect, action,
+                           QStringLiteral("That is the size it already is."));
+            return false;
+        case pe::ImageResizeBlock::DimensionOutOfRange:
+            (void)refuseIf(true, "image.size", pe::RefusalCode::OverSizeBudget, action,
+                           QStringLiteral("Each side has to be between 1 and %1 pixels.")
+                               .arg(pe::kMaxCanvasDimension));
+            return false;
+        case pe::ImageResizeBlock::ContentTooLarge:
+            (void)refuseIf(true, "image.size", pe::RefusalCode::OverSizeBudget, action,
+                           QStringLiteral("This document has too much content to resample in one "
+                                          "step. Resize a smaller amount, or flatten first."));
+            return false;
+        case pe::ImageResizeBlock::None:
+            break;
+    }
+    doc_->history().push(std::make_unique<pe::ResampleDocumentCommand>(want));
+    return true;
 }
 
 void MainWindow::changeCanvasSize() {

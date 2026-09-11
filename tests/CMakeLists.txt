@@ -106,6 +106,7 @@ if(PHOTOEDIT_BUILD_APP)
         app/test_clipboard.cpp
         app/test_mergeui.cpp
         app/test_canvassizeui.cpp
+        app/test_imagesizeui.cpp
         app/test_newdocument.cpp
         app/test_busytask.cpp
     )

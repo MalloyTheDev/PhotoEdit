@@ -157,6 +157,13 @@ public:
     [[nodiscard]] bool createNewDocument(pe::Size size, pe::BitDepth depth, int ppi,
                                          bool whiteBackground);
 
+    // Resample the whole document to `want` as one undo step, or refuse out loud when it cannot
+    // run (no document, unchanged, a side out of range, or too much content to resample in one
+    // step). Split out from the dialog exactly like createNewDocument: this is the decidable half
+    // the tests drive, and changeImageSize adds only the modal dialog around it. Returns true if
+    // it resampled.
+    bool applyImageSize(pe::Size want);
+
 private:
     bool saveDocumentAs();    // always prompts
     void exportDocumentAs();  // flatten + encode to a raster format with per-format options
@@ -176,6 +183,10 @@ private:
     enum class MergeMode { Down, Visible, Flatten };
     void mergeLayers(MergeMode mode);
 
+    // Image > Image Size: prompt for the new dimensions, then resample the whole document. Unlike
+    // Canvas Size this scales every pixel; see pe::ResampleDocumentCommand. The modal dialog is the
+    // only untestable part; applyImageSize is the rest.
+    void changeImageSize();
     // Image > Canvas Size: prompt for the new dimensions and anchor, then reframe. Nothing is
     // resampled; see pe::ResizeCanvasCommand.
     void changeCanvasSize();
