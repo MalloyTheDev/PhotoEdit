@@ -765,18 +765,20 @@ DocumentChange SetSelectionCommand::undo(Document& doc) {
     return DocumentChange{DocumentChange::Kind::Selection, Rect{}, kNoLayer};
 }
 
-// ----------------------------------------------------------------- Crop
+// ------------------------------------------------------------- Reframe
 
-CropCommand::CropCommand(Rect cropRect) : crop_(cropRect) {}
-CropCommand::~CropCommand() = default;
+ReframeCommand::~ReframeCommand() = default;
 
-void CropCommand::shiftGeometry(Document& doc, int dx, int dy) {
+void ReframeCommand::shiftGeometry(Document& doc, int dx, int dy) {
+    // Shift every non-pixel document-space placement. Pixel content is handled by moves_; these
+    // are the geometries a reframe would otherwise leave behind, making masks, glyphs and fills
+    // line up with the wrong pixels. Exactly invertible, so undo passes the opposite delta.
     if (dx == 0 && dy == 0) return;
     for (LayerId id : maskLayers_) {
         Layer* l = doc.findLayer(id);
         if (l == nullptr || l->mask() == nullptr) continue;
-        // Already proven shiftable during capture, and translate is exactly
-        // invertible, so the undo direction cannot fail either.
+        // Already proven shiftable during capture, and translate is exactly invertible, so the
+        // undo direction cannot fail either.
         (void)l->mask()->buffer().translate(dx, dy, kMaxCropGeometryPixels);
     }
     for (LayerId id : textLayers_) {
@@ -795,29 +797,34 @@ void CropCommand::shiftGeometry(Document& doc, int dx, int dy) {
     }
 }
 
-DocumentChange CropCommand::execute(Document& doc) {
+DocumentChange ReframeCommand::execute(Document& doc) {
     if (!captured_) {
         captured_ = true;
         oldSize_ = doc.canvasSize();
         oldSel_ = doc.selection();  // snapshot for undo (once); shifted on every execute below
-        const Rect eff = crop_.intersected(doc.canvasBounds());  // clamp to the canvas once
-        if (eff.isEmpty()) {
-            crop_ = Rect{};  // degenerate crop: the command is a no-op
+
+        Size planned{};
+        int pdx = 0;
+        int pdy = 0;
+        if (!plan(doc, planned, pdx, pdy)) {
+            noop_ = true;
         } else {
-            crop_ = eff;
-            const bool needShift = eff.x != 0 || eff.y != 0;
+            newSize_ = planned;
+            dx_ = pdx;
+            dy_ = pdy;
+            const bool needShift = dx_ != 0 || dy_ != 0;
             std::vector<LayerId> pixelLayers;
             collectPixelLayers(doc.topLevelLayers(), pixelLayers);  // incl. nested-in-group
             // Build (but don't yet apply) a content shift for every pixel layer, so each move
             // snapshots the ORIGINAL pixels. A zero shift / empty layer yields null.
             bool shiftable = true;
             for (LayerId id : pixelLayers) {
-                if (auto m = moveLayerContent(doc, id, -eff.x, -eff.y)) {
+                if (auto m = moveLayerContent(doc, id, dx_, dy_)) {
                     moves_.push_back(std::move(m));
                 } else if (needShift) {
                     // A null with a real shift means either an empty layer (fine to skip) or a
                     // layer whose content exceeds the move budget. The latter would leave the
-                    // doc half-cropped (resized but content not moved), so refuse the crop.
+                    // doc half-reframed (resized but content not moved), so refuse outright.
                     const Layer* l = doc.findLayer(id);
                     if (l != nullptr &&
                         !static_cast<const PixelLayer*>(l)->contentBounds().isEmpty()) {
@@ -826,9 +833,9 @@ DocumentChange CropCommand::execute(Document& doc) {
                     }
                 }
             }
-            // Non-pixel document-space geometry: masks (on any layer kind), text
-            // raster origins and fill bounds. Checked before anything is applied so
-            // an unshiftable mask refuses the whole crop rather than half-applying.
+            // Non-pixel document-space geometry: masks (on any layer kind), text raster origins
+            // and fill bounds. Checked before anything is applied so an unshiftable mask refuses
+            // the whole reframe rather than half-applying it.
             if (shiftable) {
                 std::vector<LayerId> all;
                 collectAllLayers(doc.topLevelLayers(), all);
@@ -837,7 +844,7 @@ DocumentChange CropCommand::execute(Document& doc) {
                     if (l == nullptr) continue;
                     const Mask* m = l->mask();
                     if (m != nullptr && !m->buffer().empty()) {
-                        if (!m->buffer().canTranslate(-eff.x, -eff.y, kMaxCropGeometryPixels)) {
+                        if (!m->buffer().canTranslate(dx_, dy_, kMaxCropGeometryPixels)) {
                             shiftable = false;
                             break;
                         }
@@ -851,38 +858,157 @@ DocumentChange CropCommand::execute(Document& doc) {
                 }
             }
             if (!shiftable) {
-                moves_.clear();  // none executed yet; abort to a no-op rather than half-crop
+                moves_.clear();  // none executed yet; abort to a no-op rather than half-apply
                 maskLayers_.clear();
                 textLayers_.clear();
                 fillLayers_.clear();
-                crop_ = Rect{};
+                noop_ = true;
+            } else {
+                noop_ = false;
             }
         }
     }
-    if (crop_.isEmpty())
-        return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+    if (noop_) return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
 
     for (auto& m : moves_) m->execute(doc);
-    shiftGeometry(doc, -crop_.x, -crop_.y);
-    doc.cmdSetCanvasSize(Size{crop_.width, crop_.height});
-    // Shift the active selection by the same -origin so it tracks the cropped content. Recomputed
-    // from the captured original each time, so redo is exact (re-shifting an inactive sel is a
+    shiftGeometry(doc, dx_, dy_);
+    doc.cmdSetCanvasSize(newSize_);
+    // Shift the active selection by the same offset so it tracks the content. Recomputed from
+    // the captured original each time, so redo is exact (re-shifting an inactive sel is a
     // no-op). Notify observers (marching ants) just as SetSelectionCommand does.
-    doc.editableSelection() = translatedSelection(oldSel_, -crop_.x, -crop_.y);
+    doc.editableSelection() = translatedSelection(oldSel_, dx_, dy_);
     doc.touchSelection();
     return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
 }
 
-DocumentChange CropCommand::undo(Document& doc) {
-    if (crop_.isEmpty())
-        return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+DocumentChange ReframeCommand::undo(Document& doc) {
+    if (noop_) return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
 
-    doc.cmdSetCanvasSize(oldSize_);        // restore the canvas first
-    shiftGeometry(doc, crop_.x, crop_.y);  // unshift geometry
+    doc.cmdSetCanvasSize(oldSize_);  // restore the canvas first
+    shiftGeometry(doc, -dx_, -dy_);  // unshift geometry
     for (auto it = moves_.rbegin(); it != moves_.rend(); ++it) (*it)->undo(doc);  // unshift pixels
-    doc.editableSelection() = oldSel_;  // restore the exact pre-crop selection
+    doc.editableSelection() = oldSel_;  // restore the exact pre-reframe selection
     doc.touchSelection();
     return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+}
+
+std::int64_t ReframeCommand::retainedBytes() const noexcept {
+    std::int64_t bytes = 0;
+    for (const std::unique_ptr<PaintCommand>& m : moves_) {
+        if (m) bytes += m->retainedBytes();
+    }
+    // The selection stores its tiles by value, so the snapshot is genuinely resident. Same
+    // arithmetic SetSelectionCommand uses.
+    bytes +=
+        static_cast<std::int64_t>(oldSel_.tileCount()) * static_cast<std::int64_t>(kTilePixels);
+    return bytes;
+}
+
+// ----------------------------------------------------------------- Crop
+
+CropCommand::CropCommand(Rect cropRect) : crop_(cropRect) {}
+
+bool CropCommand::plan(const Document& doc, Size& newSize, int& dx, int& dy) {
+    const Rect eff = crop_.intersected(doc.canvasBounds());  // clamp to the canvas once
+    if (eff.isEmpty()) return false;                         // degenerate crop: a no-op
+    crop_ = eff;
+    newSize = Size{eff.width, eff.height};
+    dx = -eff.x;  // the cropped region lands at 0,0
+    dy = -eff.y;
+    return true;
+}
+
+// ---------------------------------------------------------- Canvas Size
+
+Point canvasAnchorOffset(Size oldSize, Size newSize, CanvasAnchor anchor) noexcept {
+    const int gw = newSize.width - oldSize.width;
+    const int gh = newSize.height - oldSize.height;
+    // Numerator over 2, so the three columns are 0, gw/2 and gw with one integer division and
+    // no rounding drift between them. An odd growth puts the extra pixel on the right/bottom,
+    // which is the convention every editor uses and which keeps a symmetric shrink symmetric.
+    int nx = 0;
+    int ny = 0;
+    switch (anchor) {
+        case CanvasAnchor::TopLeft:
+            break;
+        case CanvasAnchor::Top:
+            nx = 1;
+            break;
+        case CanvasAnchor::TopRight:
+            nx = 2;
+            break;
+        case CanvasAnchor::Left:
+            ny = 1;
+            break;
+        case CanvasAnchor::Center:
+            nx = 1;
+            ny = 1;
+            break;
+        case CanvasAnchor::Right:
+            nx = 2;
+            ny = 1;
+            break;
+        case CanvasAnchor::BottomLeft:
+            ny = 2;
+            break;
+        case CanvasAnchor::Bottom:
+            nx = 1;
+            ny = 2;
+            break;
+        case CanvasAnchor::BottomRight:
+            nx = 2;
+            ny = 2;
+            break;
+    }
+    return Point{gw * nx / 2, gh * ny / 2};
+}
+
+CanvasResizeBlock canvasResizeBlocker(const Document& doc, Size newSize, CanvasAnchor anchor) {
+    if (newSize.width < 1 || newSize.height < 1 || newSize.width > kMaxCanvasDimension ||
+        newSize.height > kMaxCanvasDimension) {
+        return CanvasResizeBlock::DimensionOutOfRange;
+    }
+    const Size oldSize = doc.canvasSize();
+    if (newSize.width == oldSize.width && newSize.height == oldSize.height) {
+        return CanvasResizeBlock::Unchanged;
+    }
+    const Point off = canvasAnchorOffset(oldSize, newSize, anchor);
+    if (off.x == 0 && off.y == 0) return CanvasResizeBlock::None;  // nothing to move
+
+    // Asked before the command is pushed, so a resize that cannot shift its content never
+    // becomes a history entry that did nothing. moveRefusal answers the same question
+    // moveLayerContent would, without building the command.
+    std::vector<LayerId> pixelLayers;
+    collectPixelLayers(doc.topLevelLayers(), pixelLayers);
+    for (LayerId id : pixelLayers) {
+        const Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->contentBounds().isEmpty()) continue;
+        if (moveRefusal(doc, id, off.x, off.y).code != RefusalCode::None) {
+            return CanvasResizeBlock::ContentNotShiftable;
+        }
+    }
+    std::vector<LayerId> all;
+    collectAllLayers(doc.topLevelLayers(), all);
+    for (LayerId id : all) {
+        const Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->mask() == nullptr || l->mask()->buffer().empty()) continue;
+        if (!l->mask()->buffer().canTranslate(off.x, off.y, kMaxCropGeometryPixels)) {
+            return CanvasResizeBlock::ContentNotShiftable;
+        }
+    }
+    return CanvasResizeBlock::None;
+}
+
+ResizeCanvasCommand::ResizeCanvasCommand(Size newSize, CanvasAnchor anchor)
+    : target_(newSize), anchor_(anchor) {}
+
+bool ResizeCanvasCommand::plan(const Document& doc, Size& newSize, int& dx, int& dy) {
+    if (canvasResizeBlocker(doc, target_, anchor_) != CanvasResizeBlock::None) return false;
+    const Point off = canvasAnchorOffset(doc.canvasSize(), target_, anchor_);
+    newSize = target_;
+    dx = off.x;
+    dy = off.y;
+    return true;
 }
 
 }  // namespace pe

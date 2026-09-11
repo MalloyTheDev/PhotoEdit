@@ -4,6 +4,7 @@
 
 #include "AdjustmentsPanel.hpp"
 #include "BusyTask.hpp"
+#include "CanvasSizeDialog.hpp"
 #include "CanvasView.hpp"
 #include "ChannelsPanel.hpp"
 #include "ColorPanel.hpp"
@@ -269,6 +270,14 @@ void MainWindow::buildMenuBar() {
 
     auto* imageMenu = menuBar()->addMenu(QStringLiteral("&Image"));
     docMenus_.push_back(imageMenu);
+    // The Image menu held exactly one submenu (Adjustments) and nothing else, so the two
+    // operations that change the document's shape had no menu route at all: Canvas Size did not
+    // exist, and Crop existed only as a drag with the Crop tool.
+    imageMenu->addAction(QStringLiteral("&Canvas Size..."),
+                         QKeySequence(QStringLiteral("Ctrl+Alt+C")), this,
+                         &MainWindow::changeCanvasSize);
+    imageMenu->addAction(QStringLiteral("Crop to &Selection"), this, &MainWindow::cropToSelection);
+    imageMenu->addSeparator();
     {
         auto* adj = imageMenu->addMenu(QStringLiteral("Adjustments"));
         adj->addAction(QStringLiteral("Brightness/Contrast..."), this, [this, runEffect] {
@@ -1802,6 +1811,73 @@ void MainWindow::pasteFromClipboard(bool into) {
     doc_->history().push(
         std::make_unique<pe::AddLayerCommand>(std::move(layer), doc_->topLevelCount()));
     doc_->setActiveLayer(id);
+}
+
+void MainWindow::changeCanvasSize() {
+    const char* const action = "Image > Canvas Size...";
+    if (refuseIf(doc_ == nullptr, "image.canvasSize", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return;
+    }
+    CanvasSizeDialog dlg(this, doc_->canvasSize());
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    // Asked before the push, so a resize that cannot run never becomes a history entry the
+    // user has to undo to be rid of.
+    const pe::Size want = dlg.size();
+    switch (pe::canvasResizeBlocker(*doc_, want, dlg.anchor())) {
+        case pe::CanvasResizeBlock::Unchanged:
+            (void)refuseIf(true, "image.canvasSize", pe::RefusalCode::NoEffect, action,
+                           QStringLiteral("That is the size it already is."));
+            return;
+        case pe::CanvasResizeBlock::DimensionOutOfRange:
+            (void)refuseIf(true, "image.canvasSize", pe::RefusalCode::OverSizeBudget, action,
+                           QStringLiteral("Each side has to be between 1 and %1 pixels.")
+                               .arg(pe::kMaxCanvasDimension));
+            return;
+        case pe::CanvasResizeBlock::ContentNotShiftable:
+            (void)refuseIf(true, "image.canvasSize", pe::RefusalCode::OverSizeBudget, action,
+                           QStringLiteral("This document has too much content to shift in one "
+                                          "step. Anchoring to the top left moves nothing and "
+                                          "always works."));
+            return;
+        case pe::CanvasResizeBlock::None:
+            break;
+    }
+    doc_->history().push(std::make_unique<pe::ResizeCanvasCommand>(want, dlg.anchor()));
+}
+
+void MainWindow::cropToSelection() {
+    const char* const action = "Image > Crop to Selection";
+    if (refuseIf(doc_ == nullptr, "image.crop", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return;
+    }
+    if (refuseIf(!doc_->selection().active(), "image.crop", pe::RefusalCode::NoSelection, action,
+                 QStringLiteral("Select the area to keep first, or drag with the Crop tool."))) {
+        return;
+    }
+    const pe::Rect keep = doc_->selection().tightBounds().intersected(doc_->canvasBounds());
+    if (refuseIf(keep.isEmpty(), "image.crop", pe::RefusalCode::NoEffect, action,
+                 QStringLiteral("That selection selects nothing, so there is nothing to crop "
+                                "to."))) {
+        return;
+    }
+    if (refuseIf(keep == doc_->canvasBounds(), "image.crop", pe::RefusalCode::NoEffect, action,
+                 QStringLiteral("The selection already covers the whole canvas."))) {
+        return;
+    }
+    auto cmd = std::make_unique<pe::CropCommand>(keep);
+    auto* raw = cmd.get();
+    doc_->history().push(std::move(cmd));
+    if (!raw->reframed()) {
+        // The command declined after the fact: its content could not be shifted inside the move
+        // budget. It left the document alone, so the entry it just became is a no-op the user
+        // would have to undo. Say so rather than leaving a silent nothing in the history.
+        (void)refuseIf(true, "image.crop", pe::RefusalCode::OverSizeBudget, action,
+                       QStringLiteral("This document has too much content to shift in one "
+                                      "step."));
+    }
 }
 
 void MainWindow::mergeLayers(MergeMode mode) {

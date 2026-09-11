@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **739 engine cases + 216 shell cases, 0 failed**. The engine tests
+Test suite: **750 engine cases + 224 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -54,6 +54,18 @@ The engine is no longer headless-only; the Qt6 app provides a real
   read cap on untrusted files.
 - **`MainWindow`** — File ▸ New (blank 800×600), Open…, Save, Save As… wired to
   `DocumentIO`; window title and canvas track the active document.
+- **Canvas Size** (Image ▸ Canvas Size…, Ctrl+Alt+C) and **Crop to Selection**. The Image menu
+  held one submenu and nothing else, so neither operation that changes the document's shape had
+  a menu route. Canvas Size changes the canvas rectangle without resampling: content keeps every
+  pixel and a 3×3 anchor decides where it sits, so growing adds space and shrinking pushes
+  content off the edge **without destroying it** (the tile store is sparse and unbounded, and
+  `.pedoc` keeps off-canvas content). Anchoring top-left moves nothing at all, which makes that
+  case O(1). Crop and Canvas Size now share one `ReframeCommand`: both change the canvas and
+  shift every piece of document-space geometry (pixels, masks, text raster origins, fill bounds,
+  the selection) by one offset, with an all-or-nothing pre-flight so a resize that cannot shift
+  its content refuses rather than half-applying. That shared base also gave Crop the
+  `retainedBytes()` it was missing, so History stops carrying its content moves believing its
+  stacks were empty.
 - **Clipboard** — Cut, Copy, Copy Merged, Paste, Paste Into and Clear, on the conventional
   shortcuts. None of it existed before: the Edit menu was Undo, Redo and Free Transform, so
   Ctrl+C and Ctrl+V did nothing at all. The engine half is region primitives in `Filter.hpp`

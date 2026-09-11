@@ -164,6 +164,13 @@ private:
     // rather than pushing a history entry that did nothing.
     enum class MergeMode { Down, Visible, Flatten };
     void mergeLayers(MergeMode mode);
+
+    // Image > Canvas Size: prompt for the new dimensions and anchor, then reframe. Nothing is
+    // resampled; see pe::ResizeCanvasCommand.
+    void changeCanvasSize();
+    // Image > Crop to Selection: the Crop tool's command, reached from the menu with the
+    // selection's bounds instead of a drag.
+    void cropToSelection();
     // Reopen the text dialog for a text layer (double-click in the Layers panel), seeded from its
     // model; commits one EditTextCommand on OK. A no-op for a non-text layer.
     void editTextLayer(pe::LayerId id);

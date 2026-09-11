@@ -24,6 +24,7 @@ add_executable(pe_core_tests
     core/test_selection.cpp
     core/test_setselection.cpp
     core/test_crop.cpp
+    core/test_canvassize.cpp
     core/test_layergroup.cpp
     core/test_mask.cpp
     core/test_masktiling.cpp
@@ -100,6 +101,7 @@ if(PHOTOEDIT_BUILD_APP)
         app/test_gradientspanel.cpp
         app/test_clipboard.cpp
         app/test_mergeui.cpp
+        app/test_canvassizeui.cpp
         app/test_busytask.cpp
     )
 

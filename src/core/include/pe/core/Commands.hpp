@@ -384,30 +384,111 @@ private:
 // it tracks the cropped content. One undoable step (canvas size + per-layer content shifts +
 // selection reverse together). Built on moveLayerContent; the rect is clamped to the canvas on
 // execute.
-class CropCommand final : public Command {
-public:
-    explicit CropCommand(Rect cropRect);
-    ~CropCommand() override;  // out-of-line: the move vector holds incomplete PaintCommand
+// Where the existing content sits inside a resized canvas. The 3x3 grid every editor offers:
+// the content keeps its pixel size and the new space is added (or removed) around it.
+enum class CanvasAnchor : std::uint8_t {
+    TopLeft = 0,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+};
 
-    [[nodiscard]] std::string name() const override { return "Crop"; }
+// The shared machinery behind Crop and Canvas Size.
+//
+// Both do the same two things: change the canvas rectangle, and shift every piece of
+// document-space geometry by one offset so the picture stays where it was relative to the
+// content. That is more than the pixels: layer masks, text raster origins, fill-layer bounds
+// and the selection all live in document space and all have to move together, and a resize
+// that moved some of them is worse than one that refused.
+//
+// Derived classes differ only in how they work out the new size and the offset. Everything
+// else - the all-or-nothing pre-flight, the per-layer content moves, the geometry sweep, the
+// selection shift, and undoing all of it in the right order - lives here once.
+class ReframeCommand : public Command {
+public:
+    ~ReframeCommand() override;  // out-of-line: the move vector holds incomplete PaintCommand
     DocumentChange execute(Document&) override;
     DocumentChange undo(Document&) override;
 
+    // Whole content moves plus a selection snapshot, held for undo. Crop used to report the
+    // base class's zero, which let History carry hundreds of megabytes believing its stacks
+    // were empty.
+    [[nodiscard]] std::int64_t retainedBytes() const noexcept override;
+
+    // Whether the last execute() actually reframed. False when the plan was degenerate or the
+    // content could not be shifted within the move budget, in which case the document is
+    // untouched.
+    [[nodiscard]] bool reframed() const noexcept { return !noop_; }
+
+protected:
+    // Work out the new canvas size and the offset to move content by, from the document as it
+    // stands. Called once, on the first execute. Return false to make the command a no-op.
+    [[nodiscard]] virtual bool plan(const Document& doc, Size& newSize, int& dx, int& dy) = 0;
+
 private:
-    // Shift every non-pixel document-space placement by (dx, dy). Pixel content is
-    // handled by moves_; these are the geometries a crop would otherwise leave
-    // behind, making masks, glyphs and fills line up with the wrong pixels.
-    // Exactly invertible, so undo passes the opposite delta.
     void shiftGeometry(Document& doc, int dx, int dy);
 
-    Rect crop_;
-    Size oldSize_{};
     bool captured_ = false;
-    std::vector<std::unique_ptr<PaintCommand>> moves_;  // per-layer content shift to the origin
-    Selection oldSel_;  // selection before crop, captured on first execute, restored on undo
-    std::vector<LayerId> maskLayers_;  // layers carrying a mask buffer to shift
-    std::vector<LayerId> textLayers_;  // text layers whose raster origin must shift
-    std::vector<LayerId> fillLayers_;  // solid-color layers whose bounds must shift
+    bool noop_ = true;
+    Size newSize_{};
+    Size oldSize_{};
+    int dx_ = 0;
+    int dy_ = 0;
+    Selection oldSel_;                                  // pre-reframe selection, for undo
+    std::vector<std::unique_ptr<PaintCommand>> moves_;  // per-pixel-layer content shifts
+    std::vector<LayerId> maskLayers_;                   // layers whose mask buffer shifted
+    std::vector<LayerId> textLayers_;                   // text layers whose origin shifted
+    std::vector<LayerId> fillLayers_;                   // fill layers whose bounds shifted
 };
+
+// Crop to `cropRect` (document space), clamped to the current canvas. The canvas becomes the
+// rect's size and the content shifts by -rect.origin, so the cropped region lands at 0,0.
+class CropCommand final : public ReframeCommand {
+public:
+    explicit CropCommand(Rect cropRect);
+    [[nodiscard]] std::string name() const override { return "Crop"; }
+
+protected:
+    [[nodiscard]] bool plan(const Document& doc, Size& newSize, int& dx, int& dy) override;
+
+private:
+    Rect crop_;
+};
+
+// Change the canvas to `newSize`, keeping the content at its pixel size and positioning it by
+// `anchor`. Unlike Crop this can GROW the canvas, and shrinking does not destroy anything: the
+// tile store is sparse and unbounded, so content pushed outside the canvas is still there,
+// still editable, and still written to .pedoc.
+class ResizeCanvasCommand final : public ReframeCommand {
+public:
+    ResizeCanvasCommand(Size newSize, CanvasAnchor anchor);
+    [[nodiscard]] std::string name() const override { return "Canvas Size"; }
+
+protected:
+    [[nodiscard]] bool plan(const Document& doc, Size& newSize, int& dx, int& dy) override;
+
+private:
+    Size target_;
+    CanvasAnchor anchor_;
+};
+
+// The offset an anchor puts the old content at inside a new canvas. Exposed because it is the
+// whole of what the 3x3 grid means, and it is worth being able to assert on directly.
+[[nodiscard]] Point canvasAnchorOffset(Size oldSize, Size newSize, CanvasAnchor anchor) noexcept;
+
+// Why a canvas resize cannot run, or None when it can.
+enum class CanvasResizeBlock : std::uint8_t {
+    None = 0,
+    Unchanged,            // the size asked for is the size it already is
+    DimensionOutOfRange,  // below 1 or past kMaxCanvasDimension on a side
+    ContentNotShiftable,  // an anchor offset the move budget will not carry
+};
+[[nodiscard]] CanvasResizeBlock canvasResizeBlocker(const Document& doc, Size newSize,
+                                                    CanvasAnchor anchor);
 
 }  // namespace pe
