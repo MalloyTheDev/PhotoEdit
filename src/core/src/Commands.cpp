@@ -6,13 +6,16 @@
 #include "pe/core/TextLayer.hpp"
 
 #include "pe/core/Brush.hpp"  // PaintCommand (CropCommand composes per-layer moves)
+#include "pe/core/Color.hpp"  // toFloat/fromFloat for the text raster
 #include "pe/core/Document.hpp"
 #include "pe/core/Filter.hpp"      // moveLayerContent
 #include "pe/core/GroupLayer.hpp"  // recurse into groups for crop
 #include "pe/core/Mask.hpp"        // Mask, MaskBuffer, maskFromSelection (layer-mask commands)
 #include "pe/core/PixelLayer.hpp"  // contentBounds() on the concrete pixel layer
+#include "pe/core/Resample.hpp"    // resampleImage (text raster); resampleMask/resampledSelection
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <span>
 #include <utility>
@@ -1009,6 +1012,242 @@ bool ResizeCanvasCommand::plan(const Document& doc, Size& newSize, int& dx, int&
     dx = off.x;
     dy = off.y;
     return true;
+}
+
+// ----------------------------------------------------------------- Image Size (resample)
+
+namespace {
+
+// Round a scaled length to at least 1: a raster or bounds axis must never collapse to zero, which
+// would drop the layer entirely.
+int scaleLen(int len, double s) {
+    const int v = static_cast<int>(std::lround(static_cast<double>(len) * s));
+    return v < 1 ? 1 : v;
+}
+int scaleCoord(int c, double s) {
+    return static_cast<int>(std::lround(static_cast<double>(c) * s));
+}
+
+Rect scaleRectAboutOrigin(Rect r, double sx, double sy) {
+    return Rect{scaleCoord(r.x, sx), scaleCoord(r.y, sy), scaleLen(r.width, sx),
+                scaleLen(r.height, sy)};
+}
+
+// Resample a small contiguous straight-alpha raster (a text glyph cache) by (sx, sy) through the
+// same Catmull-Rom kernel as everything else. The caller (imageResizeBlocker) has already kept the
+// result within kMaxTextRasterDim/Pixels.
+PixelBuffer scaleRaster(const PixelBuffer& src, double sx, double sy) {
+    if (src.isEmpty()) return src;
+    const int nw = scaleLen(src.width(), sx);
+    const int nh = scaleLen(src.height(), sy);
+    std::vector<Rgbaf> in(static_cast<std::size_t>(src.width()) *
+                          static_cast<std::size_t>(src.height()));
+    for (int y = 0; y < src.height(); ++y) {
+        for (int x = 0; x < src.width(); ++x) {
+            in[static_cast<std::size_t>(y) * static_cast<std::size_t>(src.width()) +
+               static_cast<std::size_t>(x)] = toFloat(src.at(x, y));
+        }
+    }
+    const std::vector<Rgbaf> out = resampleImage(in, src.width(), src.height(), nw, nh);
+    if (out.empty()) return src;
+    PixelBuffer dst(nw, nh);
+    for (int y = 0; y < nh; ++y) {
+        for (int x = 0; x < nw; ++x) {
+            dst.set(
+                x, y,
+                fromFloat<Rgba8>(out[static_cast<std::size_t>(y) * static_cast<std::size_t>(nw) +
+                                     static_cast<std::size_t>(x)]));
+        }
+    }
+    return dst;
+}
+
+}  // namespace
+
+ImageResizeBlock imageResizeBlocker(const Document& doc, Size newSize) {
+    if (newSize.width < 1 || newSize.height < 1 || newSize.width > kMaxCanvasDimension ||
+        newSize.height > kMaxCanvasDimension) {
+        return ImageResizeBlock::DimensionOutOfRange;
+    }
+    const Size oldSize = doc.canvasSize();
+    if (newSize.width == oldSize.width && newSize.height == oldSize.height) {
+        return ImageResizeBlock::Unchanged;
+    }
+    const Rect srcCanvas{0, 0, oldSize.width, oldSize.height};
+    const Rect dstCanvas{0, 0, newSize.width, newSize.height};
+
+    // Pixel layers: refuse if any content-bearing layer's resample would blow the byte budget,
+    // exactly as canvasResizeBlocker asks moveRefusal, so the whole resize refuses before pushing.
+    std::vector<LayerId> pixelLayers;
+    collectPixelLayers(doc.topLevelLayers(), pixelLayers);
+    for (LayerId id : pixelLayers) {
+        if (resampleRefusal(doc, id, srcCanvas, dstCanvas).code != RefusalCode::None) {
+            return ImageResizeBlock::ContentTooLarge;
+        }
+    }
+
+    // Text rasters cannot scale past their round-trip cap, or the saved .pedoc would be rejected on
+    // reopen. Only an upscale can trip this; a downscale always shrinks the raster.
+    const double sx = static_cast<double>(newSize.width) / static_cast<double>(oldSize.width);
+    const double sy = static_cast<double>(newSize.height) / static_cast<double>(oldSize.height);
+    std::vector<LayerId> all;
+    collectAllLayers(doc.topLevelLayers(), all);
+    for (LayerId id : all) {
+        const Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->kind() != LayerKind::Text) continue;
+        const PixelBuffer& r = static_cast<const TextLayer*>(l)->raster();
+        if (r.isEmpty()) continue;
+        const std::int64_t nrw = std::lround(static_cast<double>(r.width()) * sx);
+        const std::int64_t nrh = std::lround(static_cast<double>(r.height()) * sy);
+        if (nrw > kMaxTextRasterDim || nrh > kMaxTextRasterDim ||
+            nrw * nrh > kMaxTextRasterPixels) {
+            return ImageResizeBlock::ContentTooLarge;
+        }
+    }
+    return ImageResizeBlock::None;
+}
+
+ResampleDocumentCommand::ResampleDocumentCommand(Size newSize) : target_(newSize) {}
+ResampleDocumentCommand::~ResampleDocumentCommand() = default;
+
+DocumentChange ResampleDocumentCommand::execute(Document& doc) {
+    if (!captured_) {
+        captured_ = true;
+        oldSize_ = doc.canvasSize();
+        if (imageResizeBlocker(doc, target_) != ImageResizeBlock::None) {
+            noop_ = true;
+        } else {
+            oldSel_ = doc.selection();
+            const Rect srcCanvas{0, 0, oldSize_.width, oldSize_.height};
+            const Rect dstCanvas{0, 0, target_.width, target_.height};
+
+            // Build (don't apply) a resample delta per pixel layer, so each snapshots the ORIGINAL
+            // pixels. A null is an empty/identity layer (nothing to do); the blocker already
+            // rejected the over-budget case.
+            std::vector<LayerId> pixelLayers;
+            collectPixelLayers(doc.topLevelLayers(), pixelLayers);
+            for (LayerId id : pixelLayers) {
+                if (auto m = resampleLayerContent(doc, id, srcCanvas, dstCanvas)) {
+                    pixelMoves_.push_back(std::move(m));
+                }
+            }
+
+            // Snapshot every non-pixel document-space placement so undo can restore it (resampling
+            // is not invertible). Masks live on any layer kind; text and fill are their own kinds.
+            std::vector<LayerId> all;
+            collectAllLayers(doc.topLevelLayers(), all);
+            for (LayerId id : all) {
+                Layer* l = doc.findLayer(id);
+                if (l == nullptr) continue;
+                if (l->mask() != nullptr && !l->mask()->buffer().empty()) {
+                    oldMasks_.emplace_back(id, l->mask()->buffer());
+                }
+                if (l->kind() == LayerKind::Text) {
+                    auto* t = static_cast<TextLayer*>(l);
+                    oldText_.push_back(
+                        TextSnapshot{id, t->model(), t->raster(), t->rasterOrigin()});
+                } else if (l->kind() == LayerKind::Fill) {
+                    oldFills_.emplace_back(id, static_cast<SolidColorLayer*>(l)->bounds());
+                }
+            }
+            noop_ = false;
+        }
+    }
+    if (noop_) return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+    applyScale(doc);
+    return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+}
+
+void ResampleDocumentCommand::applyScale(Document& doc) {
+    const Rect srcCanvas{0, 0, oldSize_.width, oldSize_.height};
+    const Rect dstCanvas{0, 0, target_.width, target_.height};
+    const double sx = static_cast<double>(target_.width) / static_cast<double>(oldSize_.width);
+    const double sy = static_cast<double>(target_.height) / static_cast<double>(oldSize_.height);
+
+    // Pixels: apply the precomputed tile deltas.
+    for (auto& m : pixelMoves_) m->execute(doc);
+
+    // Masks: recompute the scaled buffer from the ORIGINAL snapshot (deterministic, so redo is
+    // exact) and install it.
+    for (const auto& [id, oldBuf] : oldMasks_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->mask() == nullptr) continue;
+        l->mask()->buffer() = resampleMask(oldBuf, srcCanvas, dstCanvas);
+    }
+
+    // Text: scale the cached raster (what the compositor blits, so appearance scales exactly), the
+    // raster origin, and the model's placement + pixelSize (the app's re-rasterize hints; the
+    // engine has no fonts). pixelSize is a single scalar, so it follows the vertical factor.
+    for (const auto& snap : oldText_) {
+        Layer* l = doc.findLayer(snap.id);
+        if (l == nullptr || l->kind() != LayerKind::Text) continue;
+        auto* t = static_cast<TextLayer*>(l);
+        TextModel nm = snap.model;
+        nm.pixelSize = scaleLen(snap.model.pixelSize, sy);
+        nm.origin = Point{scaleCoord(snap.model.origin.x, sx), scaleCoord(snap.model.origin.y, sy)};
+        PixelBuffer nr = scaleRaster(snap.raster, sx, sy);
+        Point no{scaleCoord(snap.origin.x, sx), scaleCoord(snap.origin.y, sy)};
+        t->swapContents(nm, nr, no);  // installs the new triple; nm/nr/no take the old (discarded)
+    }
+
+    // Fill: scale the bounds rectangle about the origin.
+    for (const auto& [id, oldBounds] : oldFills_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->kind() != LayerKind::Fill) continue;
+        static_cast<SolidColorLayer*>(l)->setBounds(scaleRectAboutOrigin(oldBounds, sx, sy));
+    }
+
+    doc.cmdSetCanvasSize(target_);
+    doc.editableSelection() = resampledSelection(oldSel_, srcCanvas, dstCanvas);
+    doc.touchSelection();
+}
+
+DocumentChange ResampleDocumentCommand::undo(Document& doc) {
+    if (noop_) return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+
+    doc.cmdSetCanvasSize(oldSize_);  // restore the canvas first
+
+    for (const auto& [id, oldBounds] : oldFills_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->kind() != LayerKind::Fill) continue;
+        static_cast<SolidColorLayer*>(l)->setBounds(oldBounds);
+    }
+    for (const auto& snap : oldText_) {
+        Layer* l = doc.findLayer(snap.id);
+        if (l == nullptr || l->kind() != LayerKind::Text) continue;
+        TextModel om = snap.model;  // copies: keep the snapshot intact for a later redo
+        PixelBuffer orr = snap.raster;
+        Point oo = snap.origin;
+        static_cast<TextLayer*>(l)->swapContents(om, orr, oo);
+    }
+    for (const auto& [id, oldBuf] : oldMasks_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->mask() == nullptr) continue;
+        l->mask()->buffer() = oldBuf;
+    }
+    for (auto it = pixelMoves_.rbegin(); it != pixelMoves_.rend(); ++it) (*it)->undo(doc);
+
+    doc.editableSelection() = oldSel_;
+    doc.touchSelection();
+    return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+}
+
+std::int64_t ResampleDocumentCommand::retainedBytes() const noexcept {
+    std::int64_t bytes = 0;
+    for (const std::unique_ptr<PaintCommand>& m : pixelMoves_) {
+        if (m) bytes += m->retainedBytes();
+    }
+    for (const auto& [id, buf] : oldMasks_) {
+        bytes +=
+            static_cast<std::int64_t>(buf.tileCount()) * static_cast<std::int64_t>(kTilePixels);
+    }
+    for (const TextSnapshot& snap : oldText_) {
+        bytes += static_cast<std::int64_t>(snap.raster.width()) *
+                 static_cast<std::int64_t>(snap.raster.height()) * 4;
+    }
+    bytes +=
+        static_cast<std::int64_t>(oldSel_.tileCount()) * static_cast<std::int64_t>(kTilePixels);
+    return bytes;
 }
 
 }  // namespace pe

@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **782 engine cases + 232 shell cases, 0 failed**. The engine tests
+Test suite: **795 engine cases + 232 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -69,6 +69,18 @@ The engine is no longer headless-only; the Qt6 app provides a real
   its content refuses rather than half-applying. That shared base also gave Crop the
   `retainedBytes()` it was missing, so History stops carrying its content moves believing its
   stacks were empty.
+- **Image Size** (engine complete and tested; the Image ▸ Image Size… dialog and menu route are
+  the next step). Where Canvas Size changes only the canvas rectangle, Image Size **resamples** the
+  whole document to a new pixel size: `ResampleDocumentCommand` scales every pixel layer (groups
+  included), layer mask, text raster (with its `pixelSize`/placement hints), fill-layer bounds and
+  the selection together about the origin, then sets the canvas, as one undoable step. It is a
+  SIBLING of `ReframeCommand`, not a subclass: reframing translates by an integer offset (exactly
+  invertible), while a resample scales and is lossy, so undo restores pre-resample snapshots rather
+  than re-applying an inverse. The scaling is a separable Catmull-Rom resampler (`Resample.hpp`)
+  shared by three paths (a contiguous oracle, a tile-streamed per-layer pixel resampler bounded in
+  bytes like a Move, and a single-channel path for masks and the selection), all behind an
+  all-or-nothing pre-flight (`imageResizeBlocker`) that refuses over-budget content or a text raster
+  that would scale past its round-trip cap.
 - **Clipboard** — Cut, Copy, Copy Merged, Paste, Paste Into and Clear, on the conventional
   shortcuts. None of it existed before: the Edit menu was Undo, Redo and Free Transform, so
   Ctrl+C and Ctrl+V did nothing at all. The engine half is region primitives in `Filter.hpp`

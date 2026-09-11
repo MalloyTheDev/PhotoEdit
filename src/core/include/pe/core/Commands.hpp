@@ -4,12 +4,15 @@
 #include "pe/core/ColorProfile.hpp"
 #include "pe/core/Command.hpp"
 #include "pe/core/Layer.hpp"
+#include "pe/core/Mask.hpp"  // MaskBuffer, stored by value in the Image Size snapshot
 #include "pe/core/Selection.hpp"
+#include "pe/core/TextLayer.hpp"  // TextModel, stored by value in the Image Size snapshot
 
 #include <cstddef>
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace pe {
@@ -490,5 +493,70 @@ enum class CanvasResizeBlock : std::uint8_t {
 };
 [[nodiscard]] CanvasResizeBlock canvasResizeBlocker(const Document& doc, Size newSize,
                                                     CanvasAnchor anchor);
+
+// ----------------------------------------------------------------- Image Size (resample)
+
+// Why an Image Size resample cannot run, or None when it can. Mirrors CanvasResizeBlock, but the
+// blocking condition is content that cannot be resampled within budget (a huge pixel layer, or a
+// text raster that would scale past its round-trip cap) rather than content that cannot be shifted.
+enum class ImageResizeBlock : std::uint8_t {
+    None = 0,
+    Unchanged,            // the size asked for is the size it already is
+    DimensionOutOfRange,  // below 1 or past kMaxCanvasDimension on a side
+    ContentTooLarge,      // a pixel layer over the resample budget, or a text raster over its cap
+};
+[[nodiscard]] ImageResizeBlock imageResizeBlocker(const Document& doc, Size newSize);
+
+// Scale the whole document to `newSize`: every pixel layer, layer mask, text raster (and the
+// re-rasterization hints), fill bounds and the selection resample together about the document
+// origin, and the canvas becomes newSize. The engine behind Image Size.
+//
+// A SIBLING of ReframeCommand, deliberately not a subclass. Reframe translates every placement by
+// one integer offset, which is exactly invertible, so its undo re-applies the opposite offset. A
+// resample SCALES, which is lossy (a downscale discards detail a later upscale cannot recover), so
+// undo cannot re-apply an inverse: it restores snapshots taken before the resample. The pixel
+// deltas already carry their before-tiles (PaintCommand); the mask buffers, text content triples
+// and fill bounds are snapshotted here, and the selection reuses the pre-resample copy.
+//
+// All-or-nothing: if any content-bearing layer cannot be resampled within budget (checked up front
+// by imageResizeBlocker), nothing is applied and the command is a no-op, so the document is never
+// left resized-but-not-resampled.
+class ResampleDocumentCommand final : public Command {
+public:
+    explicit ResampleDocumentCommand(Size newSize);
+    ~ResampleDocumentCommand() override;  // out-of-line: pixelMoves_ holds incomplete PaintCommand
+    [[nodiscard]] std::string name() const override { return "Image Size"; }
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+
+    // The resampled pixels plus the mask/text/fill and selection snapshots, all resident and held
+    // for undo. Like ReframeCommand, this must not report the base class's zero, or History
+    // miscounts its stacks and can carry hundreds of megabytes believing they are empty.
+    [[nodiscard]] std::int64_t retainedBytes() const noexcept override;
+
+    // Whether the last execute() actually resampled. False when the plan was degenerate or blocked,
+    // in which case the document is untouched.
+    [[nodiscard]] bool resampled() const noexcept { return !noop_; }
+
+private:
+    void applyScale(Document& doc);  // install the scaled content, canvas and selection
+
+    struct TextSnapshot {
+        LayerId id;
+        TextModel model;
+        PixelBuffer raster;
+        Point origin;
+    };
+
+    Size target_{};
+    bool captured_ = false;
+    bool noop_ = true;
+    Size oldSize_{};
+    Selection oldSel_;                                       // pre-resample selection, for undo
+    std::vector<std::unique_ptr<PaintCommand>> pixelMoves_;  // per-pixel-layer resample deltas
+    std::vector<std::pair<LayerId, MaskBuffer>> oldMasks_;   // pre-resample mask buffers
+    std::vector<TextSnapshot> oldText_;                      // pre-resample text content triples
+    std::vector<std::pair<LayerId, Rect>> oldFills_;         // pre-resample fill bounds
+};
 
 }  // namespace pe

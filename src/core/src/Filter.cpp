@@ -1160,6 +1160,42 @@ std::unique_ptr<PaintCommand> resampleContentImpl(LayerId layerId, TileStoreT<Pi
 
 }  // namespace
 
+Refusal resampleRefusal(const Document& doc, LayerId layerId, Rect srcCanvas, Rect dstCanvas) {
+    // Mirrors resampleLayerContent's guards, in the same order, using the same constants.
+    const Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr) {
+        return refuse("image.size", RefusalCode::NoActiveLayer, {}, "Select a layer.");
+    }
+    const std::string named = "\"" + layer->name() + "\"";
+    if (layer->kind() != LayerKind::Pixel) {
+        return refuse("image.size", RefusalCode::LayerNotPixel, {},
+                      named + " is not a pixel layer.");
+    }
+    if (srcCanvas.isEmpty() || dstCanvas.isEmpty()) {
+        return refuse("image.size", RefusalCode::NoEffect, {}, "The canvas is empty.");
+    }
+    const auto* pl = static_cast<const PixelLayer*>(layer);
+    if (pl->contentBounds().isEmpty()) return Refusal{};  // nothing to resample; not a blocker
+    const Rect region = pl->contentBounds().united(dstCanvas);
+    if (!withinCoordinateRange(region)) {
+        return refuse("image.size", RefusalCode::OverSizeBudget, {},
+                      named + " would exceed the coordinate range the engine can store.");
+    }
+    const std::int64_t bytes =
+        tileCountOf(region) * static_cast<std::int64_t>(kTilePixels) * bytesPerPixelOf(pl->depth());
+    if (bytes > kMaxMoveBytes) {
+        return refuse("image.size", RefusalCode::OverSizeBudget, {},
+                      named + " would need " + std::to_string(bytes / (1024 * 1024)) +
+                          " MB to resample and undo, over the " +
+                          std::to_string(kMaxMoveBytes / (1024 * 1024)) +
+                          " MB limit. Resize a smaller document, or flatten first.",
+                      "region " + std::to_string(region.width) + "x" +
+                          std::to_string(region.height) + " at " +
+                          std::to_string(bytesPerPixelOf(pl->depth())) + " bytes/px");
+    }
+    return Refusal{};  // nothing stops it
+}
+
 std::unique_ptr<PaintCommand> resampleLayerContent(Document& doc, LayerId layerId, Rect srcCanvas,
                                                    Rect dstCanvas) {
     Layer* layer = doc.findLayer(layerId);

@@ -148,6 +148,14 @@ inline constexpr std::int64_t kMaxMoveBytes = 1LL << 30;
 [[nodiscard]] std::unique_ptr<PaintCommand> resampleLayerContent(Document& doc, LayerId layerId,
                                                                  Rect srcCanvas, Rect dstCanvas);
 
+// Why resampleLayerContent would refuse `layerId` for Image Size, or a Refusal with code None when
+// it would proceed. Mirrors resampleLayerContent's budget guard using the same constants, so the
+// Image Size pre-flight (imageResizeBlocker) can reject an over-budget document before a command is
+// pushed, exactly as canvasResizeBlocker uses moveRefusal. An empty-content layer is not a blocker
+// (None): there is simply nothing to resample.
+[[nodiscard]] Refusal resampleRefusal(const Document& doc, LayerId layerId, Rect srcCanvas,
+                                      Rect dstCanvas);
+
 // Paint Bucket: flood-fill the contiguous (4-connected) region of layer `layerId` reachable
 // from the seed whose color is within `tolerance` (max per-channel, 0..255) of the seed's,
 // compositing `fillColor` (straight alpha, Normal) over each. Bounded by the canvas; honors the
