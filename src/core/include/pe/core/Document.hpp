@@ -147,6 +147,10 @@ public:
     // per dimension. Layer content is not moved here — CropCommand pairs this with per-layer
     // content shifts; resolution/profile are unchanged. Not undoable on its own.
     void cmdSetCanvasSize(Size newSize) noexcept;
+    // Set the document's bit depth tag. The per-layer store conversion is done by
+    // SetBitDepthCommand, which pairs this with a convertDepth() on every pixel layer; this only
+    // updates the document-wide tag. Not undoable on its own.
+    void cmdSetBitDepth(BitDepth depth) noexcept;
 
 private:
     friend class History;  // History calls notify()/setDirty() after a command.

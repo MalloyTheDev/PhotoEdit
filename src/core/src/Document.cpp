@@ -118,6 +118,10 @@ void Document::cmdSetColorProfile(ColorProfileRef profile) {
     profile_ = std::move(profile);
 }
 
+void Document::cmdSetBitDepth(BitDepth depth) noexcept {
+    bitDepth_ = depth;
+}
+
 void Document::cmdSetCanvasSize(Size newSize) noexcept {
     // Clamp to the valid canvas range; the pairing CropCommand returns the DocumentChange
     // so History notifies observers once (no self-notify, matching cmdInsertTopLevel).

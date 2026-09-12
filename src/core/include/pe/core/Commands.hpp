@@ -6,7 +6,6 @@
 #include "pe/core/Layer.hpp"
 #include "pe/core/Mask.hpp"    // MaskBuffer, stored by value in the Image Size snapshot
 #include "pe/core/Orient.hpp"  // Orient (Image Rotation)
-#include "pe/core/Orient.hpp"  // Orient (Image Rotation)
 #include "pe/core/Selection.hpp"
 #include "pe/core/TextLayer.hpp"  // TextModel, stored by value in the Image Size snapshot
 
@@ -614,6 +613,46 @@ private:
     std::vector<std::pair<LayerId, MaskBuffer>> oldMasks_;   // pre-rotation mask buffers
     std::vector<TextSnapshot> oldText_;                      // pre-rotation text content triples
     std::vector<std::pair<LayerId, Rect>> oldFills_;         // pre-rotation fill bounds
+};
+
+// ----------------------------------------------------------------- Image Mode (bit depth)
+
+// Why a bit-depth conversion cannot run, or None when it can.
+enum class BitDepthBlock : std::uint8_t {
+    None = 0,
+    Unchanged,        // the document is already at the target depth
+    ContentTooLarge,  // a pixel layer's converted store would exceed the move budget
+};
+[[nodiscard]] BitDepthBlock bitDepthBlocker(const Document& doc, BitDepth target);
+
+// Convert the whole document to `target` bits per channel (Image > Mode): every pixel layer's tile
+// store is rebuilt at the new depth, and the document tag is updated, as one undoable step.
+//
+// Widening (U8 -> U16/F32, U16 -> F32) is lossless; narrowing loses precision, so undo cannot
+// reconstruct the old pixels -- it restores a snapshot taken before the conversion (a clone of each
+// pixel layer, whose copy-on-write tiles keep the old pixels resident once the live store is
+// rebuilt). Masks (8-bit), text rasters and fill colours are unaffected: only pixel-layer stores
+// carry a depth.
+class SetBitDepthCommand final : public Command {
+public:
+    explicit SetBitDepthCommand(BitDepth target);
+    ~SetBitDepthCommand() override;
+    [[nodiscard]] std::string name() const override;
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+    [[nodiscard]] std::int64_t retainedBytes() const noexcept override;
+
+    // Whether the last execute() actually converted. False when the plan was a no-op or blocked.
+    [[nodiscard]] bool converted() const noexcept { return !noop_; }
+
+private:
+    void applyDepth(Document& doc);
+
+    BitDepth target_;
+    bool captured_ = false;
+    bool noop_ = true;
+    BitDepth oldDepth_ = BitDepth::U8;
+    std::vector<std::pair<LayerId, std::unique_ptr<Layer>>> snapshots_;  // pre-conversion clones
 };
 
 }  // namespace pe

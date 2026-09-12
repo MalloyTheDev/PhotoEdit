@@ -1406,6 +1406,110 @@ DocumentChange OrientDocumentCommand::undo(Document& doc) {
     return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
 }
 
+namespace {
+// Bytes per pixel at a given depth (U8 = 4x uint8, U16 = 4x uint16, F32 = 4x float).
+[[nodiscard]] std::int64_t bytesPerPixelOfDepth(BitDepth d) noexcept {
+    switch (d) {
+        case BitDepth::U16:
+            return 8;
+        case BitDepth::F32:
+            return 16;
+        case BitDepth::U8:
+        default:
+            return 4;
+    }
+}
+[[nodiscard]] std::int64_t storeBytes(Rect contentBounds, BitDepth d) noexcept {
+    if (contentBounds.isEmpty()) return 0;
+    const TileSpan sp = tilesForRect(contentBounds);
+    const std::int64_t tiles = static_cast<std::int64_t>(sp.colEnd - sp.colBegin) *
+                               static_cast<std::int64_t>(sp.rowEnd - sp.rowBegin);
+    return tiles * static_cast<std::int64_t>(kTilePixels) * bytesPerPixelOfDepth(d);
+}
+}  // namespace
+
+BitDepthBlock bitDepthBlocker(const Document& doc, BitDepth target) {
+    if (target == doc.bitDepth()) return BitDepthBlock::Unchanged;
+    std::vector<LayerId> pixelLayers;
+    collectPixelLayers(doc.topLevelLayers(), pixelLayers);
+    for (LayerId id : pixelLayers) {
+        const Layer* l = doc.findLayer(id);
+        if (l == nullptr) continue;
+        const Rect cb = static_cast<const PixelLayer*>(l)->contentBounds();
+        if (storeBytes(cb, target) > kMaxMoveBytes) return BitDepthBlock::ContentTooLarge;
+    }
+    return BitDepthBlock::None;
+}
+
+SetBitDepthCommand::SetBitDepthCommand(BitDepth target) : target_(target) {}
+SetBitDepthCommand::~SetBitDepthCommand() = default;
+
+std::string SetBitDepthCommand::name() const {
+    switch (target_) {
+        case BitDepth::U16:
+            return "16 Bits/Channel";
+        case BitDepth::F32:
+            return "32 Bits/Channel";
+        case BitDepth::U8:
+        default:
+            return "8 Bits/Channel";
+    }
+}
+
+DocumentChange SetBitDepthCommand::execute(Document& doc) {
+    if (!captured_) {
+        captured_ = true;
+        oldDepth_ = doc.bitDepth();
+        if (bitDepthBlocker(doc, target_) != BitDepthBlock::None) {
+            noop_ = true;
+        } else {
+            std::vector<LayerId> pixelLayers;
+            collectPixelLayers(doc.topLevelLayers(), pixelLayers);
+            for (LayerId id : pixelLayers) {
+                Layer* l = doc.findLayer(id);
+                if (l != nullptr) snapshots_.emplace_back(id, l->clone());
+            }
+            noop_ = false;
+        }
+    }
+    if (noop_) return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+    applyDepth(doc);
+    return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+}
+
+void SetBitDepthCommand::applyDepth(Document& doc) {
+    for (const auto& [id, snap] : snapshots_) {
+        Layer* l = doc.findLayer(id);
+        if (l != nullptr && l->kind() == LayerKind::Pixel) {
+            static_cast<PixelLayer*>(l)->convertDepth(target_);
+        }
+    }
+    doc.cmdSetBitDepth(target_);
+}
+
+DocumentChange SetBitDepthCommand::undo(Document& doc) {
+    if (noop_) return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+    for (const auto& [id, snap] : snapshots_) {
+        Layer* l = doc.findLayer(id);
+        if (l != nullptr && l->kind() == LayerKind::Pixel && snap != nullptr) {
+            static_cast<PixelLayer*>(l)->restorePixelState(static_cast<const PixelLayer&>(*snap));
+        }
+    }
+    doc.cmdSetBitDepth(oldDepth_);
+    return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+}
+
+std::int64_t SetBitDepthCommand::retainedBytes() const noexcept {
+    std::int64_t bytes = 0;
+    for (const auto& [id, snap] : snapshots_) {
+        if (snap != nullptr && snap->kind() == LayerKind::Pixel) {
+            const auto* pl = static_cast<const PixelLayer*>(snap.get());
+            bytes += storeBytes(pl->contentBounds(), pl->depth());
+        }
+    }
+    return bytes;
+}
+
 std::int64_t OrientDocumentCommand::retainedBytes() const noexcept {
     std::int64_t bytes = 0;
     for (const std::unique_ptr<PaintCommand>& m : pixelMoves_) {

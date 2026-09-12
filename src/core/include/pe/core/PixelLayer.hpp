@@ -23,6 +23,17 @@ public:
 
     [[nodiscard]] bool hasTileAt(TileCoord c) const noexcept;
 
+    // Convert the active store to `target` bit depth in place (reading each pixel through float and
+    // writing it into the target store, then dropping the old one), and set depth(). A no-op when
+    // already at `target`. Narrowing (e.g. F32/U16 -> U8) loses precision, so callers that undo
+    // must snapshot first; restorePixelState puts a snapshot back.
+    void convertDepth(BitDepth target);
+
+    // Replace this layer's depth and pixel stores with `other`'s (copy-on-write, so cheap). The
+    // undo half of a depth conversion: it restores the pre-conversion pixels without touching the
+    // mask, name or blend state, which a conversion never changes.
+    void restorePixelState(const PixelLayer& other);
+
     // Editing surface. tiles() is the 8-bit store (the default and what existing
     // construction/tests/paint commands use); tiles16()/tilesF() expose the high-
     // bit-depth stores for U16/F32 layers. Each is the active store only when the
