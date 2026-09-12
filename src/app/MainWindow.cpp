@@ -35,8 +35,10 @@
 #ifdef PHOTOEDIT_HAVE_LCMS2
 #include "pe/core/ColorOps.hpp"  // convertToProfile
 #endif
+#include "pe/core/AutoTone.hpp"
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Filter.hpp"
+#include "pe/core/Histogram.hpp"
 #include "pe/core/ImageIO.hpp"
 #include "pe/core/PixelLayer.hpp"  // fill the base layer for a White new document
 #include "pe/core/TextLayer.hpp"   // pe::TextLayer / TextModel / EditTextCommand
@@ -299,6 +301,22 @@ void MainWindow::buildMenuBar() {
                          QKeySequence(QStringLiteral("Ctrl+Alt+C")), this,
                          &MainWindow::changeCanvasSize);
     imageMenu->addAction(QStringLiteral("Crop to &Selection"), this, &MainWindow::cropToSelection);
+    imageMenu->addSeparator();
+    {
+        // One-click tonal stretches: derive endpoints from the composite histogram and bake them
+        // onto the active layer. Auto Tone stretches each channel (removes a cast); Auto Contrast
+        // stretches by luma (keeps the colour balance). The engine (computeAutoTone/applyAutoTone)
+        // was built and tested but had no menu route.
+        QAction* autoTone = imageMenu->addAction(QStringLiteral("Auto &Tone"), this,
+                                                 [this] { autoAdjust(pe::AutoToneMode::Levels); });
+        autoTone->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+L")));
+        docActions_.push_back(autoTone);
+        QAction* autoContrast =
+            imageMenu->addAction(QStringLiteral("Auto &Contrast"), this,
+                                 [this] { autoAdjust(pe::AutoToneMode::Contrast); });
+        autoContrast->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+Shift+L")));
+        docActions_.push_back(autoContrast);
+    }
     imageMenu->addSeparator();
     {
         auto* adj = imageMenu->addMenu(QStringLiteral("Adjustments"));
@@ -1877,6 +1895,39 @@ void MainWindow::pasteFromClipboard(bool into) {
     doc_->history().push(
         std::make_unique<pe::AddLayerCommand>(std::move(layer), doc_->topLevelCount()));
     doc_->setActiveLayer(id);
+}
+
+bool MainWindow::autoAdjust(pe::AutoToneMode mode) {
+    const bool contrast = mode == pe::AutoToneMode::Contrast;
+    const char* const action = contrast ? "Image > Auto Contrast" : "Image > Auto Tone";
+    if (refuseIf(doc_ == nullptr, "image.autoTone", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return false;
+    }
+    const pe::Layer* active = doc_->findLayer(doc_->activeLayer());
+    if (refuseIf(active == nullptr || active->kind() != pe::LayerKind::Pixel, "image.autoTone",
+                 pe::RefusalCode::LayerNotPixel, action,
+                 QStringLiteral("Auto adjustments bake onto a pixel layer. Select one first."))) {
+        return false;
+    }
+    // Endpoints come from the whole composite (what the eye sees, and what the Histogram panel
+    // shows); the stretch is baked onto the active layer, gated by any active selection.
+    const pe::PixelBuffer img = doc_->compositeImage();
+    if (refuseIf(img.isEmpty(), "image.autoTone", pe::RefusalCode::OverSizeBudget, action,
+                 QStringLiteral("This document is too large to analyse in one pass."))) {
+        return false;
+    }
+    const pe::AutoToneLevels levels = pe::computeAutoTone(pe::computeHistogram(img), mode);
+    auto cmd = pe::bakePixelEdit(
+        *doc_, doc_->activeLayer(), contrast ? "Auto Contrast" : "Auto Tone",
+        [levels](std::span<pe::Rgbaf> px, int, int) { pe::applyAutoTone(px, levels); },
+        &doc_->selection());
+    if (refuseIf(cmd == nullptr, "image.autoTone", pe::RefusalCode::NoEffect, action,
+                 QStringLiteral("There is no tonal range to stretch on this layer."))) {
+        return false;
+    }
+    doc_->history().push(std::move(cmd));
+    return true;
 }
 
 #ifdef PHOTOEDIT_HAVE_LCMS2

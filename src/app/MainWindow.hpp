@@ -3,6 +3,7 @@
 #include "BusyTask.hpp"  // pe::app::TaskAccess / TaskResult
 #include "Theme.hpp"
 
+#include "pe/core/AutoTone.hpp"  // pe::AutoToneMode (Image > Auto Tone / Auto Contrast)
 #include "pe/core/Document.hpp"  // pe::DocumentObserver (base class)
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Layer.hpp"  // pe::LayerId
@@ -163,6 +164,11 @@ public:
     // the tests drive, and changeImageSize adds only the modal dialog around it. Returns true if
     // it resampled.
     bool applyImageSize(pe::Size want);
+
+    // Image > Auto Tone / Auto Contrast: derive a per-channel (Levels) or luma (Contrast) stretch
+    // from the composite histogram and bake it onto the active layer, as one undo step. There is no
+    // dialog, so this is directly testable. Returns true if it adjusted.
+    bool autoAdjust(pe::AutoToneMode mode);
 
 #ifdef PHOTOEDIT_HAVE_LCMS2
     // Re-tag the document with `profile` (Assign: reinterpret the numbers, no pixel change) as one

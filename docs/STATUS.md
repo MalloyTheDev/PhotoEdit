@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **795 engine cases + 247 shell cases, 0 failed**. The engine tests
+Test suite: **795 engine cases + 253 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -94,6 +94,14 @@ The engine is no longer headless-only; the Qt6 app provides a real
   so the dependency-free lanes still build. `applyAssignProfile`/`applyConvertProfile` are the
   decidable halves the tests drive, with the modal dialog the only untestable boundary. (Loading an
   ICC file from disk, Color Settings, the proof/gamut view and Image ▸ Mode remain pending, #193.)
+- **Auto Tone / Auto Contrast** (Image ▸ Auto Tone Ctrl+Shift+L, Auto Contrast Ctrl+Alt+Shift+L).
+  The `computeAutoTone`/`applyAutoTone` engine (per-channel or luma black/white stretch from a
+  clipped histogram) was built and tested with no menu route (#194). `autoAdjust` derives the
+  endpoints from the composite histogram (what the eye sees) and bakes the stretch onto the active
+  layer through the shared `bakePixelEdit` machinery, gated by the selection, as one undo step. It
+  refuses out loud on a non-pixel layer and on a flat image (no range to stretch) rather than
+  pushing a history entry that changes nothing. No dialog, so `autoAdjust` is driven directly by
+  the tests.
 - **Clipboard** — Cut, Copy, Copy Merged, Paste, Paste Into and Clear, on the conventional
   shortcuts. None of it existed before: the Edit menu was Undo, Redo and Free Transform, so
   Ctrl+C and Ctrl+V did nothing at all. The engine half is region primitives in `Filter.hpp`
