@@ -13,6 +13,7 @@
 #include "ExportDialog.hpp"
 #include "GradientsPanel.hpp"
 #include "GroupedSlidersDialog.hpp"
+#include "HistogramPanel.hpp"
 #include "HistoryPanel.hpp"
 #include "IconUtil.hpp"
 #include "ImageSizeDialog.hpp"
@@ -183,6 +184,7 @@ MainWindow::~MainWindow() {
     if (history_ != nullptr) history_->setDocument(nullptr);
     if (properties_ != nullptr) properties_->setDocument(nullptr);
     if (channels_ != nullptr) channels_->setDocument(nullptr);
+    if (histogram_ != nullptr) histogram_->setDocument(nullptr);
 }
 
 namespace {
@@ -793,8 +795,8 @@ void MainWindow::populateWindowMenu() {
         {QStringLiteral("Color"), QStringLiteral("Swatches"), QStringLiteral("Gradients"),
          QStringLiteral("Patterns")},
         {QStringLiteral("Properties"), QStringLiteral("Adjustments"), QStringLiteral("Libraries")},
-        {QStringLiteral("Layers"), QStringLiteral("Channels"), QStringLiteral("Paths"),
-         QStringLiteral("History")},
+        {QStringLiteral("Layers"), QStringLiteral("Channels"), QStringLiteral("Histogram"),
+         QStringLiteral("Paths"), QStringLiteral("History")},
     };
 
     const QList<QDockWidget*> docks = findChildren<QDockWidget*>();
@@ -2596,6 +2598,7 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     if (history_ != nullptr) history_->setDocument(nullptr);
     if (properties_ != nullptr) properties_->setDocument(nullptr);
     if (channels_ != nullptr) channels_->setDocument(nullptr);
+    if (histogram_ != nullptr) histogram_->setDocument(nullptr);
     if (doc_ != nullptr) doc_->removeObserver(this);
     doc_ = std::move(doc);
     if (doc_ != nullptr) doc_->addObserver(this);
@@ -2605,6 +2608,7 @@ void MainWindow::setDocument(std::unique_ptr<pe::Document> doc, QString path) {
     if (history_ != nullptr) history_->setDocument(doc_.get());
     if (properties_ != nullptr) properties_->setDocument(doc_.get());
     if (channels_ != nullptr) channels_->setDocument(doc_.get());
+    if (histogram_ != nullptr) histogram_->setDocument(doc_.get());
     refreshTitle();
     refreshDocTab();
     refreshZoomStrip();
@@ -2769,6 +2773,7 @@ void MainWindow::buildDockPanels() {
     swatchesPanel_ = new SwatchesPanel();
     adjustments_ = new AdjustmentsPanel();
     channels_ = new ChannelsPanel();
+    histogram_ = new HistogramPanel();
     gradients_ = new GradientsPanel();
     properties_ = new PropertiesPanel();
 
@@ -2792,6 +2797,9 @@ void MainWindow::buildDockPanels() {
     // the document. Its thumbnails come from the canvas's renderer, which already holds the
     // composited tiles, rather than from a fresh flatten of the whole image.
     channels_->setPreviewSource(
+        [this](int maxPixels) { return canvas_->canvasPreview(maxPixels); });
+    // The Histogram dock reads the same bounded composite the Channels dock does; display only.
+    histogram_->setPreviewSource(
         [this](int maxPixels) { return canvas_->canvasPreview(maxPixels); });
     connect(channels_, &ChannelsPanel::viewChanged, this,
             [this](pe::ChannelView v) { canvas_->setChannelView(v); });
@@ -2835,6 +2843,7 @@ void MainWindow::buildDockPanels() {
                                                        "gradients, graphics."))));
 
     tabifyDockWidget(layersDock, makeDock(QStringLiteral("Channels"), channels_));
+    tabifyDockWidget(layersDock, makeDock(QStringLiteral("Histogram"), histogram_));
     tabifyDockWidget(layersDock,
                      makeDock(QStringLiteral("Paths"),
                               placeholder(QStringLiteral("Paths"),

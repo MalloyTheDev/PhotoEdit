@@ -53,6 +53,8 @@ qt_add_library(pe_app STATIC
     AdjustmentsPanel.cpp
     AdjustmentsPanel.hpp
     ChannelsPanel.cpp
+    HistogramPanel.cpp
+    HistogramPanel.hpp
     ChannelsPanel.hpp
     GradientsPanel.cpp
     GradientsPanel.hpp

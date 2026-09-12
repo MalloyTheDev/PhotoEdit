@@ -42,6 +42,7 @@ class ColorPanel;
 class SwatchesPanel;
 class AdjustmentsPanel;
 class ChannelsPanel;
+class HistogramPanel;
 class GradientsPanel;
 class PropertiesPanel;
 
@@ -308,6 +309,7 @@ private:
     SwatchesPanel* swatchesPanel_ = nullptr;
     AdjustmentsPanel* adjustments_ = nullptr;
     ChannelsPanel* channels_ = nullptr;
+    HistogramPanel* histogram_ = nullptr;
     GradientsPanel* gradients_ = nullptr;
     PropertiesPanel* properties_ = nullptr;
     QLabel* toolLabel_ = nullptr;        // status bar: active tool

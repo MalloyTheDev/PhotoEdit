@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **795 engine cases + 253 shell cases, 0 failed**. The engine tests
+Test suite: **795 engine cases + 257 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -102,6 +102,15 @@ The engine is no longer headless-only; the Qt6 app provides a real
   refuses out loud on a non-pixel layer and on a flat image (no range to stretch) rather than
   pushing a history entry that changes nothing. No dialog, so `autoAdjust` is driven directly by
   the tests.
+- **Histogram panel** (Window ▸ Histogram, docked with Channels). The engine's `computeHistogram`
+  and `channelStats` were built and tested with no panel to show them (#194). `HistogramPanel` draws
+  256-bin bars for one channel or the three RGB channels overlaid additively on a dark plot, with a
+  Luminosity / RGB / Red / Green / Blue selector and a mean/median/std-dev readout. It reads the
+  same bounded, downscaled composite the Channels dock uses (never `compositeImage()`, which returns
+  nothing past its megapixel cap), so it keeps working on large documents; it recomputes on open and
+  on pixel-changing edits while on screen, catching up on show, and never touches the document or the
+  undo stack. Display only, so the test drives the computed histogram through a stubbed preview
+  source rather than the drawing.
 - **Clipboard** — Cut, Copy, Copy Merged, Paste, Paste Into and Clear, on the conventional
   shortcuts. None of it existed before: the Edit menu was Undo, Redo and Free Transform, so
   Ctrl+C and Ctrl+V did nothing at all. The engine half is region primitives in `Filter.hpp`
