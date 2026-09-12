@@ -296,6 +296,18 @@ void MainWindow::buildMenuBar() {
     // The Image menu held exactly one submenu (Adjustments) and nothing else, so the two
     // operations that change the document's shape had no menu route at all: Canvas Size did not
     // exist, and Crop existed only as a drag with the Crop tool.
+    {
+        // Image mode / bit depth, at the top of the menu as in other editors.
+        auto* mode = imageMenu->addMenu(QStringLiteral("&Mode"));
+        docMenus_.push_back(mode);
+        mode->addAction(QStringLiteral("&8 Bits/Channel"), this,
+                        [this] { applyBitDepth(pe::BitDepth::U8); });
+        mode->addAction(QStringLiteral("&16 Bits/Channel"), this,
+                        [this] { applyBitDepth(pe::BitDepth::U16); });
+        mode->addAction(QStringLiteral("&32 Bits/Channel"), this,
+                        [this] { applyBitDepth(pe::BitDepth::F32); });
+    }
+    imageMenu->addSeparator();
     imageMenu->addAction(QStringLiteral("&Image Size..."),
                          QKeySequence(QStringLiteral("Ctrl+Alt+I")), this,
                          &MainWindow::changeImageSize);
@@ -2004,6 +2016,29 @@ bool MainWindow::trimTransparent() {
         return false;
     }
     doc_->history().push(std::make_unique<pe::CropCommand>(bbox));
+    return true;
+}
+
+bool MainWindow::applyBitDepth(pe::BitDepth target) {
+    const char* const action = "Image > Mode";
+    if (refuseIf(doc_ == nullptr, "image.mode", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return false;
+    }
+    switch (pe::bitDepthBlocker(*doc_, target)) {
+        case pe::BitDepthBlock::Unchanged:
+            (void)refuseIf(true, "image.mode", pe::RefusalCode::NoEffect, action,
+                           QStringLiteral("The document is already at that bit depth."));
+            return false;
+        case pe::BitDepthBlock::ContentTooLarge:
+            (void)refuseIf(true, "image.mode", pe::RefusalCode::OverSizeBudget, action,
+                           QStringLiteral("This document has too much content to convert in one "
+                                          "step."));
+            return false;
+        case pe::BitDepthBlock::None:
+            break;
+    }
+    doc_->history().push(std::make_unique<pe::SetBitDepthCommand>(target));
     return true;
 }
 

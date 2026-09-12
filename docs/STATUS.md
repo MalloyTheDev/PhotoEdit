@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **819 engine cases + 263 shell cases, 0 failed**. The engine tests
+Test suite: **819 engine cases + 267 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -39,7 +39,7 @@ document is painted underneath it.
 | **M3** Painting & history | ✅ | 🟡 | Brush engine (tile-delta paint commands) and the history/undo stack are implemented and tested, with an incremental live stroke so per-sample cost does not grow with stroke length. The app has brush, eraser, clone, dodge/burn, blur/sharpen, spot heal, bucket, gradient, move, marquee, lasso, magic wand, crop, type, free transform and eyedropper, with tablet pressure and stabilization. Brush presets and the remaining dynamics are pending. |
 | **M4** Selections & masks | ✅ | 🟡 | Engine complete (rect, ops, masks, gating). Basic Marquee tool + marching ants + modifiers (Shift/Alt) wired in UI. Select All/Deselect/Invert menu added. More tools pending. |
 | **M5** Adjustments & filters | ✅ | 🟡 | **Complete in the engine** (see below). The app has adjustment layers with interactive editors for Curves, Levels, Photo Filter, Gradient Map, Channel Mixer and Selective Color, plus the filter dialogs. A unified filter gallery is pending. |
-| **M6** Color management | ✅ | 🟡 | **Complete in the engine** (see below): lcms2/ICC profiles, working spaces, transforms (4 intents + BPC), a thread-safe transform cache, document assign/convert, display conversion, soft-proofing + gamut warning, and the channels system, on the 8/16/32-float pixel pipeline. The app now reaches it through **Edit ▸ Assign Profile / Convert to Profile**; Color Settings, proof/gamut view and Image ▸ Mode (bit depth) are still pending. |
+| **M6** Color management | ✅ | 🟡 | **Complete in the engine** (see below): lcms2/ICC profiles, working spaces, transforms (4 intents + BPC), a thread-safe transform cache, document assign/convert, display conversion, soft-proofing + gamut warning, and the channels system, on the 8/16/32-float pixel pipeline. The app now reaches it through **Edit ▸ Assign Profile / Convert to Profile** and **Image ▸ Mode** (8/16/32 bits per channel); Color Settings and the proof/gamut view are still pending. |
 | **M7** File formats | ✅ | 🟡 | **Engine complete** (see below): PNG, JPEG, TIFF, WebP, and the native layered **`.pedoc`** format, all hardened against untrusted input. The app's **Open / New / Save / Save As** are wired through `DocumentIO`. |
 | **M8**–**M10** | ⬜ | ⬜ | Not started (type/vector/smart objects, retouching/AI, automation/print/plugins). |
 
@@ -93,6 +93,15 @@ The engine is no longer headless-only; the Qt6 app provides a real
   the canvas to the tight non-transparent bounds of the composite (removing transparent borders)
   through the existing `CropCommand`, refusing when the image is empty or already tight.
   `applyOrient`/`trimTransparent` are driven directly by the tests (no dialog).
+- **Image Mode / bit depth** (Image ▸ Mode ▸ 8 / 16 / 32 Bits/Channel). The pixel pipeline was
+  depth-aware end to end (U8/U16/F32 stores, depth-aware layers, native-depth editing) but nothing
+  could change an existing document's depth (#193). `SetBitDepthCommand` rebuilds every pixel
+  layer's tile store at the new depth (each pixel through float) and updates the document tag, as
+  one undoable step. Widening is lossless; narrowing loses precision, so undo restores a
+  pre-conversion clone of each layer (its copy-on-write tiles keep the old pixels resident) rather
+  than reconstructing. `bitDepthBlocker` refuses all-or-nothing when a converted store would exceed
+  the move budget, and `applyBitDepth` refuses a no-op conversion to the current depth. Masks, text
+  rasters and fill colours carry no depth and are untouched.
 - **Colour management** (Edit ▸ Assign Profile / Convert to Profile). The entire M6 colour engine
   (ICC profiles, working spaces, transforms with four intents and black-point compensation) had
   **zero references anywhere in the app** until now: `AssignProfileCommand` and `convertToProfile`

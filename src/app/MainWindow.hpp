@@ -180,6 +180,11 @@ public:
     // the composite is too large to scan in one pass.
     bool trimTransparent();
 
+    // Image > Mode: convert the whole document to `target` bits per channel as one undo step, or
+    // refuse for no document, an unchanged depth, or content too large to convert. Directly
+    // testable (no dialog).
+    bool applyBitDepth(pe::BitDepth target);
+
 #ifdef PHOTOEDIT_HAVE_LCMS2
     // Re-tag the document with `profile` (Assign: reinterpret the numbers, no pixel change) as one
     // undo step, or refuse for no document / no profile. The decidable half of the split, like
