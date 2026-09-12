@@ -34,6 +34,7 @@ add_executable(pe_core_tests
     core/test_adjustment.cpp
     core/test_textlayer.cpp
     core/test_filter.cpp
+    core/test_parallel.cpp
     core/test_hittest.cpp
     core/test_golden.cpp
     core/test_filtertiling.cpp

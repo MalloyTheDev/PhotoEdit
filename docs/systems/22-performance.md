@@ -164,6 +164,44 @@ Rules that follow, and that a new background operation has to satisfy:
   keeps painting), `LiveDocument` (worker touches the real document, so input is blocked
   and the canvas frozen) or `Detached` (a new document is being built).
 
+### Data-parallel kernels (as implemented)
+
+Filters and adjustments parallelize WITHIN a single operation, a different axis from the
+snapshot model above: no second thread touches the `Document`. The owning thread splits one
+CPU-bound pass across a few lanes and joins before returning. The primitive is
+`pe::parallelFor(begin, end, minChunk, body)` (`src/core/src/Parallel.cpp`): it divides
+`[begin, end)` into contiguous, disjoint sub-ranges, runs `body(lo, hi)` on each (worker
+threads plus the calling thread), and joins. `parallelThreadCount()` sizes the split to
+`hardware_concurrency()` (capped at 64); the `PHOTOEDIT_THREADS` environment variable
+overrides it, which the tests use to force a specific lane count.
+
+The determinism contract is structural, not incidental. `body` writes only outputs indexed
+by its own `[lo, hi)` and shares nothing mutable, so each output element is produced by
+exactly one invocation using the same arithmetic the serial loop would use. There is no
+reduction and no ordering to preserve, so the result is BYTE-IDENTICAL for any lane count,
+including one. `tests/core/test_parallel.cpp` pins that: every parallelized kernel is
+compared bit-for-bit at 1, 2, 4 and 8 lanes, and the baked tile-delta path is compared
+end-to-end.
+
+What runs on it today (`src/core/src/Filter.cpp`):
+
+- the separable convolution (box and Gaussian blur, and Unsharp Mask built on it), Find
+  Edges, the median filter, Mosaic and Add Noise, each split into row bands (Mosaic into
+  cell-row bands, so a whole cell stays on one lane). Add Noise was already a pure hash of
+  pixel position, so it parallelizes without changing a byte;
+- the bake tile-delta diff in `bakePixelEditImpl`, which every destructive filter and
+  adjustment funnels through: one job per output tile, each writing its own result slot,
+  merged back in tile order. `store.sharedTile()` flips a per-tile `mutable` flag, but each
+  tile coordinate is visited by exactly one job so those writes never collide, and
+  `std::map::find` is a concurrent-safe const read.
+
+The COMPOSITOR is deliberately NOT on this path. `CanvasRenderer` holds a single mutable
+scratch buffer and an unsynchronized LRU, `TileStoreT::contentBounds()` caches lazily behind
+`mutable`, and `Document::notify` runs observers synchronously; parallelizing a composite
+would race all three. Measured on a 24 MP buffer (16 cores), the compute-bound kernels scale
+well (Find Edges about 7.5x, median about 5.9x, Add Noise about 10.6x); the separable blur is
+memory-bandwidth-bound across its four full-image passes and gains less (about 1.8x).
+
 ## Edge cases & failure modes
 
 - Scratch disk full → surface a clear error, pause spilling, protect the document.
@@ -184,7 +222,8 @@ Rules that follow, and that a new background operation has to satisfy:
 
 - **M2**: RAM tile cache + budget, CoW tiles, dirty-driven recomposite, worker pool
   for compositing.
-- **M5+**: scratch-disk pager; multithreaded/SIMD filters; proxy previews.
+- **M5+**: scratch-disk pager; multithreaded filters landed early via data-parallel
+  kernels (#170, see above); SIMD filters and proxy previews still pending.
 - **Continuous**: profiling, budgets tuning, prioritized job scheduling.
 
 ## Open questions

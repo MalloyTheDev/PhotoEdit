@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **821 engine cases + 271 shell cases, 0 failed**. The engine tests
+Test suite: **826 engine cases + 271 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -274,7 +274,9 @@ pipeline.)
 
 **Filter engine** (`Filter.hpp`, reversible selection-gated commands): Gaussian/Box
 blur (separable, premultiplied), Unsharp Mask, Mosaic, Median, Add Noise (seeded),
-Find Edges (Sobel).
+Find Edges (Sobel). The kernels and the reversible tile-delta bake are **data-parallel**
+across CPU cores (`pe::parallelFor`, #170), with a structural guarantee of byte-identical
+output at any thread count; see [performance](systems/22-performance.md#data-parallel-kernels-as-implemented).
 
 **Analysis:** `Histogram` (R/G/B/A + Rec.601 luma, statistics + percentiles) and
 `AutoTone` (Auto Contrast / Auto Levels with clip trimming).

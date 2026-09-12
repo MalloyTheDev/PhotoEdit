@@ -1,6 +1,7 @@
 #include "pe/core/Filter.hpp"
 #include "pe/core/Mask.hpp"
 #include "pe/core/Orient.hpp"
+#include "pe/core/Parallel.hpp"
 #include "pe/core/Resample.hpp"
 
 #include "pe/core/BlendMode.hpp"    // compositeOver (bucket fill)
@@ -18,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <vector>
 
 namespace pe {
@@ -32,42 +34,67 @@ inline int clampi(int v, int lo, int hi) noexcept {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+// Rows per parallel chunk for a full-width kernel pass. Sized so each chunk carries at
+// least ~kParallelChunkPixels source pixels: below that, thread hand-off costs more than
+// it saves, so parallelForRows leaves the pass serial. Kernel cost also grows with the
+// radius, but a fixed pixel floor is enough to keep tiny regions off the thread path
+// while letting a multi-megapixel filter fan out across every lane.
+constexpr int kParallelChunkPixels = 1 << 16;  // 65536
+inline int rowsPerChunk(int w) noexcept {
+    return std::max(1, kParallelChunkPixels / std::max(1, w));
+}
+
+// Tiles per parallel chunk when diffing a baked region back into tile deltas. One tile is
+// up to kTilePixels (65536) pixel conversions, already about one kParallelChunkPixels
+// unit of work, so a single tile per lane is worth dispatching.
+constexpr int kBakeTileChunk = 1;
+
+// Split the rows [0, h) across lanes and run `rows(y0, y1)` on each contiguous band.
+// Every band writes disjoint output rows, so the result is identical for any lane count.
+inline void parallelForRows(int h, int w, const std::function<void(int, int)>& rows) {
+    parallelFor(0, h, rowsPerChunk(w), rows);
+}
+
 // Separable 1D convolution along x (horizontal) with a clamped border.
 void convolveH(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h,
                std::span<const float> kernel, int radius) {
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            Rgbaf acc{};
-            for (int j = -radius; j <= radius; ++j) {
-                const float k = kernel[static_cast<std::size_t>(j + radius)];
-                const Rgbaf& s = src[idx(clampi(x + j, 0, w - 1), y, w)];
-                acc.r += k * s.r;
-                acc.g += k * s.g;
-                acc.b += k * s.b;
-                acc.a += k * s.a;
+    parallelForRows(h, w, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < w; ++x) {
+                Rgbaf acc{};
+                for (int j = -radius; j <= radius; ++j) {
+                    const float k = kernel[static_cast<std::size_t>(j + radius)];
+                    const Rgbaf& s = src[idx(clampi(x + j, 0, w - 1), y, w)];
+                    acc.r += k * s.r;
+                    acc.g += k * s.g;
+                    acc.b += k * s.b;
+                    acc.a += k * s.a;
+                }
+                dst[idx(x, y, w)] = acc;
             }
-            dst[idx(x, y, w)] = acc;
         }
-    }
+    });
 }
 
 // Separable 1D convolution along y (vertical) with a clamped border.
 void convolveV(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h,
                std::span<const float> kernel, int radius) {
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            Rgbaf acc{};
-            for (int j = -radius; j <= radius; ++j) {
-                const float k = kernel[static_cast<std::size_t>(j + radius)];
-                const Rgbaf& s = src[idx(x, clampi(y + j, 0, h - 1), w)];
-                acc.r += k * s.r;
-                acc.g += k * s.g;
-                acc.b += k * s.b;
-                acc.a += k * s.a;
+    parallelForRows(h, w, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < w; ++x) {
+                Rgbaf acc{};
+                for (int j = -radius; j <= radius; ++j) {
+                    const float k = kernel[static_cast<std::size_t>(j + radius)];
+                    const Rgbaf& s = src[idx(x, clampi(y + j, 0, h - 1), w)];
+                    acc.r += k * s.r;
+                    acc.g += k * s.g;
+                    acc.b += k * s.b;
+                    acc.a += k * s.a;
+                }
+                dst[idx(x, y, w)] = acc;
             }
-            dst[idx(x, y, w)] = acc;
         }
-    }
+    });
 }
 
 // Separable H+V convolution done in PREMULTIPLIED alpha, so transparent pixels
@@ -78,10 +105,14 @@ void convolveSeparablePremult(std::span<const Rgbaf> src, std::span<Rgbaf> dst, 
     const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
     std::vector<Rgbaf> pmul(n);
     std::vector<Rgbaf> tmp(n);
-    for (std::size_t i = 0; i < n; ++i) pmul[i] = premultiply(src[i]);
+    parallelForRows(h, w, [&](int y0, int y1) {
+        for (std::size_t i = idx(0, y0, w); i < idx(0, y1, w); ++i) pmul[i] = premultiply(src[i]);
+    });
     convolveH(pmul, tmp, w, h, kernel, radius);
     convolveV(tmp, dst, w, h, kernel, radius);
-    for (std::size_t i = 0; i < n; ++i) dst[i] = unpremultiply(dst[i]);
+    parallelForRows(h, w, [&](int y0, int y1) {
+        for (std::size_t i = idx(0, y0, w); i < idx(0, y1, w); ++i) dst[i] = unpremultiply(dst[i]);
+    });
 }
 
 void copyImage(std::span<const Rgbaf> src, std::span<Rgbaf> dst) {
@@ -158,12 +189,13 @@ void unsharpMask(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h,
         if (std::fabs(detail) < threshold) return clamp01(s);
         return clamp01(s + amount * detail);
     };
-    const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-    for (std::size_t i = 0; i < n; ++i) {
-        const Rgbaf& s = src[i];
-        const Rgbaf& b = blurred[i];
-        dst[i] = Rgbaf{sharpen(s.r, b.r), sharpen(s.g, b.g), sharpen(s.b, b.b), clamp01(s.a)};
-    }
+    parallelForRows(h, w, [&](int y0, int y1) {
+        for (std::size_t i = idx(0, y0, w); i < idx(0, y1, w); ++i) {
+            const Rgbaf& s = src[i];
+            const Rgbaf& b = blurred[i];
+            dst[i] = Rgbaf{sharpen(s.r, b.r), sharpen(s.g, b.g), sharpen(s.b, b.b), clamp01(s.a)};
+        }
+    });
 }
 
 void mosaic(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int cell) {
@@ -172,31 +204,39 @@ void mosaic(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int 
         copyImage(src, dst);
         return;
     }
-    for (int by = 0; by < h; by += cell) {
-        const int y1 = std::min(by + cell, h);
-        for (int bx = 0; bx < w; bx += cell) {
-            const int x1 = std::min(bx + cell, w);
-            // Average in premultiplied alpha so transparent pixels add no color.
-            Rgbaf sum{};
-            int count = 0;
-            for (int y = by; y < y1; ++y) {
-                for (int x = bx; x < x1; ++x) {
-                    const Rgbaf pm = premultiply(src[idx(x, y, w)]);
-                    sum.r += pm.r;
-                    sum.g += pm.g;
-                    sum.b += pm.b;
-                    sum.a += pm.a;
-                    ++count;
+    // One job per row of cells: cell-row `cr` owns output rows [cr*cell, (cr+1)*cell),
+    // which are disjoint across jobs, so the whole cell (its average and its fill) stays
+    // on one lane and the result is identical for any lane count.
+    const int nCellRows = (h + cell - 1) / cell;
+    const int minCellRows = std::max(1, rowsPerChunk(w) / cell);
+    parallelFor(0, nCellRows, minCellRows, [&](int cr0, int cr1) {
+        for (int cr = cr0; cr < cr1; ++cr) {
+            const int by = cr * cell;
+            const int y1 = std::min(by + cell, h);
+            for (int bx = 0; bx < w; bx += cell) {
+                const int x1 = std::min(bx + cell, w);
+                // Average in premultiplied alpha so transparent pixels add no color.
+                Rgbaf sum{};
+                int count = 0;
+                for (int y = by; y < y1; ++y) {
+                    for (int x = bx; x < x1; ++x) {
+                        const Rgbaf pm = premultiply(src[idx(x, y, w)]);
+                        sum.r += pm.r;
+                        sum.g += pm.g;
+                        sum.b += pm.b;
+                        sum.a += pm.a;
+                        ++count;
+                    }
+                }
+                const float inv = count > 0 ? 1.0f / static_cast<float>(count) : 0.0f;
+                const Rgbaf avg =
+                    unpremultiply(Rgbaf{sum.r * inv, sum.g * inv, sum.b * inv, sum.a * inv});
+                for (int y = by; y < y1; ++y) {
+                    for (int x = bx; x < x1; ++x) dst[idx(x, y, w)] = avg;
                 }
             }
-            const float inv = count > 0 ? 1.0f / static_cast<float>(count) : 0.0f;
-            const Rgbaf avg =
-                unpremultiply(Rgbaf{sum.r * inv, sum.g * inv, sum.b * inv, sum.a * inv});
-            for (int y = by; y < y1; ++y) {
-                for (int x = bx; x < x1; ++x) dst[idx(x, y, w)] = avg;
-            }
         }
-    }
+    });
 }
 
 void medianFilter(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, int radius) {
@@ -215,29 +255,34 @@ void medianFilter(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h
     const int side = 2 * radius + 1;
     const std::size_t window = static_cast<std::size_t>(side) * static_cast<std::size_t>(side);
     const std::size_t mid = window / 2;  // odd window -> middle element is the median
-    std::vector<float> rs(window), gs(window), bs(window), as(window);
-    const auto median = [mid](std::vector<float>& v) -> float {
-        std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid), v.end());
-        return v[mid];
-    };
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            // Clamping changes which source pixel is read, never the count, so the
-            // window is always full — fill all `window` slots, overwriting last pixel.
-            std::size_t n = 0;
-            for (int j = -radius; j <= radius; ++j) {
-                for (int i = -radius; i <= radius; ++i) {
-                    const Rgbaf& s = src[idx(clampi(x + i, 0, w - 1), clampi(y + j, 0, h - 1), w)];
-                    rs[n] = s.r;
-                    gs[n] = s.g;
-                    bs[n] = s.b;
-                    as[n] = s.a;
-                    ++n;
+    parallelForRows(h, w, [&](int y0, int y1) {
+        // Per-band scratch: nth_element reorders these in place, so each lane must own
+        // its own window buffers rather than share one set across threads.
+        std::vector<float> rs(window), gs(window), bs(window), as(window);
+        const auto median = [mid](std::vector<float>& v) -> float {
+            std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid), v.end());
+            return v[mid];
+        };
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < w; ++x) {
+                // Clamping changes which source pixel is read, never the count, so the
+                // window is always full: fill all `window` slots, overwriting last pixel.
+                std::size_t n = 0;
+                for (int j = -radius; j <= radius; ++j) {
+                    for (int i = -radius; i <= radius; ++i) {
+                        const Rgbaf& s =
+                            src[idx(clampi(x + i, 0, w - 1), clampi(y + j, 0, h - 1), w)];
+                        rs[n] = s.r;
+                        gs[n] = s.g;
+                        bs[n] = s.b;
+                        as[n] = s.a;
+                        ++n;
+                    }
                 }
+                dst[idx(x, y, w)] = Rgbaf{median(rs), median(gs), median(bs), median(as)};
             }
-            dst[idx(x, y, w)] = Rgbaf{median(rs), median(gs), median(bs), median(as)};
         }
-    }
+    });
 }
 
 void findEdges(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h) {
@@ -247,23 +292,25 @@ void findEdges(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h) {
     const auto at = [&](int x, int y) -> const Rgbaf& {
         return src[idx(clampi(x, 0, w - 1), clampi(y, 0, h - 1), w)];
     };
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            const Rgbaf tl = at(x - 1, y - 1), tc = at(x, y - 1), tr = at(x + 1, y - 1);
-            const Rgbaf ml = at(x - 1, y), mr = at(x + 1, y);
-            const Rgbaf bl = at(x - 1, y + 1), bc = at(x, y + 1), br = at(x + 1, y + 1);
-            const auto edge = [](float a0, float a1, float a2, float a3, float a5, float a6,
-                                 float a7, float a8) {
-                const float gx = (a2 + 2.0f * a5 + a8) - (a0 + 2.0f * a3 + a6);
-                const float gy = (a6 + 2.0f * a7 + a8) - (a0 + 2.0f * a1 + a2);
-                return clamp01(1.0f - std::sqrt(gx * gx + gy * gy));
-            };
-            dst[idx(x, y, w)] =
-                Rgbaf{edge(tl.r, tc.r, tr.r, ml.r, mr.r, bl.r, bc.r, br.r),
-                      edge(tl.g, tc.g, tr.g, ml.g, mr.g, bl.g, bc.g, br.g),
-                      edge(tl.b, tc.b, tr.b, ml.b, mr.b, bl.b, bc.b, br.b), clamp01(at(x, y).a)};
+    parallelForRows(h, w, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const Rgbaf tl = at(x - 1, y - 1), tc = at(x, y - 1), tr = at(x + 1, y - 1);
+                const Rgbaf ml = at(x - 1, y), mr = at(x + 1, y);
+                const Rgbaf bl = at(x - 1, y + 1), bc = at(x, y + 1), br = at(x + 1, y + 1);
+                const auto edge = [](float a0, float a1, float a2, float a3, float a5, float a6,
+                                     float a7, float a8) {
+                    const float gx = (a2 + 2.0f * a5 + a8) - (a0 + 2.0f * a3 + a6);
+                    const float gy = (a6 + 2.0f * a7 + a8) - (a0 + 2.0f * a1 + a2);
+                    return clamp01(1.0f - std::sqrt(gx * gx + gy * gy));
+                };
+                dst[idx(x, y, w)] = Rgbaf{edge(tl.r, tc.r, tr.r, ml.r, mr.r, bl.r, bc.r, br.r),
+                                          edge(tl.g, tc.g, tr.g, ml.g, mr.g, bl.g, bc.g, br.g),
+                                          edge(tl.b, tc.b, tr.b, ml.b, mr.b, bl.b, bc.b, br.b),
+                                          clamp01(at(x, y).a)};
+            }
         }
-    }
+    });
 }
 
 namespace {
@@ -306,17 +353,18 @@ void addNoise(std::span<const Rgbaf> src, std::span<Rgbaf> dst, int w, int h, fl
         return (uniform01(hashU32(key)) * 2.0f - 1.0f) * amount;  // uniform [-amount,amount]
     };
 
-    const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-    for (std::size_t i = 0; i < n; ++i) {
-        const Rgbaf& s = src[i];
-        if (monochromatic) {
-            const float d = noiseDelta(i, 0);  // same noise added to each channel
-            dst[i] = Rgbaf{clamp01(s.r + d), clamp01(s.g + d), clamp01(s.b + d), clamp01(s.a)};
-        } else {
-            dst[i] = Rgbaf{clamp01(s.r + noiseDelta(i, 0)), clamp01(s.g + noiseDelta(i, 1)),
-                           clamp01(s.b + noiseDelta(i, 2)), clamp01(s.a)};
+    parallelForRows(h, w, [&](int y0, int y1) {
+        for (std::size_t i = idx(0, y0, w); i < idx(0, y1, w); ++i) {
+            const Rgbaf& s = src[i];
+            if (monochromatic) {
+                const float d = noiseDelta(i, 0);  // same noise added to each channel
+                dst[i] = Rgbaf{clamp01(s.r + d), clamp01(s.g + d), clamp01(s.b + d), clamp01(s.a)};
+            } else {
+                dst[i] = Rgbaf{clamp01(s.r + noiseDelta(i, 0)), clamp01(s.g + noiseDelta(i, 1)),
+                               clamp01(s.b + noiseDelta(i, 2)), clamp01(s.a)};
+            }
         }
-    }
+    });
 }
 
 namespace {
@@ -631,12 +679,26 @@ std::unique_ptr<PaintCommand> bakePixelEditImpl(
     transform(std::span<Rgbaf>(work), w, h);
 
     const bool gate = selection != nullptr && selection->active();
-    std::vector<PaintCommand::DeltaT<Pixel>> deltas;
-    Rect dirty{};
     const TileSpan span = tilesForRect(bb);
-    for (int row = span.rowBegin; row < span.rowEnd; ++row) {
-        for (int col = span.colBegin; col < span.colEnd; ++col) {
-            const TileCoord coord{col, row};
+    const int nCols = span.colEnd - span.colBegin;
+    const int nRows = span.rowEnd - span.rowBegin;
+
+    // One independent job per tile. Each job reads the shared working/original buffers and
+    // the store (unchanged after the transform), allocates its own replacement tile, and
+    // writes only its own slot: nothing mutable is shared between jobs, so the outcome
+    // does not depend on the lane count. store.sharedTile() does flip a per-tile `mutable`
+    // flag, but every tile coordinate is visited by exactly one job, so those writes never
+    // collide. The slots are drained in tile order afterwards, which reproduces the exact
+    // serial delta order (row-major, then column) and unites the same dirty rects.
+    struct TileResult {
+        std::optional<PaintCommand::DeltaT<Pixel>> delta;
+        Rect dirty{};
+    };
+    const int nTiles = nCols * nRows;
+    std::vector<TileResult> slots(static_cast<std::size_t>(std::max(0, nTiles)));
+    parallelFor(0, nTiles, kBakeTileChunk, [&](int lo, int hi) {
+        for (int t = lo; t < hi; ++t) {
+            const TileCoord coord{span.colBegin + t % nCols, span.rowBegin + t / nCols};
             const Rect tb = tileBounds(coord);
             const Rect vis = tb.intersected(bb);
             if (vis.isEmpty()) continue;
@@ -681,10 +743,19 @@ std::unique_ptr<PaintCommand> bakePixelEditImpl(
                 }
             }
             if (changed) {
-                deltas.push_back(
-                    PaintCommand::DeltaT<Pixel>{coord, std::move(before), std::move(after)});
-                dirty = dirty.united(vis);
+                slots[static_cast<std::size_t>(t)].delta =
+                    PaintCommand::DeltaT<Pixel>{coord, std::move(before), std::move(after)};
+                slots[static_cast<std::size_t>(t)].dirty = vis;
             }
+        }
+    });
+
+    std::vector<PaintCommand::DeltaT<Pixel>> deltas;
+    Rect dirty{};
+    for (TileResult& s : slots) {
+        if (s.delta) {
+            deltas.push_back(std::move(*s.delta));
+            dirty = dirty.united(s.dirty);
         }
     }
     if (deltas.empty()) return nullptr;

@@ -26,6 +26,7 @@ add_library(pe_core
     src/Adjustment.cpp
     src/AdjustmentLayer.cpp
     src/Filter.cpp
+    src/Parallel.cpp
     src/HitTest.cpp
     src/Histogram.cpp
     src/Channels.cpp
@@ -49,6 +50,13 @@ target_compile_features(pe_core PUBLIC cxx_std_20)
 
 set_target_properties(pe_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
+
+# The engine parallelizes filter kernels across a small pool of std::threads
+# (src/Parallel.cpp). std::thread needs an explicit pthread link on Linux; on Windows
+# it is built in. PUBLIC so every consumer (the app shell, the test binaries) links it
+# too, since the threading types cross the library boundary in public headers.
+find_package(Threads REQUIRED)
+target_link_libraries(pe_core PUBLIC Threads::Threads)
 
 # Force every optional library off regardless of what is installed, for a
 # deterministic dependency-free build (the CI no-deps lane sets this). Without it,
