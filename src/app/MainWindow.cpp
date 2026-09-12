@@ -303,6 +303,24 @@ void MainWindow::buildMenuBar() {
                          QKeySequence(QStringLiteral("Ctrl+Alt+C")), this,
                          &MainWindow::changeCanvasSize);
     imageMenu->addAction(QStringLiteral("Crop to &Selection"), this, &MainWindow::cropToSelection);
+    {
+        // Image Rotation: exact, lossless flips and quarter/half turns of the whole document.
+        auto* rot = imageMenu->addMenu(QStringLiteral("Image &Rotation"));
+        docMenus_.push_back(rot);
+        rot->addAction(QStringLiteral("Rotate 90 &CW"), this,
+                       [this] { applyOrient(pe::Orient::Rotate90CW); });
+        rot->addAction(QStringLiteral("Rotate 90 CC&W"), this,
+                       [this] { applyOrient(pe::Orient::Rotate90CCW); });
+        rot->addAction(QStringLiteral("Rotate &180"), this,
+                       [this] { applyOrient(pe::Orient::Rotate180); });
+        rot->addSeparator();
+        rot->addAction(QStringLiteral("Flip &Horizontal"), this,
+                       [this] { applyOrient(pe::Orient::FlipHorizontal); });
+        rot->addAction(QStringLiteral("Flip &Vertical"), this,
+                       [this] { applyOrient(pe::Orient::FlipVertical); });
+    }
+    docActions_.push_back(
+        imageMenu->addAction(QStringLiteral("&Trim"), this, [this] { trimTransparent(); }));
     imageMenu->addSeparator();
     {
         // One-click tonal stretches: derive endpoints from the composite histogram and bake them
@@ -1929,6 +1947,63 @@ bool MainWindow::autoAdjust(pe::AutoToneMode mode) {
         return false;
     }
     doc_->history().push(std::move(cmd));
+    return true;
+}
+
+bool MainWindow::applyOrient(pe::Orient op) {
+    const char* const action = "Image > Image Rotation";
+    if (refuseIf(doc_ == nullptr, "image.rotate", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return false;
+    }
+    // Asked before the push, so a rotation that cannot run never becomes a dead history entry.
+    if (refuseIf(pe::orientBlocker(*doc_, op) != pe::OrientBlock::None, "image.rotate",
+                 pe::RefusalCode::OverSizeBudget, action,
+                 QStringLiteral("This document has too much content to reorient in one step."))) {
+        return false;
+    }
+    doc_->history().push(std::make_unique<pe::OrientDocumentCommand>(op));
+    return true;
+}
+
+bool MainWindow::trimTransparent() {
+    const char* const action = "Image > Trim";
+    if (refuseIf(doc_ == nullptr, "image.trim", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return false;
+    }
+    const pe::PixelBuffer img = doc_->compositeImage();
+    if (refuseIf(img.isEmpty(), "image.trim", pe::RefusalCode::OverSizeBudget, action,
+                 QStringLiteral("This document is too large to trim in one pass."))) {
+        return false;
+    }
+    // The tight bounding box of everything not fully transparent in the composite.
+    int minX = img.width();
+    int minY = img.height();
+    int maxX = -1;
+    int maxY = -1;
+    for (int y = 0; y < img.height(); ++y) {
+        for (int x = 0; x < img.width(); ++x) {
+            if (img.at(x, y).a != 0) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+    if (refuseIf(maxX < 0, "image.trim", pe::RefusalCode::NoEffect, action,
+                 QStringLiteral("The image is fully transparent, so there is nothing to trim."))) {
+        return false;
+    }
+    const pe::Rect bbox{minX, minY, maxX - minX + 1, maxY - minY + 1};
+    if (refuseIf(
+            bbox.x == 0 && bbox.y == 0 && bbox.width == img.width() && bbox.height == img.height(),
+            "image.trim", pe::RefusalCode::NoEffect, action,
+            QStringLiteral("There is no transparent border to trim."))) {
+        return false;
+    }
+    doc_->history().push(std::make_unique<pe::CropCommand>(bbox));
     return true;
 }
 

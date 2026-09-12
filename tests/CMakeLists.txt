@@ -111,6 +111,7 @@ if(PHOTOEDIT_BUILD_APP)
         app/test_imagesizeui.cpp
         app/test_colorui.cpp
         app/test_autotoneui.cpp
+        app/test_imagerotationui.cpp
         app/test_histogrampanel.cpp
         app/test_newdocument.cpp
         app/test_busytask.cpp

@@ -6,7 +6,8 @@
 #include "pe/core/AutoTone.hpp"  // pe::AutoToneMode (Image > Auto Tone / Auto Contrast)
 #include "pe/core/Document.hpp"  // pe::DocumentObserver (base class)
 #include "pe/core/DocumentIO.hpp"
-#include "pe/core/Layer.hpp"  // pe::LayerId
+#include "pe/core/Layer.hpp"   // pe::LayerId
+#include "pe/core/Orient.hpp"  // pe::Orient (Image > Image Rotation)
 #include "pe/core/Refusal.hpp"
 #include "pe/core/Selection.hpp"
 
@@ -170,6 +171,14 @@ public:
     // from the composite histogram and bake it onto the active layer, as one undo step. There is no
     // dialog, so this is directly testable. Returns true if it adjusted.
     bool autoAdjust(pe::AutoToneMode mode);
+
+    // Image > Image Rotation: reorient the whole document (a flip or a 90/180 turn) as one undo
+    // step, or refuse when a layer is too large to reorient. Directly testable (no dialog).
+    bool applyOrient(pe::Orient op);
+    // Image > Trim: crop the canvas to the tight non-transparent bounds of the composite, removing
+    // transparent borders. Refuses when the image is fully transparent or already tight, and when
+    // the composite is too large to scan in one pass.
+    bool trimTransparent();
 
 #ifdef PHOTOEDIT_HAVE_LCMS2
     // Re-tag the document with `profile` (Assign: reinterpret the numbers, no pixel change) as one

@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **811 engine cases + 257 shell cases, 0 failed**. The engine tests
+Test suite: **811 engine cases + 263 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -83,6 +83,16 @@ The engine is no longer headless-only; the Qt6 app provides a real
   proportions by default (so the common resize keeps the picture's shape) and warns when the result
   crosses ~64 MP; its `applyImageSize` is the decidable half the tests drive, with the modal
   `exec()` the only untestable boundary (the same split as New Document).
+- **Image Rotation** (Image ▸ Image Rotation) and **Trim**. Image Rotation is exact and lossless
+  (a pixel permutation, no resampling): Flip Horizontal/Vertical and Rotate 90 CW / 90 CCW / 180,
+  each an `OrientDocumentCommand` that turns every pixel layer (recursing groups), mask, text raster
+  (and its origin), fill bounds and the selection together and swaps the canvas on a quarter turn,
+  as one undoable step. It is the exact cousin of `ResampleDocumentCommand` and a sibling of
+  `ReframeCommand`, built on a shared `Orient.hpp` geometry (orientForward/Inverse), with an
+  all-or-nothing `orientBlocker` that refuses when a layer is too large to reorient. **Trim** crops
+  the canvas to the tight non-transparent bounds of the composite (removing transparent borders)
+  through the existing `CropCommand`, refusing when the image is empty or already tight.
+  `applyOrient`/`trimTransparent` are driven directly by the tests (no dialog).
 - **Colour management** (Edit ▸ Assign Profile / Convert to Profile). The entire M6 colour engine
   (ICC profiles, working spaces, transforms with four intents and black-point compensation) had
   **zero references anywhere in the app** until now: `AssignProfileCommand` and `convertToProfile`
