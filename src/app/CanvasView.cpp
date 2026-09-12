@@ -6,6 +6,9 @@
 #include "pe/core/CanvasRenderer.hpp"
 #include "pe/core/Commands.hpp"
 #include "pe/core/Compositor.hpp"  // kMaxCompositeImagePixels (extreme-zoom-out downscale threshold)
+#ifdef PHOTOEDIT_HAVE_LCMS2
+#include "pe/core/ColorOps.hpp"  // convertForProof (soft-proofing)
+#endif
 #include "pe/core/Document.hpp"
 #include "pe/core/Filter.hpp"
 #include "pe/core/HitTest.hpp"  // pe::moveLayerContent
@@ -158,6 +161,7 @@ void CanvasView::onDocumentChanged(const pe::Document&, const pe::DocumentChange
     // A committed mutation (paint commit, undo/redo, file load). The renderer is also an
     // observer and has already marked the changed tiles dirty, so we only need to repaint;
     // paintEvent recomposites just those tiles. The live brush preview repaints separately.
+    proofStale_ = true;  // the composite changed, so any cached soft-proof is stale
     update();
 }
 
@@ -173,6 +177,47 @@ void CanvasView::setChannelView(pe::ChannelView v) {
     // is the whole of it. Invalidating the cache here would recomposite the canvas every
     // time an eye was clicked, for no difference in the pixels.
     update();
+}
+
+void CanvasView::setProofColors(bool on) {
+    if (on == proofEnabled_) return;
+    proofEnabled_ = on;
+    proofStale_ = true;
+    update();
+}
+
+void CanvasView::setGamutWarning(bool on) {
+    if (on == gamutWarning_) return;
+    gamutWarning_ = on;
+    proofStale_ = true;  // the alarm is baked into the proofed image, so it must be rebuilt
+    update();
+}
+
+void CanvasView::setProofProfile(pe::ColorProfileRef profile) {
+    proofProfile_ = std::move(profile);
+    proofStale_ = true;
+    update();
+}
+
+void CanvasView::ensureProofImage() {
+    if (!proofStale_) return;
+    proofStale_ = false;
+    proofImage_ = pe::PixelBuffer{};
+#ifdef PHOTOEDIT_HAVE_LCMS2
+    if (!proofEnabled_ || doc_ == nullptr || !proofProfile_ || !proofProfile_->valid()) return;
+    // The whole working-space float composite (capped at ~64 MP; a larger document simply does not
+    // proof, falling back to the normal display), converted to the display while simulating the
+    // proof profile. The working profile is the document's, or sRGB when it is untagged; the
+    // display is assumed sRGB (no monitor profile plumbed yet).
+    const pe::PixelBufferF working = doc_->compositeImageF();
+    if (working.isEmpty()) return;
+    const pe::ColorProfileRef workingProfile =
+        doc_->colorProfile() ? doc_->colorProfile() : pe::ColorProfile::sRGB();
+    proofImage_ = pe::convertForProof(
+        working, workingProfile, pe::ColorProfile::sRGB(), proofProfile_,
+        pe::RenderingIntent::RelativeColorimetric, pe::RenderingIntent::RelativeColorimetric,
+        /*blackPointCompensation=*/true, gamutWarning_, pe::Rgbaf{0.5f, 0.5f, 0.5f, 1.0f});
+#endif
 }
 
 pe::PixelBuffer CanvasView::canvasPreview(int maxPixels) {
@@ -795,7 +840,24 @@ void CanvasView::paintEvent(QPaintEvent*) {
     // no longer blanks when fully zoomed out.
     const pe::Rect canvas{0, 0, cs.width, cs.height};
     const pe::Rect vis = view_.visibleDocRect(pe::Size{width(), height()}).intersected(canvas);
-    if (!vis.isEmpty()) {
+
+    // Soft-proof: draw the cached proofed whole-canvas image (in document space, so the view
+    // transform scales/pans it) in place of the per-tile composite. Overlays (marching ants,
+    // transform handles) still draw on top below. Falls through to the normal path when the
+    // document is too large to proof or proofing is off.
+    bool proofDrawn = false;
+    if (proofEnabled_ && proofProfile_ && proofProfile_->valid() && !vis.isEmpty()) {
+        ensureProofImage();
+        if (!proofImage_.isEmpty()) {
+            const QImage proofed(reinterpret_cast<const uchar*>(proofImage_.data()),
+                                 proofImage_.width(), proofImage_.height(), proofImage_.width() * 4,
+                                 QImage::Format_RGBA8888);
+            painter.drawImage(QPointF(0, 0), proofed);
+            proofDrawn = true;
+        }
+    }
+
+    if (!proofDrawn && !vis.isEmpty()) {
         // Branch on the VIEWPORT, not the engine's 64 MP composite cap. The old test meant a
         // repaint at 12% zoom on an 8000 square document allocated and filled a 64 MP buffer
         // to draw 1.6 MP of screen: 195 ms, and 2.8 seconds cold, while zooming out FURTHER

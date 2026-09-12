@@ -807,6 +807,55 @@ void MainWindow::buildMenuBar() {
         connect(a, &QAction::triggered, this, [this, id] { setTheme(id); });
     }
 
+#ifdef PHOTOEDIT_HAVE_LCMS2
+    // Soft-proofing: a display-only preview of how the image would convert to a target space, with
+    // an optional out-of-gamut warning. Display state on the canvas, not a document edit. Only when
+    // the engine has lcms2 (convertForProof lives there).
+    viewMenu->addSeparator();
+    QAction* proofColorsAct =
+        viewMenu->addAction(QStringLiteral("&Proof Colors"), this, [this](bool on) {
+            if (canvas_ != nullptr) canvas_->setProofColors(on);
+        });
+    proofColorsAct->setCheckable(true);
+    docActions_.push_back(proofColorsAct);
+    QAction* gamutAct =
+        viewMenu->addAction(QStringLiteral("&Gamut Warning"), this, [this](bool on) {
+            if (canvas_ != nullptr) canvas_->setGamutWarning(on);
+        });
+    gamutAct->setCheckable(true);
+    docActions_.push_back(gamutAct);
+    {
+        // Proof Setup: the target space to simulate. The built-in RGB working spaces; proofing to a
+        // smaller-gamut one (with Gamut Warning) shows which colours will not survive. sRGB is the
+        // default, so Proof Colors does something the moment it is switched on.
+        auto* proofSetup = viewMenu->addMenu(QStringLiteral("Proof Set&up"));
+        docMenus_.push_back(proofSetup);
+        auto* group = new QActionGroup(this);
+        struct Target {
+            const char* label;
+            pe::BuiltinSpace space;
+        };
+        static constexpr Target kTargets[] = {
+            {"sRGB", pe::BuiltinSpace::sRGB},
+            {"Display P3", pe::BuiltinSpace::DisplayP3},
+            {"Adobe RGB (1998)", pe::BuiltinSpace::AdobeRGB1998},
+            {"ProPhoto RGB", pe::BuiltinSpace::ProPhotoRGB},
+        };
+        for (const Target& t : kTargets) {
+            QAction* a = proofSetup->addAction(QString::fromUtf8(t.label));
+            a->setCheckable(true);
+            a->setChecked(t.space == pe::BuiltinSpace::sRGB);
+            group->addAction(a);
+            const pe::BuiltinSpace space = t.space;
+            connect(a, &QAction::triggered, this, [this, space] {
+                if (canvas_ != nullptr) canvas_->setProofProfile(pe::ColorProfile::builtin(space));
+            });
+        }
+    }
+    if (canvas_ != nullptr)
+        canvas_->setProofProfile(pe::ColorProfile::builtin(pe::BuiltinSpace::sRGB));
+#endif
+
     // Filled by populateWindowMenu() once the docks exist; a dock's toggle action is
     // owned by the dock, so there is nothing to add until they are constructed.
     windowMenu_ = menuBar()->addMenu(QStringLiteral("&Window"));

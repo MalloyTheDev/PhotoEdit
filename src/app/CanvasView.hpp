@@ -3,6 +3,7 @@
 #include "BusyTask.hpp"
 
 #include "pe/core/Channels.hpp"
+#include "pe/core/ColorProfile.hpp"  // ColorProfileRef (soft-proof target)
 #include "pe/core/Document.hpp"
 #include "pe/core/Gradient.hpp"
 #include "pe/core/PaintToolController.hpp"
@@ -128,6 +129,20 @@ public:
     // undoable itself, and never marks the document dirty.
     void setChannelView(pe::ChannelView v);
     [[nodiscard]] pe::ChannelView channelView() const noexcept { return channelView_; }
+
+    // Soft-proofing (View > Proof Colors): a display-only preview of the image converted through
+    // `proofProfile` (simulating that output space), optionally painting out-of-gamut colours with
+    // a warning. Nothing here edits the document or the undo stack. Takes effect only when the
+    // engine has lcms2; the toggles are otherwise inert.
+    void setProofColors(bool on);
+    [[nodiscard]] bool proofColors() const noexcept { return proofEnabled_; }
+    void setGamutWarning(bool on);
+    [[nodiscard]] bool gamutWarning() const noexcept { return gamutWarning_; }
+    void setProofProfile(pe::ColorProfileRef profile);
+    // Recompute the cached proofed image if a change has made it stale (public for the tests).
+    void ensureProofImage();
+    // The cached proofed image (empty when not proofing). For the tests and any future readout.
+    [[nodiscard]] const pe::PixelBuffer& proofImage() const noexcept { return proofImage_; }
 
     // A bounded, downscaled composite of the whole canvas, at most `maxPixels` of output.
     // For panel thumbnails: it goes through the renderer's tile cache and its scaled path, so
@@ -325,6 +340,11 @@ private:
     // Display state, not document state: which colour channels get drawn. Default is the
     // composite, so a canvas nobody has touched the Channels panel on pays nothing.
     pe::ChannelView channelView_{};
+    bool proofEnabled_ = false;
+    bool gamutWarning_ = false;
+    pe::ColorProfileRef proofProfile_;
+    pe::PixelBuffer proofImage_;  // cached proofed whole-canvas image; empty when not proofing
+    bool proofStale_ = true;
     pe::Gradient gradient_ = pe::Gradient::foregroundToBackground();
 
     // Brush settings, kept per paint mode.

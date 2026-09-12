@@ -111,6 +111,7 @@ if(PHOTOEDIT_BUILD_APP)
         app/test_canvassizeui.cpp
         app/test_imagesizeui.cpp
         app/test_colorui.cpp
+        app/test_softproofui.cpp
         app/test_autotoneui.cpp
         app/test_imagerotationui.cpp
         app/test_bitdepthui.cpp

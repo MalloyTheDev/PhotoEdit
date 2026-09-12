@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **819 engine cases + 267 shell cases, 0 failed**. The engine tests
+Test suite: **819 engine cases + 271 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -39,7 +39,7 @@ document is painted underneath it.
 | **M3** Painting & history | ✅ | 🟡 | Brush engine (tile-delta paint commands) and the history/undo stack are implemented and tested, with an incremental live stroke so per-sample cost does not grow with stroke length. The app has brush, eraser, clone, dodge/burn, blur/sharpen, spot heal, bucket, gradient, move, marquee, lasso, magic wand, crop, type, free transform and eyedropper, with tablet pressure and stabilization. Brush presets and the remaining dynamics are pending. |
 | **M4** Selections & masks | ✅ | 🟡 | Engine complete (rect, ops, masks, gating). Basic Marquee tool + marching ants + modifiers (Shift/Alt) wired in UI. Select All/Deselect/Invert menu added. More tools pending. |
 | **M5** Adjustments & filters | ✅ | 🟡 | **Complete in the engine** (see below). The app has adjustment layers with interactive editors for Curves, Levels, Photo Filter, Gradient Map, Channel Mixer and Selective Color, plus the filter dialogs. A unified filter gallery is pending. |
-| **M6** Color management | ✅ | 🟡 | **Complete in the engine** (see below): lcms2/ICC profiles, working spaces, transforms (4 intents + BPC), a thread-safe transform cache, document assign/convert, display conversion, soft-proofing + gamut warning, and the channels system, on the 8/16/32-float pixel pipeline. The app now reaches it through **Edit ▸ Assign Profile / Convert to Profile** and **Image ▸ Mode** (8/16/32 bits per channel); Color Settings and the proof/gamut view are still pending. |
+| **M6** Color management | ✅ | 🟡 | **Complete in the engine** (see below): lcms2/ICC profiles, working spaces, transforms (4 intents + BPC), a thread-safe transform cache, document assign/convert, display conversion, soft-proofing + gamut warning, and the channels system, on the 8/16/32-float pixel pipeline. The app now reaches it through **Edit ▸ Assign Profile / Convert to Profile**, **Image ▸ Mode** (8/16/32 bits per channel) and **View ▸ Proof Colors / Gamut Warning**; only a Color Settings dialog and loading an ICC profile from disk are still pending. |
 | **M7** File formats | ✅ | 🟡 | **Engine complete** (see below): PNG, JPEG, TIFF, WebP, and the native layered **`.pedoc`** format, all hardened against untrusted input. The app's **Open / New / Save / Save As** are wired through `DocumentIO`. |
 | **M8**–**M10** | ⬜ | ⬜ | Not started (type/vector/smart objects, retouching/AI, automation/print/plugins). |
 
@@ -113,6 +113,14 @@ The engine is no longer headless-only; the Qt6 app provides a real
   so the dependency-free lanes still build. `applyAssignProfile`/`applyConvertProfile` are the
   decidable halves the tests drive, with the modal dialog the only untestable boundary. (Loading an
   ICC file from disk, Color Settings, the proof/gamut view and Image ▸ Mode remain pending, #193.)
+- **Soft-proofing** (View ▸ Proof Colors, and Gamut Warning; Proof Setup picks the target space).
+  A display-only preview of how the image would convert to another space, so you can judge a print
+  or a narrower-gamut target without changing a pixel. When on, `CanvasView` draws a cached image
+  built by `convertForProof` (the working-space float composite simulated through the proof profile
+  to the display) in place of the normal composite; Gamut Warning paints out-of-gamut pixels a
+  neutral grey. It is display state, never touching the document or the undo stack, and is rebuilt
+  when the composite or the proof settings change. lcms2-gated like the rest of colour management,
+  so the dependency-free lanes still build.
 - **Auto Tone / Auto Contrast** (Image ▸ Auto Tone Ctrl+Shift+L, Auto Contrast Ctrl+Alt+Shift+L).
   The `computeAutoTone`/`applyAutoTone` engine (per-channel or luma black/white stretch from a
   clipped histogram) was built and tested with no menu route (#194). `autoAdjust` derives the
