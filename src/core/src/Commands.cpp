@@ -11,6 +11,7 @@
 #include "pe/core/Filter.hpp"      // moveLayerContent
 #include "pe/core/GroupLayer.hpp"  // recurse into groups for crop
 #include "pe/core/Mask.hpp"        // Mask, MaskBuffer, maskFromSelection (layer-mask commands)
+#include "pe/core/Orient.hpp"      // Image Rotation geometry
 #include "pe/core/PixelLayer.hpp"  // contentBounds() on the concrete pixel layer
 #include "pe/core/Resample.hpp"    // resampleImage (text raster); resampleMask/resampledSelection
 
@@ -1250,4 +1251,176 @@ std::int64_t ResampleDocumentCommand::retainedBytes() const noexcept {
     return bytes;
 }
 
+// ----------------------------------------------------------------- Image Rotation (orient)
+
+namespace {
+// Reorient a small contiguous raster (a text glyph cache) within its own frame, exactly. The
+// destination pixel at (x,y) is the source at orientInverse over the raster's own size.
+PixelBuffer orientRaster(const PixelBuffer& src, Orient op) {
+    if (src.isEmpty()) return src;
+    const Size in{src.width(), src.height()};
+    const Size out = orientedCanvas(op, in);
+    PixelBuffer dst(out.width, out.height);
+    for (int y = 0; y < out.height; ++y) {
+        for (int x = 0; x < out.width; ++x) {
+            const Point s = orientInverse(op, in, Point{x, y});
+            dst.set(x, y, src.at(s.x, s.y));
+        }
+    }
+    return dst;
+}
+}  // namespace
+
+OrientBlock orientBlocker(const Document& doc, Orient op) {
+    std::vector<LayerId> pixelLayers;
+    collectPixelLayers(doc.topLevelLayers(), pixelLayers);
+    for (LayerId id : pixelLayers) {
+        if (orientRefusal(doc, id, op).code != RefusalCode::None) {
+            return OrientBlock::ContentTooLarge;
+        }
+    }
+    return OrientBlock::None;
+}
+
+OrientDocumentCommand::OrientDocumentCommand(Orient op) : op_(op) {}
+OrientDocumentCommand::~OrientDocumentCommand() = default;
+
+std::string OrientDocumentCommand::name() const {
+    switch (op_) {
+        case Orient::FlipHorizontal:
+            return "Flip Horizontal";
+        case Orient::FlipVertical:
+            return "Flip Vertical";
+        case Orient::Rotate180:
+            return "Rotate 180";
+        case Orient::Rotate90CW:
+            return "Rotate 90 CW";
+        case Orient::Rotate90CCW:
+            return "Rotate 90 CCW";
+    }
+    return "Rotate";
+}
+
+DocumentChange OrientDocumentCommand::execute(Document& doc) {
+    if (!captured_) {
+        captured_ = true;
+        oldSize_ = doc.canvasSize();
+        if (orientBlocker(doc, op_) != OrientBlock::None) {
+            noop_ = true;
+        } else {
+            oldSel_ = doc.selection();
+
+            std::vector<LayerId> pixelLayers;
+            collectPixelLayers(doc.topLevelLayers(), pixelLayers);
+            for (LayerId id : pixelLayers) {
+                if (auto m = orientLayerContent(doc, id, op_, name())) {
+                    pixelMoves_.push_back(std::move(m));
+                }
+            }
+
+            std::vector<LayerId> all;
+            collectAllLayers(doc.topLevelLayers(), all);
+            for (LayerId id : all) {
+                Layer* l = doc.findLayer(id);
+                if (l == nullptr) continue;
+                if (l->mask() != nullptr && !l->mask()->buffer().empty()) {
+                    oldMasks_.emplace_back(id, l->mask()->buffer());
+                }
+                if (l->kind() == LayerKind::Text) {
+                    auto* t = static_cast<TextLayer*>(l);
+                    oldText_.push_back(
+                        TextSnapshot{id, t->model(), t->raster(), t->rasterOrigin()});
+                } else if (l->kind() == LayerKind::Fill) {
+                    oldFills_.emplace_back(id, static_cast<SolidColorLayer*>(l)->bounds());
+                }
+            }
+            noop_ = false;
+        }
+    }
+    if (noop_) return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+    applyOrient(doc);
+    return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+}
+
+void OrientDocumentCommand::applyOrient(Document& doc) {
+    const Size oldC = oldSize_;
+    for (auto& m : pixelMoves_) m->execute(doc);
+
+    for (const auto& [id, oldBuf] : oldMasks_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->mask() == nullptr) continue;
+        l->mask()->buffer() = orientMask(oldBuf, op_, oldC);
+    }
+
+    for (const auto& snap : oldText_) {
+        Layer* l = doc.findLayer(snap.id);
+        if (l == nullptr || l->kind() != LayerKind::Text) continue;
+        auto* t = static_cast<TextLayer*>(l);
+        TextModel nm = snap.model;
+        nm.origin = orientForward(op_, oldC, snap.model.origin);
+        PixelBuffer nr = orientRaster(snap.raster, op_);
+        const Rect box{snap.origin.x, snap.origin.y, snap.raster.width(), snap.raster.height()};
+        const Rect nb = orientRect(op_, oldC, box);
+        Point no{nb.x, nb.y};
+        t->swapContents(nm, nr, no);
+    }
+
+    for (const auto& [id, oldBounds] : oldFills_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->kind() != LayerKind::Fill) continue;
+        static_cast<SolidColorLayer*>(l)->setBounds(orientRect(op_, oldC, oldBounds));
+    }
+
+    doc.cmdSetCanvasSize(orientedCanvas(op_, oldC));
+    doc.editableSelection() = orientedSelection(oldSel_, op_, oldC);
+    doc.touchSelection();
+}
+
+DocumentChange OrientDocumentCommand::undo(Document& doc) {
+    if (noop_) return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+
+    doc.cmdSetCanvasSize(oldSize_);
+
+    for (const auto& [id, oldBounds] : oldFills_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->kind() != LayerKind::Fill) continue;
+        static_cast<SolidColorLayer*>(l)->setBounds(oldBounds);
+    }
+    for (const auto& snap : oldText_) {
+        Layer* l = doc.findLayer(snap.id);
+        if (l == nullptr || l->kind() != LayerKind::Text) continue;
+        TextModel om = snap.model;  // copies: keep the snapshot intact for a later redo
+        PixelBuffer orr = snap.raster;
+        Point oo = snap.origin;
+        static_cast<TextLayer*>(l)->swapContents(om, orr, oo);
+    }
+    for (const auto& [id, oldBuf] : oldMasks_) {
+        Layer* l = doc.findLayer(id);
+        if (l == nullptr || l->mask() == nullptr) continue;
+        l->mask()->buffer() = oldBuf;
+    }
+    for (auto it = pixelMoves_.rbegin(); it != pixelMoves_.rend(); ++it) (*it)->undo(doc);
+
+    doc.editableSelection() = oldSel_;
+    doc.touchSelection();
+    return DocumentChange{DocumentChange::Kind::LayerStructure, Rect{}, kNoLayer};
+}
+
+std::int64_t OrientDocumentCommand::retainedBytes() const noexcept {
+    std::int64_t bytes = 0;
+    for (const std::unique_ptr<PaintCommand>& m : pixelMoves_) {
+        if (m) bytes += m->retainedBytes();
+    }
+    for (const auto& [id, buf] : oldMasks_) {
+        bytes +=
+            static_cast<std::int64_t>(buf.tileCount()) * static_cast<std::int64_t>(kTilePixels);
+    }
+    for (const TextSnapshot& snap : oldText_) {
+        bytes += static_cast<std::int64_t>(snap.raster.width()) *
+                 static_cast<std::int64_t>(snap.raster.height()) * 4;
+    }
+    bytes +=
+        static_cast<std::int64_t>(oldSel_.tileCount()) * static_cast<std::int64_t>(kTilePixels);
+    return bytes;
+}
 }  // namespace pe

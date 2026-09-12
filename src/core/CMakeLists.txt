@@ -31,6 +31,7 @@ add_library(pe_core
     src/Channels.cpp
     src/Gradient.cpp
     src/Resample.cpp
+    src/Orient.cpp
     src/NativeFormat.cpp
     src/DocumentIO.cpp
     src/Psd.cpp

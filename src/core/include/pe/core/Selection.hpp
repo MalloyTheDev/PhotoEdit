@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pe/core/Geometry.hpp"
+#include "pe/core/Orient.hpp"
 #include "pe/core/PixelBuffer.hpp"
 #include "pe/core/Tile.hpp"
 
@@ -209,5 +210,11 @@ private:
 // deselects. An inactive or empty selection, or a downscale that rounds the coverage away to
 // nothing, is returned unchanged rather than loaded.
 [[nodiscard]] Selection resampledSelection(const Selection& sel, Rect srcCanvas, Rect dstCanvas);
+
+// Reorient a selection by `op` about a `canvas`-sized frame, exactly, so it turns with the image
+// under Image Rotation. Same tightBounds -> toMask -> loadMask round trip and the same guards as
+// resampledSelection (an over-cap toMask or an inactive/empty selection is returned unchanged
+// rather than silently deactivated).
+[[nodiscard]] Selection orientedSelection(const Selection& sel, Orient op, Size canvas);
 
 }  // namespace pe

@@ -5,6 +5,7 @@
 #include "pe/core/Geometry.hpp"
 #include "pe/core/Gradient.hpp"
 #include "pe/core/Layer.hpp"
+#include "pe/core/Orient.hpp"
 #include "pe/core/PixelLayer.hpp"
 #include "pe/core/Refusal.hpp"
 
@@ -147,6 +148,18 @@ inline constexpr std::int64_t kMaxMoveBytes = 1LL << 30;
 // layer, a non-positive/non-finite scale, or a destination beyond the engine's size caps.
 [[nodiscard]] std::unique_ptr<PaintCommand> resampleLayerContent(Document& doc, LayerId layerId,
                                                                  Rect srcCanvas, Rect dstCanvas);
+
+// Reorient a pixel layer's content by `op` about the current canvas, as a reversible tile-delta
+// command -- the per-layer engine behind Image Rotation. Exact (a pixel permutation, no
+// resampling): every destination pixel is copied from its source under orientInverse, and the
+// vacated source is cleared. `name` is the undo label. nullptr for a non-pixel/empty layer or a
+// result beyond the engine's size caps. Bounded in bytes like a Move.
+[[nodiscard]] std::unique_ptr<PaintCommand> orientLayerContent(Document& doc, LayerId layerId,
+                                                               Orient op, std::string name);
+
+// Why orientLayerContent would refuse `layerId` for Image Rotation, or None when it would proceed.
+// The pre-flight (orientBlocker) uses it to reject an over-budget document before pushing.
+[[nodiscard]] Refusal orientRefusal(const Document& doc, LayerId layerId, Orient op);
 
 // Why resampleLayerContent would refuse `layerId` for Image Size, or a Refusal with code None when
 // it would proceed. Mirrors resampleLayerContent's budget guard using the same constants, so the

@@ -2,6 +2,7 @@
 
 #include "pe/core/Color.hpp"
 #include "pe/core/Geometry.hpp"
+#include "pe/core/Orient.hpp"
 #include "pe/core/Tile.hpp"
 
 #include <array>
@@ -168,6 +169,11 @@ private:
 // method, because it needs the Catmull-Rom kernel that lives outside Mask, and because a
 // resample is lossy: the caller keeps the original for undo rather than inverting this.
 [[nodiscard]] MaskBuffer resampleMask(const MaskBuffer& src, Rect srcCanvas, Rect dstCanvas);
+
+// Reorient a mask by `op` about a `canvas`-sized frame, exactly (a pixel permutation), so a layer's
+// mask turns with its pixels under Image Rotation. Absent samples read kOpaque (revealing), and
+// kOpaque results are skipped on write so the buffer stays canonical.
+[[nodiscard]] MaskBuffer orientMask(const MaskBuffer& src, Orient op, Size canvas);
 
 // Whether a full-coverage mask over `canvas` can be materialized (within the mask buffer's tile/
 // pixel caps). fillRect / maskFromSelection silently no-op past that bound, so callers that need a

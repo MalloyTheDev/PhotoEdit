@@ -1,5 +1,6 @@
 #include "pe/core/Selection.hpp"
 
+#include "pe/core/Orient.hpp"
 #include "pe/core/Resample.hpp"
 
 #include <algorithm>
@@ -699,6 +700,33 @@ Selection magicWandSelection(const PixelBuffer& image, int seedX, int seedY, int
     }
     if (any) sel.loadMask(mask, 0, 0);  // 4-connected region as the new selection
     return sel;
+}
+
+Selection orientedSelection(const Selection& sel, Orient op, Size canvas) {
+    if (!sel.active() || canvas.width <= 0 || canvas.height <= 0) return sel;
+    const Rect bounds = sel.tightBounds();
+    if (bounds.isEmpty()) return sel;
+    const PixelBuffer mask = sel.toMask(bounds);
+    if (mask.isEmpty()) return sel;  // over-cap: keep as-is rather than deactivate
+
+    const Rect dst = orientRect(op, canvas, bounds);
+    if (dst.isEmpty()) return sel;
+    PixelBuffer out(dst.width, dst.height);
+    for (int y = 0; y < dst.height; ++y) {
+        for (int x = 0; x < dst.width; ++x) {
+            const Point s = orientInverse(op, canvas, Point{dst.left() + x, dst.top() + y});
+            const int sx = s.x - bounds.left();
+            const int sy = s.y - bounds.top();
+            std::uint8_t v = 0;
+            if (sx >= 0 && sx < mask.width() && sy >= 0 && sy < mask.height()) {
+                v = mask.at(sx, sy).r;
+            }
+            out.set(x, y, Rgba8{v, v, v, 255});
+        }
+    }
+    Selection res;
+    res.loadMask(out, dst.left(), dst.top());
+    return res;
 }
 
 Selection resampledSelection(const Selection& sel, Rect srcCanvas, Rect dstCanvas) {

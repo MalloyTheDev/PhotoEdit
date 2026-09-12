@@ -4,7 +4,9 @@
 #include "pe/core/ColorProfile.hpp"
 #include "pe/core/Command.hpp"
 #include "pe/core/Layer.hpp"
-#include "pe/core/Mask.hpp"  // MaskBuffer, stored by value in the Image Size snapshot
+#include "pe/core/Mask.hpp"    // MaskBuffer, stored by value in the Image Size snapshot
+#include "pe/core/Orient.hpp"  // Orient (Image Rotation)
+#include "pe/core/Orient.hpp"  // Orient (Image Rotation)
 #include "pe/core/Selection.hpp"
 #include "pe/core/TextLayer.hpp"  // TextModel, stored by value in the Image Size snapshot
 
@@ -557,6 +559,61 @@ private:
     std::vector<std::pair<LayerId, MaskBuffer>> oldMasks_;   // pre-resample mask buffers
     std::vector<TextSnapshot> oldText_;                      // pre-resample text content triples
     std::vector<std::pair<LayerId, Rect>> oldFills_;         // pre-resample fill bounds
+};
+
+// ----------------------------------------------------------------- Image Rotation (orient)
+
+// Why an Image Rotation cannot run, or None when it can. A flip/rotate never yields an invalid
+// canvas size and is never a no-op, so the only blocker is content too large to reorient in one
+// step.
+enum class OrientBlock : std::uint8_t {
+    None = 0,
+    ContentTooLarge,  // a pixel layer whose reorientation exceeds the move budget / coordinate
+                      // range
+};
+[[nodiscard]] OrientBlock orientBlocker(const Document& doc, Orient op);
+
+// Reorient the whole document by `op` (a flip or a 90/180 rotation): every pixel layer (recursing
+// groups), layer mask, text raster, fill bounds and the selection turn together, and the canvas
+// swaps sides on a quarter turn. As one undoable step.
+//
+// The exact, lossless cousin of ResampleDocumentCommand, and like it a SIBLING of ReframeCommand.
+// A reorientation is a permutation, so it could in principle be undone by applying its inverse; it
+// snapshots and restores instead, for one uniform undo contract with the resample (the pixel deltas
+// already carry their before-tiles; the masks, text triples, fill bounds and selection are
+// snapshotted here). All-or-nothing: if any content-bearing layer cannot be reoriented within
+// budget, nothing is applied and the command is a no-op.
+class OrientDocumentCommand final : public Command {
+public:
+    explicit OrientDocumentCommand(Orient op);
+    ~OrientDocumentCommand() override;
+    [[nodiscard]] std::string name() const override;
+    DocumentChange execute(Document&) override;
+    DocumentChange undo(Document&) override;
+    [[nodiscard]] std::int64_t retainedBytes() const noexcept override;
+
+    // Whether the last execute() actually reoriented. False when blocked (over budget).
+    [[nodiscard]] bool reoriented() const noexcept { return !noop_; }
+
+private:
+    void applyOrient(Document& doc);
+
+    struct TextSnapshot {
+        LayerId id;
+        TextModel model;
+        PixelBuffer raster;
+        Point origin;
+    };
+
+    Orient op_;
+    bool captured_ = false;
+    bool noop_ = true;
+    Size oldSize_{};
+    Selection oldSel_;                                       // pre-rotation selection, for undo
+    std::vector<std::unique_ptr<PaintCommand>> pixelMoves_;  // per-pixel-layer reorientations
+    std::vector<std::pair<LayerId, MaskBuffer>> oldMasks_;   // pre-rotation mask buffers
+    std::vector<TextSnapshot> oldText_;                      // pre-rotation text content triples
+    std::vector<std::pair<LayerId, Rect>> oldFills_;         // pre-rotation fill bounds
 };
 
 }  // namespace pe

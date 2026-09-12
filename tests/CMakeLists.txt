@@ -41,6 +41,8 @@ add_executable(pe_core_tests
     core/test_channels.cpp
     core/test_gradient.cpp
     core/test_resample.cpp
+    core/test_orient.cpp
+    core/test_imagerotation.cpp
     core/test_resamplelayer.cpp
     core/test_resamplemask.cpp
     core/test_imagesize.cpp

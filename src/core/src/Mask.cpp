@@ -1,5 +1,6 @@
 #include "pe/core/Mask.hpp"
 
+#include "pe/core/Orient.hpp"
 #include "pe/core/Resample.hpp"
 
 #include "pe/core/Document.hpp"  // kMaxCanvasDimension
@@ -182,6 +183,22 @@ Mask maskFromSelection(const Selection& selection, Rect canvas) {
         }
     }
     return mask;
+}
+
+MaskBuffer orientMask(const MaskBuffer& src, Orient op, Size canvas) {
+    MaskBuffer out;
+    if (canvas.width <= 0 || canvas.height <= 0) return out;
+    const Rect content = src.contentBounds();
+    if (content.isEmpty()) return out;  // all-revealing stays all-revealing (absent == kOpaque)
+    const Rect region = content.united(orientRect(op, canvas, content));
+    for (int y = region.top(); y < region.bottom(); ++y) {
+        for (int x = region.left(); x < region.right(); ++x) {
+            const Point s = orientInverse(op, canvas, Point{x, y});
+            const std::uint8_t v = src.value(s.x, s.y);
+            if (v != MaskBuffer::kOpaque) out.setValue(x, y, v);
+        }
+    }
+    return out;
 }
 
 MaskBuffer resampleMask(const MaskBuffer& src, Rect srcCanvas, Rect dstCanvas) {

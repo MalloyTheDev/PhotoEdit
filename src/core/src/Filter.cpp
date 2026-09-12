@@ -1,5 +1,6 @@
 #include "pe/core/Filter.hpp"
 #include "pe/core/Mask.hpp"
+#include "pe/core/Orient.hpp"
 #include "pe/core/Resample.hpp"
 
 #include "pe/core/BlendMode.hpp"    // compositeOver (bucket fill)
@@ -1227,6 +1228,128 @@ std::unique_ptr<PaintCommand> resampleLayerContent(Document& doc, LayerId layerI
             return resampleContentImpl<Rgba8>(layerId, pl->tiles(), srcCanvas, dstCanvas,
                                               "Image Size");
     }
+}
+
+// ---- Image Rotation: an exact reorientation of one pixel layer ------------------------------
+
+namespace {
+
+// Reorient a pixel layer's content by an exact permutation about the canvas. Each destination
+// pixel is the source at orientInverse(op, canvas, dest); a destination whose source is empty
+// reads transparent, so the vacated area clears. The rewritten region is the content bounds united
+// with where they map to, so both the old and new positions are covered. No float, no premultiply:
+// a 90/180/flip is lossless, so this copies bytes verbatim.
+template <class Pixel>
+std::unique_ptr<PaintCommand> orientContentImpl(LayerId layerId, TileStoreT<Pixel>& store,
+                                                Orient op, Size canvas, std::string name) {
+    const Rect content = store.contentBounds();
+    if (content.isEmpty()) return nullptr;
+    const Rect region = content.united(orientRect(op, canvas, content));
+
+    std::vector<PaintCommand::DeltaT<Pixel>> deltas;
+    Rect dirty{};
+    const TileSpan span = tilesForRect(region);
+    for (int trow = span.rowBegin; trow < span.rowEnd; ++trow) {
+        for (int tcol = span.colBegin; tcol < span.colEnd; ++tcol) {
+            const TileCoord coord{tcol, trow};
+            const Rect tb = tileBounds(coord);
+            const Rect vis = tb.intersected(region);
+            if (vis.isEmpty()) continue;
+
+            std::shared_ptr<TileDataT<Pixel>> before = store.sharedTile(coord);
+            auto after = std::make_shared<TileDataT<Pixel>>();
+            if (before) *after = *before;
+            bool changed = false;
+
+            for (int y = vis.top(); y < vis.bottom(); ++y) {
+                const std::size_t rowBase =
+                    static_cast<std::size_t>(y - tb.top()) * static_cast<std::size_t>(kTileSize);
+                for (int x = vis.left(); x < vis.right(); ++x) {
+                    // Read the ORIGINAL store (unmutated until the command executes), so in-tile
+                    // permutations (a flip mapping within one tile) never read a half-written tile.
+                    const Point s = orientInverse(op, canvas, Point{x, y});
+                    const Pixel np = store.pixel(s.x, s.y);
+                    const std::size_t li = rowBase + static_cast<std::size_t>(x - tb.left());
+                    if (!pixelEqual(after->px[li], np)) {
+                        after->px[li] = np;
+                        changed = true;
+                    }
+                }
+            }
+
+            if (changed) {
+                bool empty = true;
+                for (const Pixel& px : after->px) {
+                    if (!pixelEqual(px, Pixel{})) {
+                        empty = false;
+                        break;
+                    }
+                }
+                deltas.push_back(PaintCommand::DeltaT<Pixel>{coord, std::move(before),
+                                                             empty ? nullptr : std::move(after)});
+                dirty = dirty.united(vis);
+            }
+        }
+    }
+    if (deltas.empty()) return nullptr;
+    return std::make_unique<PaintCommand>(layerId, dirty, std::move(deltas), std::move(name));
+}
+
+}  // namespace
+
+std::unique_ptr<PaintCommand> orientLayerContent(Document& doc, LayerId layerId, Orient op,
+                                                 std::string name) {
+    Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr || layer->kind() != LayerKind::Pixel) return nullptr;
+    auto* pl = static_cast<PixelLayer*>(layer);
+    if (pl->contentBounds().isEmpty()) return nullptr;
+
+    const Size canvas = doc.canvasSize();
+    const Rect region = pl->contentBounds().united(orientRect(op, canvas, pl->contentBounds()));
+    if (!withinCoordinateRange(region)) return nullptr;
+    const std::int64_t bytes =
+        tileCountOf(region) * static_cast<std::int64_t>(kTilePixels) * bytesPerPixelOf(pl->depth());
+    if (bytes > kMaxMoveBytes) return nullptr;
+
+    switch (pl->depth()) {
+        case BitDepth::U16:
+            return orientContentImpl<Rgba16>(layerId, pl->tiles16(), op, canvas, std::move(name));
+        case BitDepth::F32:
+            return orientContentImpl<Rgbaf>(layerId, pl->tilesF(), op, canvas, std::move(name));
+        case BitDepth::U8:
+        default:
+            return orientContentImpl<Rgba8>(layerId, pl->tiles(), op, canvas, std::move(name));
+    }
+}
+
+Refusal orientRefusal(const Document& doc, LayerId layerId, Orient op) {
+    // Mirrors orientLayerContent's guards, in the same order, using the same constants.
+    const Layer* layer = doc.findLayer(layerId);
+    if (layer == nullptr) {
+        return refuse("image.rotate", RefusalCode::NoActiveLayer, {}, "Select a layer.");
+    }
+    const std::string named = "\"" + layer->name() + "\"";
+    if (layer->kind() != LayerKind::Pixel) {
+        return refuse("image.rotate", RefusalCode::LayerNotPixel, {},
+                      named + " is not a pixel layer.");
+    }
+    const auto* pl = static_cast<const PixelLayer*>(layer);
+    if (pl->contentBounds().isEmpty()) return Refusal{};  // nothing to reorient; not a blocker
+    const Size canvas = doc.canvasSize();
+    const Rect region = pl->contentBounds().united(orientRect(op, canvas, pl->contentBounds()));
+    if (!withinCoordinateRange(region)) {
+        return refuse("image.rotate", RefusalCode::OverSizeBudget, {},
+                      named + " would exceed the coordinate range the engine can store.");
+    }
+    const std::int64_t bytes =
+        tileCountOf(region) * static_cast<std::int64_t>(kTilePixels) * bytesPerPixelOf(pl->depth());
+    if (bytes > kMaxMoveBytes) {
+        return refuse("image.rotate", RefusalCode::OverSizeBudget, {},
+                      named + " would need " + std::to_string(bytes / (1024 * 1024)) +
+                          " MB to reorient and undo, over the " +
+                          std::to_string(kMaxMoveBytes / (1024 * 1024)) + " MB limit.");
+    }
+    return Refusal{};
 }
 
 std::unique_ptr<PaintCommand> applyFilter(Document& doc, LayerId layerId, const Filter& filter,
