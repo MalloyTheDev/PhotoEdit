@@ -79,6 +79,15 @@ target_link_libraries(pe_app
         Qt6::Svg
         PhotoEdit::Core)
 
+# The colour-management UI (Edit > Assign / Convert Profile) builds ColorProfile handles, whose
+# factory lives in the lcms2-only ColorProfile.cpp. Compile the dialog only when pe_core was built
+# with lcms2; MainWindow.cpp guards its use with the same PHOTOEDIT_HAVE_LCMS2 macro, so the app
+# still builds (just without those two menu items) on a toolchain that has no lcms2.
+get_target_property(_pe_core_defs pe_core INTERFACE_COMPILE_DEFINITIONS)
+if(_pe_core_defs MATCHES "PHOTOEDIT_HAVE_LCMS2")
+    target_sources(pe_app PRIVATE ColorProfileDialog.cpp ColorProfileDialog.hpp)
+endif()
+
 # The entry point only constructs the window; everything it touches lives in pe_app.
 qt_add_executable(photoedit main.cpp)
 

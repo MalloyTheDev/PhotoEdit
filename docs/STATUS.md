@@ -17,7 +17,7 @@ clang-format CI gate plus a real ASan/UBSan CI step. Built `-Werror` clean on gc
 clang (headless no-deps included), ASan/UBSan-clean, clang-format-clean.
 (Removed from the prior WIP as premature/unsafe: a non-compiling PSD decoder, an
 RHI/GPU skeleton, and a scratch-disk cache — to be done properly with tests later.)
-Test suite: **795 engine cases + 240 shell cases, 0 failed**. The engine tests
+Test suite: **795 engine cases + 247 shell cases, 0 failed**. The engine tests
 (`pe_core_tests`) run in every lane. The shell tests (`pe_app_tests`, added with
 [ADR-0008](adr/0008-app-shell-as-a-library.md)) link `pe_app` and run wherever the
 app is built, and under ASan/UBSan on Linux; they pin the theme contrast ratios, the stylesheet token
@@ -39,7 +39,7 @@ document is painted underneath it.
 | **M3** Painting & history | ✅ | 🟡 | Brush engine (tile-delta paint commands) and the history/undo stack are implemented and tested, with an incremental live stroke so per-sample cost does not grow with stroke length. The app has brush, eraser, clone, dodge/burn, blur/sharpen, spot heal, bucket, gradient, move, marquee, lasso, magic wand, crop, type, free transform and eyedropper, with tablet pressure and stabilization. Brush presets and the remaining dynamics are pending. |
 | **M4** Selections & masks | ✅ | 🟡 | Engine complete (rect, ops, masks, gating). Basic Marquee tool + marching ants + modifiers (Shift/Alt) wired in UI. Select All/Deselect/Invert menu added. More tools pending. |
 | **M5** Adjustments & filters | ✅ | 🟡 | **Complete in the engine** (see below). The app has adjustment layers with interactive editors for Curves, Levels, Photo Filter, Gradient Map, Channel Mixer and Selective Color, plus the filter dialogs. A unified filter gallery is pending. |
-| **M6** Color management | ✅ | ⬜ | **Complete in the engine** (see below): lcms2/ICC profiles, working spaces, transforms (4 intents + BPC), a thread-safe transform cache, document assign/convert, display conversion, soft-proofing + gamut warning, and the channels system, on the 8/16/32-float pixel pipeline. Color-settings UI pending. |
+| **M6** Color management | ✅ | 🟡 | **Complete in the engine** (see below): lcms2/ICC profiles, working spaces, transforms (4 intents + BPC), a thread-safe transform cache, document assign/convert, display conversion, soft-proofing + gamut warning, and the channels system, on the 8/16/32-float pixel pipeline. The app now reaches it through **Edit ▸ Assign Profile / Convert to Profile**; Color Settings, proof/gamut view and Image ▸ Mode (bit depth) are still pending. |
 | **M7** File formats | ✅ | 🟡 | **Engine complete** (see below): PNG, JPEG, TIFF, WebP, and the native layered **`.pedoc`** format, all hardened against untrusted input. The app's **Open / New / Save / Save As** are wired through `DocumentIO`. |
 | **M8**–**M10** | ⬜ | ⬜ | Not started (type/vector/smart objects, retouching/AI, automation/print/plugins). |
 
@@ -83,6 +83,17 @@ The engine is no longer headless-only; the Qt6 app provides a real
   proportions by default (so the common resize keeps the picture's shape) and warns when the result
   crosses ~64 MP; its `applyImageSize` is the decidable half the tests drive, with the modal
   `exec()` the only untestable boundary (the same split as New Document).
+- **Colour management** (Edit ▸ Assign Profile / Convert to Profile). The entire M6 colour engine
+  (ICC profiles, working spaces, transforms with four intents and black-point compensation) had
+  **zero references anywhere in the app** until now: `AssignProfileCommand` and `convertToProfile`
+  existed and were tested but unreachable. Assign re-tags the document (reinterpret the numbers);
+  Convert transforms the pixels to preserve appearance in the new space, so its dialog also offers
+  the rendering intent and BPC. Both offer the five built-in RGB working spaces; Convert refuses out
+  loud on an untagged document (assign a working profile first). The whole feature is compiled only
+  when the engine was built with lcms2 (the dialog is CMake-gated and the menu is `#ifdef`-gated),
+  so the dependency-free lanes still build. `applyAssignProfile`/`applyConvertProfile` are the
+  decidable halves the tests drive, with the modal dialog the only untestable boundary. (Loading an
+  ICC file from disk, Color Settings, the proof/gamut view and Image ▸ Mode remain pending, #193.)
 - **Clipboard** — Cut, Copy, Copy Merged, Paste, Paste Into and Clear, on the conventional
   shortcuts. None of it existed before: the Edit menu was Undo, Redo and Free Transform, so
   Ctrl+C and Ctrl+V did nothing at all. The engine half is region primitives in `Filter.hpp`

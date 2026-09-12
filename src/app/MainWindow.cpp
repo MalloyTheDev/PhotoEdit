@@ -16,6 +16,9 @@
 #include "HistoryPanel.hpp"
 #include "IconUtil.hpp"
 #include "ImageSizeDialog.hpp"
+#ifdef PHOTOEDIT_HAVE_LCMS2
+#include "ColorProfileDialog.hpp"
+#endif
 #include "LayersPanel.hpp"
 #include "NewDocumentDialog.hpp"
 #include "PropertiesPanel.hpp"
@@ -29,6 +32,9 @@
 #include "pe/core/Commands.hpp"
 #include "pe/core/Compositor.hpp"
 #include "pe/core/Document.hpp"
+#ifdef PHOTOEDIT_HAVE_LCMS2
+#include "pe/core/ColorOps.hpp"  // convertToProfile
+#endif
 #include "pe/core/DocumentIO.hpp"
 #include "pe/core/Filter.hpp"
 #include "pe/core/ImageIO.hpp"
@@ -254,6 +260,16 @@ void MainWindow::buildMenuBar() {
             if (canvas_ != nullptr) canvas_->setTool(CanvasView::Tool::Transform);
         });
     freeTransformAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
+
+#ifdef PHOTOEDIT_HAVE_LCMS2
+    // Colour management, reachable at last (only when the engine was built with lcms2): the whole
+    // M6 colour engine (profiles, transforms, intents) had zero references in the app until here.
+    editMenu->addSeparator();
+    docActions_.push_back(
+        editMenu->addAction(QStringLiteral("Assign Profile..."), this, &MainWindow::assignProfile));
+    docActions_.push_back(editMenu->addAction(QStringLiteral("Convert to Profile..."), this,
+                                              &MainWindow::convertProfile));
+#endif
 
     // Open a parameterized effect dialog (live preview + one-undo-step commit). Captured by
     // value into the action lambdas below, so it must hold only `this` (a stable pointer).
@@ -1862,6 +1878,67 @@ void MainWindow::pasteFromClipboard(bool into) {
         std::make_unique<pe::AddLayerCommand>(std::move(layer), doc_->topLevelCount()));
     doc_->setActiveLayer(id);
 }
+
+#ifdef PHOTOEDIT_HAVE_LCMS2
+void MainWindow::assignProfile() {
+    const char* const action = "Edit > Assign Profile...";
+    if (refuseIf(doc_ == nullptr, "color.assign", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return;
+    }
+    ColorProfileDialog dlg(this, QStringLiteral("Assign Profile"), doc_->colorProfile(),
+                           /*withConversionOptions=*/false);
+    if (dlg.exec() != QDialog::Accepted) return;
+    (void)applyAssignProfile(dlg.profile());
+}
+
+bool MainWindow::applyAssignProfile(pe::ColorProfileRef profile) {
+    const char* const action = "Edit > Assign Profile...";
+    if (refuseIf(doc_ == nullptr, "color.assign", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return false;
+    }
+    if (refuseIf(profile == nullptr || !profile->valid(), "color.assign", pe::RefusalCode::NoEffect,
+                 action, QStringLiteral("Choose a colour profile."))) {
+        return false;
+    }
+    doc_->history().push(std::make_unique<pe::AssignProfileCommand>(std::move(profile)));
+    return true;
+}
+
+void MainWindow::convertProfile() {
+    const char* const action = "Edit > Convert to Profile...";
+    if (refuseIf(doc_ == nullptr, "color.convert", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return;
+    }
+    ColorProfileDialog dlg(this, QStringLiteral("Convert to Profile"), doc_->colorProfile(),
+                           /*withConversionOptions=*/true);
+    if (dlg.exec() != QDialog::Accepted) return;
+    (void)applyConvertProfile(dlg.profile(), dlg.intent(), dlg.blackPointCompensation());
+}
+
+bool MainWindow::applyConvertProfile(pe::ColorProfileRef target, pe::RenderingIntent intent,
+                                     bool blackPointCompensation) {
+    const char* const action = "Edit > Convert to Profile...";
+    if (refuseIf(doc_ == nullptr, "color.convert", pe::RefusalCode::NoDocument, action,
+                 QStringLiteral("Open a document first."))) {
+        return false;
+    }
+    if (refuseIf(target == nullptr || !target->valid(), "color.convert", pe::RefusalCode::NoEffect,
+                 action, QStringLiteral("Choose a colour profile."))) {
+        return false;
+    }
+    auto cmd = pe::convertToProfile(*doc_, std::move(target), intent, blackPointCompensation);
+    if (refuseIf(cmd == nullptr, "color.convert", pe::RefusalCode::NoEffect, action,
+                 QStringLiteral("This document has no profile to convert from. Assign a working "
+                                "profile first, then convert."))) {
+        return false;
+    }
+    doc_->history().push(std::move(cmd));
+    return true;
+}
+#endif  // PHOTOEDIT_HAVE_LCMS2
 
 void MainWindow::changeImageSize() {
     const char* const action = "Image > Image Size...";

@@ -164,6 +164,19 @@ public:
     // it resampled.
     bool applyImageSize(pe::Size want);
 
+#ifdef PHOTOEDIT_HAVE_LCMS2
+    // Re-tag the document with `profile` (Assign: reinterpret the numbers, no pixel change) as one
+    // undo step, or refuse for no document / no profile. The decidable half of the split, like
+    // applyImageSize; assignProfile adds the dialog. Returns true if it assigned. Present only when
+    // the engine was built with lcms2.
+    bool applyAssignProfile(pe::ColorProfileRef profile);
+    // Convert the document's pixels into `target`, preserving appearance (Convert), as one undo
+    // step, or refuse for no document, no target, or an untagged document (there is no source
+    // profile to convert from). Returns true if it converted.
+    bool applyConvertProfile(pe::ColorProfileRef target, pe::RenderingIntent intent,
+                             bool blackPointCompensation);
+#endif
+
 private:
     bool saveDocumentAs();    // always prompts
     void exportDocumentAs();  // flatten + encode to a raster format with per-format options
@@ -183,6 +196,12 @@ private:
     enum class MergeMode { Down, Visible, Flatten };
     void mergeLayers(MergeMode mode);
 
+#ifdef PHOTOEDIT_HAVE_LCMS2
+    // Edit > Assign Profile / Convert to Profile: pick a profile, then re-tag or convert. The modal
+    // dialog is the only untestable part; applyAssignProfile/applyConvertProfile are the rest.
+    void assignProfile();
+    void convertProfile();
+#endif
     // Image > Image Size: prompt for the new dimensions, then resample the whole document. Unlike
     // Canvas Size this scales every pixel; see pe::ResampleDocumentCommand. The modal dialog is the
     // only untestable part; applyImageSize is the rest.
