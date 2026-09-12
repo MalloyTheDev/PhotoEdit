@@ -299,28 +299,31 @@ PE_TEST(documentio_save_replaces_the_destination_rather_than_writing_into_it) {
     std::filesystem::remove_all(dir, ec);
 }
 
-PE_TEST(export_over_the_composite_cap_fails_instead_of_writing_an_empty_raster) {
-    // compositeImage() returns nothing above kMaxCompositeImagePixels, and every raster
-    // format flattens through it. The encoders must refuse rather than emit a valid but
-    // empty image, because saveDocument() only knows the export failed if the byte
-    // vector comes back empty. The project's stated target document size is 30000 square,
-    // which is about 14 times this cap, so this is the ordinary case at that size and
-    // not an exotic one.
+PE_TEST(export_over_the_cap_refuses_only_the_flattening_formats) {
+    // compositeImage() returns nothing above kMaxCompositeImagePixels. PNG and TIFF no longer go
+    // through it: they stream the encode band by band (#165), so they succeed at the project's
+    // target sizes. The formats that still flatten the whole image refuse rather than emit a
+    // truncated file, because saveDocument() only knows the export failed if the bytes come back
+    // empty.
     const int64_t side = 9000;  // 81 MP, over the 64 MP cap
     PE_CHECK(side * side > kMaxCompositeImagePixels);
     auto doc = Document::createBlank(Size{static_cast<int>(side), static_cast<int>(side)});
     PE_CHECK(doc != nullptr);
-    PE_CHECK(doc->compositeImage().isEmpty());
+    PE_CHECK(doc->compositeImage().isEmpty());  // the one-shot flatten still refuses over the cap
 
-    for (const ImageFormat fmt :
-         {ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Tiff, ImageFormat::WebP}) {
-        // A codec not built into this binary also returns empty, which is the same
-        // contract, so this holds in every lane.
-        PE_CHECK(exportDocument(*doc, fmt).empty());
-    }
+#ifdef PHOTOEDIT_HAVE_PNG
+    PE_CHECK(!exportDocument(*doc, ImageFormat::Png).empty());  // streams
+#endif
+#ifdef PHOTOEDIT_HAVE_TIFF
+    PE_CHECK(!exportDocument(*doc, ImageFormat::Tiff).empty());  // streams
+#endif
+    // JPEG (TurboJPEG is one-shot) and WebP still flatten, so they return empty over the cap. A
+    // codec not built into this binary also returns empty, the same contract, so these hold in
+    // every lane.
+    PE_CHECK(exportDocument(*doc, ImageFormat::Jpeg).empty());
+    PE_CHECK(exportDocument(*doc, ImageFormat::WebP).empty());
 
-    // The native format serializes tiles directly and so has no such limit. It is the
-    // route out that the app's failure message points the user at.
+    // The native format serializes tiles directly and so never had this limit.
     PE_CHECK(!exportDocument(*doc, ImageFormat::Native).empty());
 }
 
@@ -384,14 +387,20 @@ PE_TEST(savedocument_reports_why_it_failed) {
     PE_CHECK(!saveDocument(*doc, (dir / "nope" / "a.pedoc").string(), &err));
     PE_CHECK(err == SaveError::CannotCreate);
 
-    // Over the composite cap every raster format fails, and the cause is the flatten
-    // limit rather than anything about the disk. The native format still succeeds, which
-    // is exactly what the message tells the user to do.
+    // Over the composite cap the flattening formats fail with the flatten limit rather than
+    // anything about the disk. JPEG is one such (TurboJPEG is one-shot); this holds whether or not
+    // the JPEG codec is built, since an over-cap flattening format cannot produce bytes either way.
     auto big = Document::createBlank(Size{9000, 9000});  // 81 MP, over the 64 MP cap
     PE_CHECK(big != nullptr);
     err = SaveError::None;
-    PE_CHECK(!saveDocument(*big, (dir / "big.png").string(), &err));
+    PE_CHECK(!saveDocument(*big, (dir / "big.jpg").string(), &err));
     PE_CHECK(err == SaveError::TooLargeToFlatten);
+    // PNG streams band by band (#165), so the same over-cap document saves rather than refusing.
+#ifdef PHOTOEDIT_HAVE_PNG
+    err = SaveError::UnsupportedFormat;  // deliberately dirty
+    PE_CHECK(saveDocument(*big, (dir / "big.png").string(), &err));
+    PE_CHECK(err == SaveError::None);
+#endif
     err = SaveError::UnsupportedFormat;  // deliberately dirty
     PE_CHECK(saveDocument(*big, (dir / "big.pedoc").string(), &err));
     PE_CHECK(err == SaveError::None);

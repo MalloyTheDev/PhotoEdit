@@ -5,6 +5,7 @@
 #include "pe/core/ImageIO.hpp"
 #include "pe/core/NativeFormat.hpp"
 #include "pe/core/PixelLayer.hpp"
+#include "pe/core/Tile.hpp"  // kTileSize (export band height)
 
 #include <algorithm>
 #include <cctype>
@@ -128,14 +129,35 @@ std::vector<std::byte> exportDocument(const Document& doc, ImageFormat fmt) {
     return exportDocument(doc, fmt, ExportOptions{});
 }
 
+namespace {
+// Rows per band for a streaming encode: enough that a band stays near a memory budget, rounded to
+// whole tile rows (a multiple of kTileSize) so a band maps onto whole tile rows and no tile is
+// composited twice. At least one tile row, so an extreme width still makes progress.
+constexpr std::int64_t kExportBandPixels = 8'000'000;  // ~32 MB of RGBA8 per band
+[[nodiscard]] [[maybe_unused]] int exportBandRows(int width) noexcept {
+    if (width <= 0) return kTileSize;
+    std::int64_t rows = (kExportBandPixels / width / kTileSize) * kTileSize;
+    if (rows < kTileSize) rows = kTileSize;
+    return static_cast<int>(rows);
+}
+}  // namespace
+
 std::vector<std::byte> exportDocument(const Document& doc, ImageFormat fmt,
                                       [[maybe_unused]] const ExportOptions& opts) {
+    // A band provider for the streaming raster encoders: composite just rows [y0, y0+rows) of the
+    // document, so the whole flattened image never exists at once (the fix for #165, exporting a
+    // document larger than the composite cap).
+    [[maybe_unused]] const int w = doc.canvasSize().width;
+    [[maybe_unused]] const int h = doc.canvasSize().height;
+    [[maybe_unused]] const auto band = [&doc, w](int y0, int rows) {
+        return compositeToImage(doc.topLevelLayers(), Rect{0, y0, w, rows});
+    };
     switch (fmt) {
         case ImageFormat::Native:
             return serializeDocument(doc);
 #ifdef PHOTOEDIT_HAVE_PNG
         case ImageFormat::Png:
-            return encodePng(doc.compositeImage());
+            return encodePngStreamed(w, h, exportBandRows(w), band);
 #endif
 #ifdef PHOTOEDIT_HAVE_JPEG
         case ImageFormat::Jpeg:
@@ -143,7 +165,7 @@ std::vector<std::byte> exportDocument(const Document& doc, ImageFormat fmt,
 #endif
 #ifdef PHOTOEDIT_HAVE_TIFF
         case ImageFormat::Tiff:
-            return encodeTiff(doc.compositeImage());
+            return encodeTiffStreamed(w, h, exportBandRows(w), band);
 #endif
 #ifdef PHOTOEDIT_HAVE_WEBP
         case ImageFormat::WebP:
@@ -245,7 +267,12 @@ bool saveDocument(const Document& doc, const std::string& path, const ExportOpti
             (canvas.width > kMaxWebpDimension || canvas.height > kMaxWebpDimension)) {
             return fail(SaveError::ExceedsFormatLimit);
         }
-        if (area > kMaxCompositeImagePixels) return fail(SaveError::TooLargeToFlatten);
+        // PNG and TIFF now stream band by band (#165), so they never fail merely for size; only
+        // the formats that still flatten the whole image hit this limit.
+        if ((fmt == ImageFormat::Jpeg || fmt == ImageFormat::WebP) &&
+            area > kMaxCompositeImagePixels) {
+            return fail(SaveError::TooLargeToFlatten);
+        }
         return fail(SaveError::CodecUnavailable);
     }
 

@@ -6,8 +6,11 @@
 
 #include <png.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <vector>
 
 namespace pe {
 
@@ -60,6 +63,56 @@ std::vector<std::byte> encodePng(const PixelBuffer& image) {
         return {};
     }
     out.resize(static_cast<std::size_t>(size));
+    return out;
+}
+
+namespace {
+// libpng write callback: append to the std::vector hung off the io ptr.
+void pngAppendToVector(png_structp png, png_bytep data, png_size_t len) {
+    auto* out = static_cast<std::vector<std::byte>*>(png_get_io_ptr(png));
+    const auto* p = reinterpret_cast<const std::byte*>(data);
+    out->insert(out->end(), p, p + len);
+}
+void pngNoopFlush(png_structp /*png*/) {}
+}  // namespace
+
+std::vector<std::byte> encodePngStreamed(int width, int height, int bandRows,
+                                         const std::function<PixelBuffer(int, int)>& band) {
+    if (width <= 0 || height <= 0 || bandRows <= 0) return {};
+    // The full write API (not the simplified one encodePng uses), because only png_write_row lets
+    // the image arrive a band at a time instead of as one buffer.
+    png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    if (png == nullptr) return {};
+    png_infop info = png_create_info_struct(png);
+    if (info == nullptr) {
+        png_destroy_write_struct(&png, nullptr);
+        return {};
+    }
+    std::vector<std::byte> out;
+    // libpng reports errors by longjmp'ing here; every path below then cleans up and returns empty.
+    if (setjmp(png_jmpbuf(png))) {
+        png_destroy_write_struct(&png, &info);
+        return {};
+    }
+    png_set_write_fn(png, &out, pngAppendToVector, pngNoopFlush);
+    png_set_IHDR(png, info, static_cast<png_uint_32>(width), static_cast<png_uint_32>(height), 8,
+                 PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
+                 PNG_FILTER_TYPE_DEFAULT);
+    png_write_info(png, info);
+    for (int y = 0; y < height; y += bandRows) {
+        const int rows = std::min(bandRows, height - y);
+        const PixelBuffer b = band(y, rows);
+        if (b.width() != width || b.height() != rows) {  // band provider failed
+            png_destroy_write_struct(&png, &info);
+            return {};
+        }
+        for (int r = 0; r < rows; ++r) {
+            png_write_row(png, reinterpret_cast<png_const_bytep>(
+                                   b.data() + static_cast<std::size_t>(r) * width));
+        }
+    }
+    png_write_end(png, info);
+    png_destroy_write_struct(&png, &info);
     return out;
 }
 

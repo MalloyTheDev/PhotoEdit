@@ -3,6 +3,7 @@
 #include "pe/core/PixelBuffer.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -23,6 +24,13 @@ class Document;
 // Decode the bytes of a PNG file to an 8-bit RGBA image. Returns nullopt on malformed
 // input or if the declared dimensions exceed the decode safety cap (untrusted input).
 [[nodiscard]] std::optional<PixelBuffer> decodePng(std::span<const std::byte> data);
+
+// Streaming PNG encode: write a `width` x `height` PNG pulling the image in horizontal bands of
+// `bandRows` rows, so the whole raster never exists at once (the export path for documents past the
+// composite cap). `band(y0, rows)` must return the RGBA8 pixels of rows [y0, y0+rows) as a
+// width x rows buffer. Empty on failure. Only built with libpng.
+[[nodiscard]] std::vector<std::byte> encodePngStreamed(
+    int width, int height, int bandRows, const std::function<PixelBuffer(int y0, int rows)>& band);
 
 // Encode an 8-bit RGBA image to the bytes of a JPEG file. JPEG is opaque, so the
 // alpha channel is dropped. `quality` is 1..100 (clamped). Empty on failure or for an
@@ -55,6 +63,11 @@ inline constexpr int kMaxWebpDimension = 16383;
 // Encode an 8-bit RGBA image to the bytes of a (lossless, LZW-compressed) TIFF file.
 // Empty on failure or for an empty image. Only built with libtiff (PHOTOEDIT_HAVE_TIFF).
 [[nodiscard]] std::vector<std::byte> encodeTiff(const PixelBuffer& image);
+
+// Streaming TIFF encode, the band-pulling sibling of encodeTiff (TIFF is strip-based, so this is
+// its natural shape). Same band contract as encodePngStreamed. Only built with libtiff.
+[[nodiscard]] std::vector<std::byte> encodeTiffStreamed(
+    int width, int height, int bandRows, const std::function<PixelBuffer(int y0, int rows)>& band);
 
 // Decode the bytes of a TIFF file to an 8-bit RGBA image (any layout/depth is
 // normalized to RGBA8 via libtiff's RGBA reader). Returns nullopt on malformed input

@@ -44,6 +44,7 @@ add_executable(pe_core_tests
     core/test_orient.cpp
     core/test_imagerotation.cpp
     core/test_bitdepth.cpp
+    core/test_exportstreaming.cpp
     core/test_resamplelayer.cpp
     core/test_resamplemask.cpp
     core/test_imagesize.cpp

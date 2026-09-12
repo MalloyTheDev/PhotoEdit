@@ -1,5 +1,8 @@
 #include "pe/core/ImageIO.hpp"
 
+#include <algorithm>
+#include <functional>
+
 #include <tiffio.h>
 
 #include <cstdint>
@@ -132,6 +135,45 @@ std::vector<std::byte> encodeTiff(const PixelBuffer& image) {
     }
     // Closed before `sink` is read: libtiff flushes its directory and any buffered strip on
     // close, so the bytes are not all there until it has run.
+    tif.reset();
+    if (!ok) return {};
+    return std::move(sink.data);
+}
+
+std::vector<std::byte> encodeTiffStreamed(int width, int height, int bandRows,
+                                          const std::function<PixelBuffer(int, int)>& band) {
+    if (width <= 0 || height <= 0 || bandRows <= 0) return {};
+
+    MemWriter sink;
+    TiffHandle tif(TIFFClientOpen("mem", "w", static_cast<thandle_t>(&sink), writeRead, writeWrite,
+                                  writeSeek, memClose, writeSize, memMap, memUnmap));
+    if (tif == nullptr) return {};
+
+    TIFFSetField(tif.get(), TIFFTAG_IMAGEWIDTH, static_cast<uint32_t>(width));
+    TIFFSetField(tif.get(), TIFFTAG_IMAGELENGTH, static_cast<uint32_t>(height));
+    TIFFSetField(tif.get(), TIFFTAG_SAMPLESPERPIXEL, 4);
+    TIFFSetField(tif.get(), TIFFTAG_BITSPERSAMPLE, 8);
+    TIFFSetField(tif.get(), TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+    TIFFSetField(tif.get(), TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+    TIFFSetField(tif.get(), TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
+    TIFFSetField(tif.get(), TIFFTAG_COMPRESSION, COMPRESSION_LZW);
+    const uint16_t extra[1] = {EXTRASAMPLE_UNASSALPHA};
+    TIFFSetField(tif.get(), TIFFTAG_EXTRASAMPLES, 1, extra);
+    TIFFSetField(tif.get(), TIFFTAG_ROWSPERSTRIP, TIFFDefaultStripSize(tif.get(), 0));
+
+    bool ok = true;
+    for (int y = 0; y < height && ok; y += bandRows) {
+        const int rows = std::min(bandRows, height - y);
+        const PixelBuffer b = band(y, rows);
+        if (b.width() != width || b.height() != rows) {
+            ok = false;
+            break;
+        }
+        for (int r = 0; r < rows && ok; ++r) {
+            auto* row = const_cast<Rgba8*>(b.data() + static_cast<std::size_t>(r) * width);
+            ok = TIFFWriteScanline(tif.get(), row, static_cast<uint32_t>(y + r), 0) >= 0;
+        }
+    }
     tif.reset();
     if (!ok) return {};
     return std::move(sink.data);
