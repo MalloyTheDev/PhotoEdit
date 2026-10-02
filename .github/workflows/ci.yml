@@ -26,7 +26,7 @@ jobs:
     name: Engine core (Linux, -Werror)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build liblcms2-dev libpng-dev libturbojpeg0-dev zlib1g-dev libtiff-dev libwebp-dev pkg-config clang-format
       - name: clang-format check (enforced)
@@ -58,7 +58,7 @@ jobs:
     name: Full app (Windows, MSVC + Qt6)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
       - name: Install Qt 6
@@ -100,7 +100,7 @@ jobs:
     name: Engine core (Linux, no optional deps)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install build tools only (no image/color/zlib libs)
         run: sudo apt-get update && sudo apt-get install -y ninja-build
       - name: Configure (force optional deps off, then verify none slipped in)
@@ -136,7 +136,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install tools + libs (so codec/color/Qt headers resolve)
         run: sudo apt-get update && sudo apt-get install -y ninja-build clang-tidy pkg-config liblcms2-dev libpng-dev libturbojpeg0-dev zlib1g-dev libtiff-dev libwebp-dev qt6-base-dev libqt6svg6-dev
       # The app is built here purely so src/app has a compile database. The engine-only
@@ -175,7 +175,7 @@ jobs:
     name: Shell under ASan/UBSan (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Qt6 and build tools
         run: |
           sudo apt-get update
