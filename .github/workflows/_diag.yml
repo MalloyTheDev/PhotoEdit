@@ -1,0 +1,14 @@
+name: diag
+
+on:
+  push:
+    branches: ["ccr-3f4e012a-w126b5"]
+  workflow_dispatch:
+
+jobs:
+  bare:
+    name: Bare job, no external actions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo only
+        run: echo "a runner picked this up"
