@@ -107,4 +107,19 @@ Full detail: [docs/03-roadmap-and-milestones.md](docs/03-roadmap-and-milestones.
 
 ## License
 
-TBD.
+PhotoEdit is free software, licensed under the **GNU General Public License,
+version 3 or later**. See [LICENSE](LICENSE) for the full text.
+
+In short: you may use, study, modify and redistribute it, and any derivative you
+distribute must also be GPLv3-or-later, so PhotoEdit cannot be taken closed.
+
+Qt is used under the **LGPLv3**, which obliges every binary we ship to link Qt
+dynamically, carry the Qt license texts, and make the corresponding Qt source
+available. The imaging and color libraries are permissive. See
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full picture and the
+per-release checklist.
+
+The copyright is held by a single author, so commercial licensing on separate
+terms remains available. Contributions are therefore accepted only under the
+agreement described in `CONTRIBUTING.md`; without it a contribution cannot be
+covered by those separate terms.
