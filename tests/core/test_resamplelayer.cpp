@@ -58,7 +58,7 @@ PE_TEST(resamplelayer_tiled_path_matches_the_contiguous_oracle) {
     // The load-bearing test. A canvas-filling layer resampled by the tile-streamed command must
     // agree pixel for pixel (bar 8-bit rounding) with the same source run through the contiguous
     // resampleImage over the source canvas -- or the tiling/banding is wrong.
-    for (const auto [dw, dh] : {std::pair{320, 200}, std::pair{100, 100}, std::pair{500, 300}}) {
+    for (const auto& [dw, dh] : {std::pair{320, 200}, std::pair{100, 100}, std::pair{500, 300}}) {
         auto doc = gradientDoc(200, 150);
         const LayerId id = doc->activeLayer();
         const std::vector<Rgbaf> srcBuf = readCanvas(*doc, id, 200, 150);
