@@ -202,6 +202,28 @@ PE_TEST(clipboard_paste_adds_one_undoable_layer_holding_the_clipboard_s_pixels) 
     PE_CHECK_EQ(w.document()->topLevelCount(), layersBefore);
 }
 
+PE_TEST(clipboard_paste_of_an_image_over_the_import_cap_is_refused_before_it_allocates) {
+    // A hostile or accidental giant clipboard image must be refused by dimension, under the same
+    // 64 MP ceiling every file decoder applies to an imported raster, rather than driving a
+    // multi-hundred-MB convert and copy first. The image is 1 bpp (Format_Mono) so the test
+    // itself stays cheap: the cap is checked on width*height, which is format-independent, before
+    // any RGBA conversion would blow it up.
+    pe::app::MainWindow w;
+    w.setDocument(docWith(pe::Rgba8{10, 20, 30, 255}), QString());
+    QImage huge(8001, 8001, QImage::Format_Mono);  // 64,016,001 px, just over the 64,000,000 cap
+    huge.fill(0);
+    putOnClipboard(huge);
+    w.clearRefusals();
+    const std::size_t undoBefore = w.document()->history().undoDepth();
+    const std::size_t layersBefore = w.document()->topLevelCount();
+
+    PE_REQUIRE(trigger(w, QStringLiteral("Paste")));
+
+    PE_CHECK(w.lastRefusalCode() == pe::RefusalCode::OverSizeBudget);
+    PE_CHECK_EQ(w.document()->history().undoDepth(), undoBefore);  // nothing was pasted
+    PE_CHECK_EQ(w.document()->topLevelCount(), layersBefore);
+}
+
 PE_TEST(clipboard_paste_with_nothing_on_the_clipboard_is_refused) {
     pe::app::MainWindow w;
     w.setDocument(docWith(pe::Rgba8{10, 20, 30, 255}), QString());

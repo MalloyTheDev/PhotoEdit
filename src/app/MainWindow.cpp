@@ -1949,7 +1949,22 @@ void MainWindow::pasteFromClipboard(bool into) {
                  QStringLiteral("Open a document first."))) {
         return;
     }
-    const pe::PixelBuffer pixels = toPixelBuffer(QGuiApplication::clipboard()->image());
+    const QImage clip = QGuiApplication::clipboard()->image();
+    // Cap by dimension BEFORE converting: toPixelBuffer allocates width*height*4 and
+    // layerFromBuffer allocates again, so a hostile or accidental giant clipboard image would
+    // commit hundreds of MB on the convert and copy before the per-layer budget could refuse it.
+    // Every file decoder caps an imported raster at kMaxCompositeImagePixels (64 MP); the
+    // clipboard is just another raster import and gets the same ceiling. int64 so the product
+    // cannot overflow for any QImage dimensions.
+    const qint64 clipPixels =
+        static_cast<qint64>(clip.width()) * static_cast<qint64>(clip.height());
+    if (refuseIf(clipPixels > pe::kMaxCompositeImagePixels, "edit.paste",
+                 pe::RefusalCode::OverSizeBudget, action,
+                 QStringLiteral("That clipboard image is too large to paste (over %1 megapixels).")
+                     .arg(pe::kMaxCompositeImagePixels / 1'000'000))) {
+        return;
+    }
+    const pe::PixelBuffer pixels = toPixelBuffer(clip);
     if (refuseIf(pixels.isEmpty(), "edit.paste", pe::RefusalCode::NoEffect, action,
                  QStringLiteral("The clipboard has no image in it."))) {
         return;
