@@ -177,6 +177,27 @@ on the source and never degrades document data. At fractional zoom the renderer
 samples cached tiles with bilinear (zoom-out uses mip levels of the display tiles
 to avoid shimmer).
 
+**Zoom-out as implemented (CPU).** The mip-level sampling above describes the
+eventual RHI path. Today `CanvasRenderer` serves a view that is zoomed out past
+what the display-tile LRU can hold from a separate **retained scaled composite**:
+one buffer covering a tile-aligned region, downscaled by a power of two that
+divides `kTileSize`, so every output pixel averages a block lying entirely inside
+one tile and no output pixel depends on two tiles. That alignment is what lets the
+buffer be patched rather than rebuilt, in two ways:
+
+- a document edit marks the affected tiles and only their blocks are rewritten, so
+  painting at a zoomed-out view costs the dabs rather than the viewport;
+- a **pan** keeps the scale and only moves the window, so the overlap with the
+  previous region is copied block-for-block and only the newly exposed tiles are
+  composited (#167). A one-tile pan step costs one tile column instead of the whole
+  visible span, measured at about 14x on an 8192 square document.
+
+A zoom still rebuilds, because a new scale changes what every block means. The
+first composite of a region is still O(visible tiles): an exact zoomed-out result
+has to composite each tile at full resolution at least once, since compositing
+downsampled layer data is not equal to downsampling the composite once alpha
+varies within a block.
+
 **Zoom about a focal point.** To keep the pixel under the cursor stationary while
 zooming, we hold `focusDocPx` pinned under `focusViewPx` and only change `zoom`:
 

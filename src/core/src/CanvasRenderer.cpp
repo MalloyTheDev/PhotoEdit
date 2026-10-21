@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>  // memcpy (reusing the overlapping blocks of the scaled cache on a pan)
 
 namespace pe {
 
@@ -236,15 +237,60 @@ const PixelBuffer& CanvasRenderer::renderRegionScaledCached(Rect docRegion, int 
     const bool sameShape =
         scaledValid_ && scaledRegion_ == aligned && scaledScale_ == s && scaledCap_ == cap;
     if (!sameShape) {
-        // Shape changed (pan, zoom, resize, first paint): rebuild every tile once.
+        // Shape changed: pan, zoom, resize or first paint. A PAN moves the window without
+        // changing the zoom, so nearly everything the new region needs is already
+        // composited in the buffer about to be replaced. Copy that overlap and composite
+        // only the newly exposed tiles, instead of pushing the whole visible span back
+        // through the layer stack on every pan step (#167).
+        //
+        // Exact, not an approximation: both regions are tile-aligned and `s` divides
+        // kTileSize, so each tile owns a whole block of output pixels (see
+        // scaledFactorFor) and the overlap therefore lands on block boundaries. Reuse is
+        // only legitimate while the scale and the cap are unchanged; a zoom re-derives `s`
+        // and every block changes meaning, so that still rebuilds from scratch.
+        const bool canReuse = scaledValid_ && scaledScale_ == s && scaledCap_ == cap;
+        const Rect reuse = canReuse ? scaledRegion_.intersected(aligned) : Rect{};
+        PixelBuffer oldCache;
+        Rect oldRegion{};
+        // Tiles marked stale while they sat in the old buffer. The bytes about to be copied
+        // are out of date for those, so they are recomposited below rather than trusted.
+        std::set<Key> carried;
+        if (!reuse.isEmpty()) {
+            oldCache = std::move(scaledCache_);
+            oldRegion = scaledRegion_;
+            carried.swap(scaledDirty_);
+        }
+
         scaledRegion_ = aligned;
         scaledScale_ = s;
         scaledCap_ = static_cast<int>(cap);
         scaledCache_ = PixelBuffer(aligned.width / s, aligned.height / s, Rgba8{});
         scaledDirty_.clear();
         scaledValid_ = true;
+
+        TileSpan reuseSpan{};  // all-zero when there is nothing to reuse, so `copied` is false
+        if (!reuse.isEmpty()) {
+            reuseSpan = tilesForRect(reuse);
+            const int srcX = (reuse.x - oldRegion.x) / s;
+            const int srcY = (reuse.y - oldRegion.y) / s;
+            const int dstX = (reuse.x - aligned.x) / s;
+            const int dstY = (reuse.y - aligned.y) / s;
+            const int w = reuse.width / s;
+            const int h = reuse.height / s;
+            for (int y = 0; y < h; ++y) {
+                const Rgba8* src =
+                    oldCache.data() + static_cast<std::size_t>(srcY + y) * oldCache.width() + srcX;
+                Rgba8* dst = scaledCache_.data() +
+                             static_cast<std::size_t>(dstY + y) * scaledCache_.width() + dstX;
+                std::memcpy(dst, src, static_cast<std::size_t>(w) * sizeof(Rgba8));
+            }
+        }
+
         for (int row = span.rowBegin; row < span.rowEnd; ++row) {
             for (int col = span.colBegin; col < span.colEnd; ++col) {
+                const bool copied = row >= reuseSpan.rowBegin && row < reuseSpan.rowEnd &&
+                                    col >= reuseSpan.colBegin && col < reuseSpan.colEnd;
+                if (copied && carried.count(keyOf(TileCoord{col, row})) == 0) continue;
                 writeScaledTile(TileCoord{col, row});
             }
         }

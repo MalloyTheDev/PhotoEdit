@@ -361,8 +361,10 @@ PE_TEST(scaledcache_repaints_only_the_tiles_that_changed) {
 }
 
 PE_TEST(scaledcache_rebuilds_when_the_region_or_scale_moves) {
-    // Panning or zooming changes the shape, and a buffer built for one shape cannot be
-    // patched into another. It has to rebuild rather than return the wrong pixels.
+    // Panning or zooming changes the shape. A pan is now patched from the overlapping
+    // blocks of the previous buffer rather than rebuilt (#167) and a zoom still rebuilds,
+    // but either way the pixels must be the ones a cold build of the new shape produces.
+    // This pins that: whatever the mechanism, it may not return the wrong pixels.
     auto doc = tiledDoc(4, 3);
     const Rect a{0, 0, 4 * kTileSize, 3 * kTileSize};
     const Rect b{kTileSize, 0, 3 * kTileSize, 3 * kTileSize};
@@ -378,6 +380,63 @@ PE_TEST(scaledcache_rebuilds_when_the_region_or_scale_moves) {
     const PixelBuffer freshB = fresh.renderRegionScaledCached(b, 4096, cov2);
     PE_CHECK(cov == cov2);
     PE_CHECK(sameBuffer(second, freshB));
+}
+
+PE_TEST(scaledcache_a_pan_composites_only_the_newly_exposed_tiles) {
+    // The cost criterion from #167: dragging a zoomed-out view used to push the whole
+    // visible span back through the layer stack on every pan step, because the retained
+    // buffer is keyed on the region. A one-tile pan exposes one tile column, so that is
+    // all it may composite; the rest is copied out of the previous buffer.
+    auto doc = tiledDoc(6, 4);
+    const Rect a{0, 0, 4 * kTileSize, 4 * kTileSize};          // 4 x 4 == 16 tiles
+    const Rect b{kTileSize, 0, 4 * kTileSize, 4 * kTileSize};  // same shape, panned one tile
+    CanvasRenderer r(*doc);
+    Rect cov{};
+
+    (void)r.renderRegionScaledCached(a, 4096, cov);
+    const uint64_t afterCold = r.recompositeCount();
+    PE_CHECK_EQ(static_cast<int>(afterCold), 16);  // cold pays for every visible tile, once
+
+    const PixelBuffer& panned = r.renderRegionScaledCached(b, 4096, cov);
+    const uint64_t panCost = r.recompositeCount() - afterCold;
+    // Four tiles, the newly exposed column, NOT the 16 a rebuild would have cost.
+    PE_CHECK_EQ(static_cast<int>(panCost), 4);
+
+    // And reuse may not change the result: identical to a cold build of the same region.
+    CanvasRenderer fresh(*doc);
+    Rect cov2{};
+    const PixelBuffer& coldB = fresh.renderRegionScaledCached(b, 4096, cov2);
+    PE_CHECK(cov == cov2);
+    PE_CHECK(sameBuffer(panned, coldB));
+}
+
+PE_TEST(scaledcache_a_pan_refreshes_a_changed_tile_inside_the_reused_overlap) {
+    // The staleness trap the block reuse opens. A tile marked dirty before the pan sits
+    // inside the overlap, so its bytes would be copied forward unless the pending marks
+    // are carried across the reshape and recomposited. Before the reuse existed every pan
+    // rebuilt, which hid this entirely.
+    auto doc = tiledDoc(6, 4);
+    auto* pl = static_cast<PixelLayer*>(doc->findLayer(doc->activeLayer()));
+    const Rect a{0, 0, 4 * kTileSize, 4 * kTileSize};
+    const Rect b{kTileSize, 0, 4 * kTileSize, 4 * kTileSize};
+    CanvasRenderer r(*doc);
+    Rect cov{};
+    (void)r.renderRegionScaledCached(a, 4096, cov);
+
+    // Tile (2,1) is inside both regions, so the pan will want to copy it rather than
+    // composite it. Change it and mark it, then pan WITHOUT re-rendering region a, so the
+    // mark is still pending when the reshape happens.
+    const Rect changed{2 * kTileSize, 1 * kTileSize, kTileSize, kTileSize};
+    pl->tiles().fillRect(changed, Rgba8{250, 5, 5, 255});
+    r.invalidate(changed);
+
+    const PixelBuffer& panned = r.renderRegionScaledCached(b, 4096, cov);
+
+    CanvasRenderer fresh(*doc);
+    Rect cov2{};
+    const PixelBuffer& coldB = fresh.renderRegionScaledCached(b, 4096, cov2);
+    PE_CHECK(cov == cov2);
+    PE_CHECK(sameBuffer(panned, coldB));  // the new red tile, not the stale copied block
 }
 
 PE_TEST(scaledcache_is_dropped_by_a_whole_document_invalidation) {
