@@ -442,6 +442,11 @@ PE_TEST(scaledcache_matches_a_box_average_of_the_full_resolution_composite) {
                                   static_cast<int>(std::lround(sr / sa * 255.0))) <= 1);
                 PE_CHECK(std::abs(static_cast<int>(got.g) -
                                   static_cast<int>(std::lround(sg / sa * 255.0))) <= 1);
+                // Blue was accumulated and then never asserted, so a blue-only error in the
+                // scaled composite passed a test whose whole point is exactness. clang's
+                // -Wunused-but-set-variable caught it once the clang gate built again (#197).
+                PE_CHECK(std::abs(static_cast<int>(got.b) -
+                                  static_cast<int>(std::lround(sb / sa * 255.0))) <= 1);
             }
         }
     }

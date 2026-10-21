@@ -54,17 +54,46 @@ raw/text/etc. as those milestones arrive. This keeps CI fast and the graph hones
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs two lanes on every push/PR:
+`.github/workflows/ci.yml` runs five lanes on every push/PR:
 
-1. **`core-linux`** — configures `linux-core-dev`, builds, runs `ctest`. Fast,
-   `-Werror`, no Qt/GPU/display. **This is the merge gate.**
-2. **`app-windows`** — sets up MSVC + Qt6 (aqtinstall), builds the full app +
+1. **`core-linux`**: configures `linux-core-dev`, builds, runs `ctest`, then
+   rebuilds under ASan/UBSan and reruns. Also enforces the `clang-format` check.
+   Fast, `-Werror`, no Qt/GPU/display. **This is the merge gate.**
+2. **`app-windows`**: sets up MSVC + Qt6 (aqtinstall), builds the full app +
    tests, runs `ctest`. Validates the primary platform.
+3. **`core-linux-nodeps`**: forces every optional library off and verifies none
+   slipped back in, so the dependency-free build stays buildable.
+4. **`tidy-linux`**: `clang-tidy` over the engine and the shell, advisory.
+5. **`asan-app-linux`**: the Qt shell under ASan/UBSan. The sanitizer step in
+   `core-linux` builds with the app OFF, so this is the only lane that sanitizes
+   `src/app`, which is where the Qt ownership and observer-lifetime coupling lives.
 
 Planned additions as the codebase grows:
-- A **sanitizer lane** (ASan/UBSan) on the core.
-- A **clang-format check** and a **clang-tidy** lane.
 - **Golden-image** comparison artifacts uploaded on failure.
+- A **fuzzing** lane over the file decoders (#201).
+
+## Local gates on Windows
+
+The local build directories are a convenience, not a replacement for CI, and two of
+them have toolchain limits worth knowing before trusting a green run:
+
+- **`build/mingw`** (MSYS2 g++, `-Werror`, all optional libs) is the dependable local
+  gate: it builds the engine, the app and both test binaries. Use it to verify
+  anything codec- or lcms2-guarded, since the dependency-free lanes compile those out.
+- **`build/core`** (LLVM clang targeting the MSVC STL, `-Werror`, no optional libs)
+  catches warnings g++ does not. `-Wunused-but-set-variable` is a real example: clang
+  reports an accumulator that is written and never read, g++ does not, and that is how
+  a never-asserted blue channel sat in a renderer exactness test (#197).
+- **`build/asan`** (clang + ASan/UBSan) **builds but cannot run the suite on Windows.**
+  clang's ASan and the MSVC `vcruntime` disagree about exception unwinding: any C++
+  rethrow aborts inside `__FrameHandler3::GetUnwindTryBlock` at `-O1` and above, and
+  dies silently at `-O0`. `pe::History::push` catches, notifies and rethrows, so the
+  first test that pushes a command takes the process down. This is upstream, not ours,
+  and `asan-app-linux` plus `core-linux`'s sanitizer step are the real ASan coverage.
+
+Both clang lanes additionally need the STL's vectorized algorithms switched off; the
+root `CMakeLists.txt` does that automatically for a Clang compiler whose `SIMULATE_ID`
+is MSVC, and explains why.
 
 ## Formatting & static analysis
 

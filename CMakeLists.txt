@@ -41,6 +41,33 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# clang against the MSVC STL: turn off the STL's vectorized algorithms (#197)
+#
+# MSVC STL 14.51 admits a type into the vectorized std::find path when the
+# compiler builtin behind _Is_same_and_builtin_trivially_equality_comparable says
+# the type is trivially equality comparable, but _Find_vectorized only implements
+# a size dispatch for 1, 2, 4 and 8 byte elements. clang answers that builtin
+# `true` for a larger trivially-comparable aggregate where cl.exe does not, so a
+# std::find over one lands in the dispatch's else branch and hits
+# `static_assert(false, "unexpected size")`. pe::OutlineSegment (two Points, 16
+# bytes, defaulted operator==) is exactly that shape, and it took out the whole
+# test binary in both clang lanes: the engine library compiled, the tests did not.
+#
+# _USE_STD_VECTOR_ALGORITHMS is the STL's own opt-out (it honours a user-provided
+# value, see xutility), so this selects the scalar implementations rather than
+# patching around the upstream defect at each call site. Scalar std::find is
+# correct, and nothing here is in a measured hot path.
+#
+# Scoped deliberately: Clang + a SIMULATE_ID of MSVC is only true when clang is
+# targeting the MSVC STL, which is the broken configuration. mingw/GCC, clang
+# against libstdc++/libc++ on the CI Linux lanes, and cl.exe itself all keep the
+# vectorized algorithms, since none of them reproduce this.
+# ---------------------------------------------------------------------------
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+    add_compile_definitions(_USE_STD_VECTOR_ALGORITHMS=0)
+endif()
+
+# ---------------------------------------------------------------------------
 # Subprojects
 #
 # The dependency direction is strictly one-way:
